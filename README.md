@@ -42,3 +42,4 @@ The output files are named:
 ```text
 {count}_{speed}_{orientation}_{frame:04d}.jpg
 ```
+# sacramento_model
