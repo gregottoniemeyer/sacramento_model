@@ -42,4 +42,28 @@ The output files are named:
 ```text
 {count}_{speed}_{orientation}_{frame:04d}.jpg
 ```
+
+## Ring Frames
+
+Render 64 transparent PNG frames of emanating black/white rings:
+
+```bash
+python3 render_rings.py
+```
+
+Defaults:
+
+- `1024x1024`
+- `--ring 128`
+- `--frames 64`
+- `--color #ffffff`
+- `--altcolor #000000`
+- `--outdir img/rings`
+- transparent outside the inscribed circle, so rings stop at the image edge and vanish inward
+
+The output files are named:
+
+```text
+ring_0001.png
+```
 # sacramento_model
