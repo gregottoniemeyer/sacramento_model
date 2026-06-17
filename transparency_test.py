@@ -29,6 +29,7 @@ from Quartz import (  # type: ignore
     CGContextSetRGBFillColor,
     CGContextSetRGBStrokeColor,
     CGContextSetShouldAntialias,
+    CGContextStrokeEllipseInRect,
     CGContextStrokePath,
     CGContextTranslateCTM,
     CGRectMake,
@@ -42,32 +43,41 @@ from Quartz import (  # type: ignore
 )
 
 
-WIDTH = 1080
-HEIGHT = 1920
+WIDTH = 1080 #1800
+HEIGHT = 1920 #2400
 OUTPUT = Path("img/alpha_test.png")
 DODGER_BLUE = (30, 144, 255, 255)
 WHITE = (255, 255, 255, 255)
 BLACK = (0, 0, 0, 255)
-CHEVRON_ROWS = 6
-CHEVRON_RISE = 0.72
+CHEVRON_ROWS = 16
+CHEVRON_RISE = 1.2 #1.5
 CHEVRON_TOUCH_OVERLAP = 1.02
+CHEVRON_OFFSET = 0.5
+CHEVRON_OVERDRAW_TOP = 1
+RING_WIDTH_SCALE = 0.9
+RING_POOL_DIAMETER_SCALE = 4 / 3
+RING_POOL_CENTER_OFFSET_SCALE = 2/5#2.3 / 5
 
 
 def mask_polygon(width: int, height: int) -> list[tuple[float, float]]:
     return [
-        (width * 0.25, 0),
-        (width * 0.75, 0),
-        (width, height),
-        (0, height),
+        (width / 3, 0),
+        (width * 2 / 3, 0),
+        (width * 3 / 4, height),
+        (width / 4, height),
     ]
+
+
+def chevron_stroke_width(height: int) -> float:
+    return height / CHEVRON_ROWS * CHEVRON_TOUCH_OVERLAP
 
 
 def chevron_paths(width: int, height: int) -> list[tuple[tuple[int, int, int, int], list[tuple[float, float]]]]:
     paths = []
     pitch = height / CHEVRON_ROWS
-    stroke_width = pitch * CHEVRON_TOUCH_OVERLAP
-    y = -pitch * 0.65
-    index = 0
+    stroke_width = chevron_stroke_width(height)
+    y = -pitch * 0.65 + pitch * CHEVRON_OFFSET - pitch * CHEVRON_OVERDRAW_TOP
+    index = 1
 
     while y < height + pitch:
         points = [
@@ -81,6 +91,39 @@ def chevron_paths(width: int, height: int) -> list[tuple[tuple[int, int, int, in
         index += 1
 
     return paths
+
+
+def draw_ring_pool(context) -> None:
+    ring_width = chevron_stroke_width(HEIGHT) * RING_WIDTH_SCALE
+    max_diameter = WIDTH * RING_POOL_DIAMETER_SCALE
+    center_x = WIDTH / 2
+    center_y = HEIGHT + WIDTH * RING_POOL_CENTER_OFFSET_SCALE
+    radius = ring_width / 2
+    index = 0
+
+    CGContextSetLineWidth(context, ring_width)
+    CGContextSetLineCap(context, kCGLineCapButt)
+
+    while radius <= max_diameter / 2 + ring_width:
+        color = WHITE if index % 2 == 0 else BLACK
+        CGContextSetRGBStrokeColor(
+            context,
+            color[0] / 255,
+            color[1] / 255,
+            color[2] / 255,
+            color[3] / 255,
+        )
+        CGContextStrokeEllipseInRect(
+            context,
+            CGRectMake(
+                center_x - radius,
+                center_y - radius,
+                radius * 2,
+                radius * 2,
+            ),
+        )
+        radius += ring_width
+        index += 1
 
 
 def render(path: Path) -> None:
@@ -117,7 +160,7 @@ def render(path: Path) -> None:
     CGContextSetLineJoin(context, kCGLineJoinMiter)
     CGContextSetLineCap(context, kCGLineCapButt)
     CGContextSetMiterLimit(context, 20)
-    CGContextSetLineWidth(context, HEIGHT / CHEVRON_ROWS * CHEVRON_TOUCH_OVERLAP)
+    CGContextSetLineWidth(context, chevron_stroke_width(HEIGHT))
 
     for color, points in chevron_paths(WIDTH, HEIGHT):
         CGContextSetRGBStrokeColor(
@@ -134,6 +177,7 @@ def render(path: Path) -> None:
         CGContextStrokePath(context)
 
     CGContextRestoreGState(context)
+    draw_ring_pool(context)
 
     cg_image = CGBitmapContextCreateImage(context)
     width = CGImageGetWidth(cg_image)
