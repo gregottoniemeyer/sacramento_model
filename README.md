@@ -45,7 +45,7 @@ The output files are named:
 
 ## Ring Frames
 
-Render 64 transparent PNG frames of emanating black/white rings:
+Render 256 transparent PNG frames of emanating black/white rings:
 
 ```bash
 python3 render_rings.py
@@ -55,7 +55,7 @@ Defaults:
 
 - `1024x1024`
 - `--ring 128`
-- `--frames 64`
+- `--frames 256`
 - `--color #ffffff`
 - `--altcolor #000000`
 - `--outdir img/rings`

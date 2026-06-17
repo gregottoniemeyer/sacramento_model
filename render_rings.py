@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--altcolor", type=parse_color, default="#000000")
     parser.add_argument("--ring", type=positive_int, default=128)
     parser.add_argument("--size", type=positive_int, default=1024)
-    parser.add_argument("--frames", type=positive_int, default=64)
+    parser.add_argument("--frames", type=positive_int, default=256)
     parser.add_argument("--outdir", type=Path, default=Path("img/rings"))
     parser.add_argument("--prefix", default="ring")
     parser.add_argument(
