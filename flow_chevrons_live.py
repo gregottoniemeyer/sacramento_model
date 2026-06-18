@@ -2,7 +2,7 @@
 """
 Real-time live chevron renderer for the Sacramento Model.
 Based directly on Greg's transparency_test.py drawing approach:
-- Stroked lines for chevrons (not filled polygons) -- crisp edges
+- Stroked lines for chevrons (not filled polygons) crisp edges
 - Clipping mask for river channel shape
 - Stroked ellipses for ring pool at bottom
 - Live NSWindow + NSTimer instead of saving to PNG
@@ -75,9 +75,7 @@ from Quartz import (
     kCGLineJoinMiter,
 )
 
-# ---------------------------------------------------------------------------
-# Drawing parameters -- mirrors Greg's transparency_test.py constants
-# ---------------------------------------------------------------------------
+# Drawing parameters: mirrors the transparency_test.py constants
 
 WINDOW_WIDTH = 1080
 WINDOW_HEIGHT = 1920
@@ -96,10 +94,7 @@ WHITE = (1.0, 1.0, 1.0, 1.0)
 BLACK = (0.0, 0.0, 0.0, 1.0)
 BG = (30 / 255, 144 / 255, 1.0, 1.0)  # Dodger blue background
 
-
-# ---------------------------------------------------------------------------
-# Drawing helpers (Greg's approach: stroked lines + clip mask)
-# ---------------------------------------------------------------------------
+# Drawing helpers (Prof's approach: stroked lines + clip mask)
 
 
 def chevron_stroke_width(height: float) -> float:
@@ -206,9 +201,7 @@ def draw_ring_pool(
     CGContextRestoreGState(ctx)
 
 
-# ---------------------------------------------------------------------------
 # NSView subclass
-# ---------------------------------------------------------------------------
 
 
 class ChevronView(NSView):
@@ -288,11 +281,11 @@ class ChevronView(NSView):
         w = bounds.size.width
         h = bounds.size.height
 
-        # Match Greg's coordinate system: flip Y so 0,0 is top-left
+        # Match the coordinate system: flip Y so 0,0 is top-left
         CGContextTranslateCTM(ctx, 0, h)
         CGContextScaleCTM(ctx, 1, -1)
 
-        # Anti-aliasing on -- Greg uses True in his file, gives smooth strokes
+        # Anti-aliasing on, gives smooth strokes
         CGContextSetShouldAntialias(ctx, True)
         CGContextSetAllowsAntialiasing(ctx, True)
         CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh)
@@ -304,13 +297,11 @@ class ChevronView(NSView):
         # Chevrons (animated)
         draw_chevrons(ctx, w, h, self.offset)
 
-        # Ring pool -- alpha-composited over chevrons, animated inward
+        # Ring pool: alpha-composited over chevrons, animated inward
         draw_ring_pool(ctx, w, h, alpha=self.ring_alpha, ring_offset=self.ring_offset)
 
 
-# ---------------------------------------------------------------------------
 # App entry point
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:
