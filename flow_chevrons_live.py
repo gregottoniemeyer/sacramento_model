@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Real-time live chevron renderer for the Sacramento Model.
-Based directly on Greg's transparency_test.py drawing approach:
+Based directly on transparency_test.py drawing approach:
 - Stroked lines for chevrons (not filled polygons) crisp edges
 - Clipping mask for river channel shape
 - Stroked ellipses for ring pool at bottom
@@ -26,8 +26,6 @@ RUN
 
 from __future__ import annotations
 
-import math
-
 import objc
 import Quartz
 from AppKit import (
@@ -43,9 +41,6 @@ from AppKit import (
 )
 from Foundation import NSMakeRect
 from Quartz import (
-    CGBitmapContextCreate,
-    CGBitmapContextCreateImage,
-    CGColorSpaceCreateDeviceRGB,
     CGContextAddLineToPoint,
     CGContextBeginPath,
     CGContextClip,
@@ -69,10 +64,6 @@ from Quartz import (
     CGContextStrokePath,
     CGContextTranslateCTM,
     CGRectMake,
-    kCGImageAlphaPremultipliedLast,
-    kCGInterpolationHigh,
-    kCGLineCapButt,
-    kCGLineJoinMiter,
 )
 
 # Drawing parameters: mirrors the transparency_test.py constants
