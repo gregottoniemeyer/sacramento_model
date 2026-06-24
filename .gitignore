@@ -1,3 +1,8 @@
 # Godot 4+ specific ignores
 .godot/
 /android/
+
+# Local OS/editor/export artifacts
+.DS_Store
+*.dmg
+*.pck

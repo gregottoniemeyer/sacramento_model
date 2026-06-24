@@ -1,0 +1,68 @@
+[gd_scene format=3 uid="uid://d3sr5qka4yx25"]
+
+[ext_resource type="Script" uid="uid://daf0oc0p8ok8p" path="res://background.gd" id="1_81gpv"]
+[ext_resource type="Shader" uid="uid://btogrje2uo8el" path="res://chevron.gdshader" id="2_ebevh"]
+[ext_resource type="Script" uid="uid://b2eeethv4lvpq" path="res://color_rect.gd" id="3_pf5ls"]
+[ext_resource type="Script" uid="uid://cu46pcwquevke" path="res://color_rect_2.gd" id="4_b5028"]
+
+[sub_resource type="Gradient" id="Gradient_i1wwn"]
+colors = PackedColorArray(1, 1, 1, 1, 0, 0, 0, 1)
+
+[sub_resource type="GradientTexture1D" id="GradientTexture1D_i1wwn"]
+gradient = SubResource("Gradient_i1wwn")
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_ii4ml"]
+shader = ExtResource("2_ebevh")
+shader_parameter/rect_size_px = Vector2(1080, 960)
+shader_parameter/chevron_height_px = 240.0
+shader_parameter/stroke_width_px = 80.0
+shader_parameter/speed_px = 50.0
+shader_parameter/pattern_offset_px = Vector2(0, 0)
+shader_parameter/custom_time = 0.0
+shader_parameter/mask_texture = SubResource("GradientTexture1D_i1wwn")
+
+[sub_resource type="Gradient" id="Gradient_lk3y4"]
+metadata/_snap_enabled = true
+
+[sub_resource type="GradientTexture1D" id="GradientTexture1D_lk3y4"]
+gradient = SubResource("Gradient_lk3y4")
+width = 1080
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_w12x5"]
+shader = ExtResource("2_ebevh")
+shader_parameter/rect_size_px = Vector2(540, 960)
+shader_parameter/chevron_height_px = 240.0
+shader_parameter/stroke_width_px = 80.0
+shader_parameter/speed_px = 100.0
+shader_parameter/pattern_offset_px = Vector2(0, 0)
+shader_parameter/custom_time = 0.0
+shader_parameter/mask_texture = SubResource("GradientTexture1D_lk3y4")
+
+[node name="Sprite2D" type="Sprite2D" unique_id=469995563]
+
+[node name="background" type="ColorRect" parent="." unique_id=749467701]
+offset_left = -960.0
+offset_top = -540.0
+offset_right = 960.0
+offset_bottom = 540.0
+color = Color(0.94509804, 0.29803923, 0.22352941, 1)
+script = ExtResource("1_81gpv")
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=1703816089]
+
+[node name="ColorRect_Slow" type="ColorRect" parent="." unique_id=88048900]
+material = SubResource("ShaderMaterial_ii4ml")
+offset_top = -540.0
+offset_right = 1080.0
+offset_bottom = 420.0
+rotation = 1.5712224
+script = ExtResource("3_pf5ls")
+
+[node name="ColorRect_Fast" type="ColorRect" parent="." unique_id=297699647]
+material = SubResource("ShaderMaterial_w12x5")
+offset_left = 959.0
+offset_top = -270.0
+offset_right = 1499.0
+offset_bottom = 690.0
+rotation = 1.5707964
+script = ExtResource("4_b5028")
