@@ -11,7 +11,7 @@ var transition_elapsed: float = SPEED_TRANSITION_SECONDS
 func _ready():
 	_update_shader_size()
 	if material:
-		current_speed_px = float(material.get_shader_parameter("speed_px"))
+		current_speed_px = float(material.get_shader_parameter("animation_speed_px"))
 		start_speed_px = current_speed_px
 		target_speed_px = current_speed_px
 
@@ -42,7 +42,7 @@ func _set_target_speed(speed_px: float):
 	start_speed_px = current_speed_px
 	target_speed_px = speed_px
 	transition_elapsed = 0.0
-	material.set_shader_parameter("speed_px", target_speed_px)
+	material.set_shader_parameter("animation_speed_px", target_speed_px)
 
 func _update_interpolated_speed(delta: float):
 	if transition_elapsed >= SPEED_TRANSITION_SECONDS:

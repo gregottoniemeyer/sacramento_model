@@ -11,9 +11,9 @@ config_version=5
 [application]
 
 config/name="Sacramento Model Test"
-run/main_scene="uid://d3sr5qka4yx25"
+run/main_scene="uid://c17nsg0xiw0um"
 config/features=PackedStringArray("4.7", "Forward Plus")
-config/icon="res://icon.svg"
+config/icon="res://img/icon.svg"
 
 [display]
 
