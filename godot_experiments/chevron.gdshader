@@ -7,6 +7,7 @@ uniform float chevron_amplitude_px = 240.0;
 uniform float speed_px = 6.0;
 uniform vec2 pattern_offset_px = vec2(0.0, 0.0);
 uniform float animation_offset_px = 0.0;
+uniform float antialias_px = 1.25;
 uniform int mask_mode = 0;
 uniform bool invert_mask = false;
 uniform sampler2D mask_texture;
@@ -29,8 +30,12 @@ void fragment() {
 	float chevron_phase_px = px.y - chevron_profile_px;
 	float chevron_slope = amplitude_px / half_peak_distance_px;
 	float distance_to_chevron_px = chevron_phase_px / sqrt(1.0 + chevron_slope * chevron_slope);
-	float stripe_index = floor(distance_to_chevron_px / max(stroke_width_px, 1.0));
-	float chevron = 1.0 - mod(stripe_index, 2.0);
+	float width_px = max(stroke_width_px, 1.0);
+	float stripe_phase = mod(distance_to_chevron_px, width_px * 2.0);
+	float stripe_aa_px = max(fwidth(distance_to_chevron_px) * antialias_px, 0.001);
+	float first_edge = smoothstep(width_px - stripe_aa_px, width_px + stripe_aa_px, stripe_phase);
+	float second_edge = smoothstep((width_px * 2.0) - stripe_aa_px, width_px * 2.0, stripe_phase);
+	float chevron = 1.0 - (first_edge * (1.0 - second_edge));
 
 	// Read the sprite's original alpha and the mask.
 	vec4 sprite_color = texture(TEXTURE, original_uv);
