@@ -1,6 +1,6 @@
 extends Node
 
-@export var csv_path: String = "res://speed_sequence.csv"
+@export var csv_path: String = "res://speed_sequence.txt"
 @export var interval_seconds: float = 5.0
 @export var speed_multiplier: float = 20.0
 

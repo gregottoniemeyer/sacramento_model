@@ -5,7 +5,7 @@
 [ext_resource type="Script" uid="uid://b2eeethv4lvpq" path="res://color_rect.gd" id="2_diu5s"]
 [ext_resource type="Texture2D" uid="uid://hedx1jhvub4m" path="res://img/1920w/mapArtboard 1white.png" id="2_ltq2a"]
 [ext_resource type="Script" uid="uid://den35fujr5y84" path="res://disk_rings.gd" id="3_lk5bn"]
-[ext_resource type="Script" uid="uid://bu7l1tjjsw2he" path="res://governator.gd" id="4_sg8i2"]
+[ext_resource type="Script" path="res://governator.gd" id="4_sg8i2"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_tgx4x"]
 shader = ExtResource("1_rrn4g")
