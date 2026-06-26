@@ -5,6 +5,7 @@
 [ext_resource type="Script" uid="uid://b2eeethv4lvpq" path="res://color_rect.gd" id="2_diu5s"]
 [ext_resource type="Texture2D" uid="uid://hedx1jhvub4m" path="res://img/1920w/mapArtboard 1white.png" id="2_ltq2a"]
 [ext_resource type="Script" uid="uid://den35fujr5y84" path="res://disk_rings.gd" id="3_lk5bn"]
+[ext_resource type="Script" uid="uid://bu7l1tjjsw2he" path="res://governator.gd" id="4_sg8i2"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_tgx4x"]
 shader = ExtResource("1_rrn4g")
@@ -27,7 +28,7 @@ shader_parameter/ring_width_px = 80.0
 shader_parameter/black_ring_color = Color(0, 0, 0, 1)
 shader_parameter/white_ring_color = Color(1, 1, 1, 1)
 shader_parameter/animation_speed_px = 10.0
-shader_parameter/animate_inner_to_outer = true
+shader_parameter/animate_inner_to_outer = false
 shader_parameter/animation_offset_px = 0.0
 shader_parameter/antialias_px = 1.25
 
@@ -38,7 +39,7 @@ offset_right = 1930.0
 offset_bottom = 1080.0
 color = Color(1, 0.33333334, 0.25882354, 1)
 
-[node name="ColorRect_Slow_Masked" type="ColorRect" parent="." unique_id=1020326297]
+[node name="ColorRect_Slow_Masked" type="ColorRect" parent="." unique_id=1020326297 groups=["speed_controlled"]]
 material = SubResource("ShaderMaterial_tgx4x")
 offset_left = 1045.4246
 offset_top = -3.8228907e-05
@@ -47,7 +48,7 @@ offset_bottom = 1045.4246
 rotation = 1.5707964
 script = ExtResource("2_diu5s")
 
-[node name="ColorRect_Slow_Masked2" type="ColorRect" parent="." unique_id=2003455387]
+[node name="ColorRect_Slow_Masked2" type="ColorRect" parent="." unique_id=2003455387 groups=["speed_controlled"]]
 material = SubResource("ShaderMaterial_tgx4x")
 offset_left = 852.0
 offset_top = 1077.0001
@@ -56,7 +57,7 @@ offset_bottom = 2157.0
 rotation = -1.5707964
 script = ExtResource("2_diu5s")
 
-[node name="Disk" type="ColorRect" parent="." unique_id=987166432]
+[node name="Disk" type="ColorRect" parent="." unique_id=987166432 groups=["speed_controlled"]]
 material = SubResource("ShaderMaterial_6fbfn")
 offset_left = 560.0
 offset_top = 140.0
@@ -65,3 +66,6 @@ offset_bottom = 940.0
 rotation = 0.007666215
 pivot_offset = Vector2(400, 400)
 script = ExtResource("3_lk5bn")
+
+[node name="Governator" type="Node" parent="." unique_id=1604019968]
+script = ExtResource("4_sg8i2")

@@ -1,0 +1,19 @@
+[remap]
+
+importer="csv_translation"
+type="Translation"
+uid="uid://disq8vc0ln6af"
+
+[deps]
+
+files=["res://speed_sequence.1.translation", "res://speed_sequence.9.translation", "res://speed_sequence.0.translation", "res://speed_sequence.4.translation", "res://speed_sequence.8.translation", "res://speed_sequence.3.translation", "res://speed_sequence.6.translation", "res://speed_sequence.2.translation", "res://speed_sequence.5.translation"]
+
+source_file="res://speed_sequence.csv"
+dest_files=["res://speed_sequence.1.translation", "res://speed_sequence.9.translation", "res://speed_sequence.0.translation", "res://speed_sequence.4.translation", "res://speed_sequence.8.translation", "res://speed_sequence.3.translation", "res://speed_sequence.6.translation", "res://speed_sequence.2.translation", "res://speed_sequence.5.translation"]
+
+[params]
+
+compress=1
+delimiter=0
+unescape_keys=false
+unescape_translations=true

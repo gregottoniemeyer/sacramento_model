@@ -34,9 +34,9 @@ func _process(delta: float):
 func _update_speed_from_number_keys():
 	for digit in range(10):
 		if Input.is_key_pressed(KEY_0 + digit):
-			_set_target_speed(digit * 10.0)
+			set_target_speed(digit * 20.0)
 
-func _set_target_speed(speed_px: float):
+func set_target_speed(speed_px: float):
 	if is_equal_approx(speed_px, target_speed_px):
 		return
 	start_speed_px = current_speed_px
