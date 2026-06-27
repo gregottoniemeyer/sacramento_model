@@ -1,6 +1,7 @@
-[gd_scene format=3 uid="uid://b5wsoghlgpq6v"]
+[gd_scene format=3 uid="uid://d3sr5qka4yx25"]
 
 [ext_resource type="Script" uid="uid://daf0oc0p8ok8p" path="res://background.gd" id="1_81gpv"]
+[ext_resource type="Script" uid="uid://dsbiqppm4q1t0" path="res://sacramento_model_test_01.gd" id="1_ebevh"]
 [ext_resource type="Shader" uid="uid://btogrje2uo8el" path="res://chevron.gdshader" id="2_ebevh"]
 [ext_resource type="Script" uid="uid://b2eeethv4lvpq" path="res://color_rect.gd" id="3_pf5ls"]
 [ext_resource type="Script" uid="uid://cu46pcwquevke" path="res://color_rect_2.gd" id="4_b5028"]
@@ -20,6 +21,7 @@ shader_parameter/chevron_amplitude_px = 240.0
 shader_parameter/speed_px = 50.0
 shader_parameter/pattern_offset_px = Vector2(0, 0)
 shader_parameter/animation_offset_px = 0.0
+shader_parameter/antialias_px = 1.25
 shader_parameter/mask_mode = 0
 shader_parameter/invert_mask = false
 shader_parameter/mask_texture = SubResource("GradientTexture1D_i1wwn")
@@ -40,11 +42,13 @@ shader_parameter/chevron_amplitude_px = 240.0
 shader_parameter/speed_px = 100.0
 shader_parameter/pattern_offset_px = Vector2(0, 0)
 shader_parameter/animation_offset_px = 0.0
+shader_parameter/antialias_px = 1.25
 shader_parameter/mask_mode = 0
 shader_parameter/invert_mask = false
 shader_parameter/mask_texture = SubResource("GradientTexture1D_lk3y4")
 
 [node name="Sprite2D" type="Sprite2D" unique_id=469995563]
+script = ExtResource("1_ebevh")
 
 [node name="background" type="ColorRect" parent="." unique_id=749467701]
 offset_left = -960.0

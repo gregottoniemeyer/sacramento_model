@@ -8,6 +8,21 @@
 [ext_resource type="Script" uid="uid://bu7l1tjjsw2he" path="res://governator.gd" id="4_sg8i2"]
 [ext_resource type="Script" uid="uid://ct2m3q8hjfhub" path="res://speed_synth.gd" id="5_jx8vc"]
 [ext_resource type="Script" uid="uid://be8vqvkt7es7w" path="res://background_color.gd" id="6_y4rpd"]
+[ext_resource type="Script" uid="uid://b2akjq6j36jen" path="res://udp_receiver.gd" id="9_msj34"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_msj34"]
+shader = ExtResource("1_rrn4g")
+shader_parameter/rect_size_px = Vector2(1080, 960)
+shader_parameter/stroke_width_px = 80.0
+shader_parameter/peak_to_peak_px = 300.0
+shader_parameter/chevron_amplitude_px = 50.0
+shader_parameter/speed_px = 25.0
+shader_parameter/pattern_offset_px = Vector2(0, 0)
+shader_parameter/animation_offset_px = 0.0
+shader_parameter/antialias_px = 1.25
+shader_parameter/mask_mode = 2
+shader_parameter/invert_mask = false
+shader_parameter/mask_texture = ExtResource("2_ltq2a")
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_tgx4x"]
 shader = ExtResource("1_rrn4g")
@@ -34,7 +49,7 @@ shader_parameter/animate_inner_to_outer = false
 shader_parameter/animation_offset_px = 0.0
 shader_parameter/antialias_px = 1.25
 
-[node name="Node2D" type="Node2D" unique_id=1607325856]
+[node name="Node2D" type="Node2D" unique_id=1607325856 groups=["speed_controlled"]]
 
 [node name="ColorRect" type="ColorRect" parent="." unique_id=1290163036]
 offset_right = 1930.0
@@ -43,7 +58,7 @@ color = Color(1, 0.33333334, 0.25882354, 1)
 script = ExtResource("6_y4rpd")
 
 [node name="ColorRect_Slow_Masked" type="ColorRect" parent="." unique_id=1020326297 groups=["speed_controlled"]]
-material = SubResource("ShaderMaterial_tgx4x")
+material = SubResource("ShaderMaterial_msj34")
 offset_left = 1045.4246
 offset_top = -3.8228907e-05
 offset_right = 2125.4246
@@ -72,6 +87,10 @@ script = ExtResource("3_lk5bn")
 
 [node name="Governator" type="Node" parent="." unique_id=1604019968]
 script = ExtResource("4_sg8i2")
+interval_seconds = 999999.0
 
 [node name="SpeedSynth" type="Node" parent="." unique_id=1429137640]
 script = ExtResource("5_jx8vc")
+
+[node name="UPDReceiver" type="Node" parent="." unique_id=40291279]
+script = ExtResource("9_msj34")
