@@ -1,6 +1,9 @@
 extends ColorRect
 
 const SPEED_TRANSITION_SECONDS: float = 1.0
+const SPEED_STEP_PX: float = 20.0
+const BASE_ANTIALIAS_PX: float = 1.25
+const ANTIALIAS_PER_SPEED_STEP: float = 0.08
 
 var animation_offset_px: float = 0.0
 var current_speed_px: float = 0.0
@@ -14,6 +17,7 @@ func _ready():
 		current_speed_px = float(material.get_shader_parameter("speed_px"))
 		start_speed_px = current_speed_px
 		target_speed_px = current_speed_px
+		_update_antialias_for_speed(current_speed_px)
 
 func _notification(what):
 	if what == NOTIFICATION_RESIZED:
@@ -28,6 +32,7 @@ func _process(delta: float):
 		return
 	_update_speed_from_number_keys()
 	_update_interpolated_speed(delta)
+	_update_antialias_for_speed(current_speed_px)
 	animation_offset_px += current_speed_px * delta
 	material.set_shader_parameter("animation_offset_px", animation_offset_px)
 
@@ -43,6 +48,14 @@ func set_target_speed(speed_px: float):
 	target_speed_px = speed_px
 	transition_elapsed = 0.0
 	material.set_shader_parameter("speed_px", target_speed_px)
+
+func get_target_speed() -> float:
+	return target_speed_px
+
+func _update_antialias_for_speed(speed_px: float):
+	var speed_step: float = clamp(speed_px / SPEED_STEP_PX, 0.0, 9.0)
+	var antialias_px: float = BASE_ANTIALIAS_PX + speed_step * ANTIALIAS_PER_SPEED_STEP
+	material.set_shader_parameter("antialias_px", antialias_px)
 
 func _update_interpolated_speed(delta: float):
 	if transition_elapsed >= SPEED_TRANSITION_SECONDS:
