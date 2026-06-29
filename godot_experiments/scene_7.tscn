@@ -1,0 +1,79 @@
+[gd_scene format=3 uid="uid://djp2uyl3hrtg0"]
+
+[ext_resource type="Script" uid="uid://b1nyfe3fm5hux" path="res://stage_scene.gd" id="1_y4x11"]
+[ext_resource type="Script" uid="uid://be8vqvkt7es7w" path="res://background_color.gd" id="2_kaxp6"]
+[ext_resource type="Shader" uid="uid://btogrje2uo8el" path="res://chevron.gdshader" id="3_ijqhn"]
+[ext_resource type="Texture2D" uid="uid://hedx1jhvub4m" path="res://img/1920w/mapArtboard 1white.png" id="4_tnsvi"]
+[ext_resource type="Script" uid="uid://b2eeethv4lvpq" path="res://color_rect.gd" id="5_f3tm5"]
+[ext_resource type="Shader" uid="uid://cgxj2yhcle3wa" path="res://disk_rings.gdshader" id="6_blg78"]
+[ext_resource type="Script" uid="uid://den35fujr5y84" path="res://disk_rings.gd" id="7_xv2l4"]
+[ext_resource type="Script" uid="uid://bu7l1tjjsw2he" path="res://governator.gd" id="8_741dx"]
+[ext_resource type="Script" uid="uid://ct2m3q8hjfhub" path="res://speed_synth.gd" id="9_eagg5"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_tgx4x"]
+shader = ExtResource("3_ijqhn")
+shader_parameter/rect_size_px = Vector2(1080, 960)
+shader_parameter/stroke_width_px = 80.0
+shader_parameter/peak_to_peak_px = 300.0
+shader_parameter/chevron_amplitude_px = 50.0
+shader_parameter/speed_px = 25.0
+shader_parameter/pattern_offset_px = Vector2(0, 0)
+shader_parameter/animation_offset_px = 0.0
+shader_parameter/antialias_px = 1.25
+shader_parameter/mask_mode = 2
+shader_parameter/invert_mask = false
+shader_parameter/mask_texture = ExtResource("4_tnsvi")
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_6fbfn"]
+shader = ExtResource("6_blg78")
+shader_parameter/rect_size_px = Vector2(720, 720)
+shader_parameter/ring_width_px = 80.0
+shader_parameter/black_ring_color = Color(0, 0, 0, 1)
+shader_parameter/white_ring_color = Color(1, 1, 1, 1)
+shader_parameter/animation_speed_px = 10.0
+shader_parameter/animate_inner_to_outer = false
+shader_parameter/animation_offset_px = 0.0
+shader_parameter/antialias_px = 1.25
+
+[node name="Node2D" type="Node2D" unique_id=1607325856]
+script = ExtResource("1_y4x11")
+
+[node name="ColorRect" type="ColorRect" parent="." unique_id=1290163036]
+offset_right = 1930.0
+offset_bottom = 1080.0
+color = Color(1, 0.33333334, 0.25882354, 1)
+script = ExtResource("2_kaxp6")
+
+[node name="ColorRect_Slow_Masked" type="ColorRect" parent="." unique_id=1020326297 groups=["speed_controlled"]]
+material = SubResource("ShaderMaterial_tgx4x")
+offset_left = 1045.4246
+offset_top = -3.8228907e-05
+offset_right = 2125.4246
+offset_bottom = 1045.4246
+rotation = 1.5707964
+script = ExtResource("5_f3tm5")
+
+[node name="ColorRect_Slow_Masked2" type="ColorRect" parent="." unique_id=2003455387 groups=["speed_controlled"]]
+material = SubResource("ShaderMaterial_tgx4x")
+offset_left = 852.0
+offset_top = 1077.0001
+offset_right = 1931.9999
+offset_bottom = 2157.0
+rotation = -1.5707964
+script = ExtResource("5_f3tm5")
+
+[node name="Disk" type="ColorRect" parent="." unique_id=987166432 groups=["speed_controlled"]]
+material = SubResource("ShaderMaterial_6fbfn")
+offset_left = 560.0
+offset_top = 140.0
+offset_right = 1360.0
+offset_bottom = 940.0
+rotation = 0.007666215
+pivot_offset = Vector2(400, 400)
+script = ExtResource("7_xv2l4")
+
+[node name="Governator" type="Node" parent="." unique_id=1604019968]
+script = ExtResource("8_741dx")
+
+[node name="SpeedSynth" type="Node" parent="." unique_id=1429137640]
+script = ExtResource("9_eagg5")
