@@ -34,6 +34,7 @@ func _process(delta: float):
 	_update_interpolated_speed(delta)
 	_update_antialias_for_speed(current_speed_px)
 	animation_offset_px += current_speed_px * delta
+	animation_offset_px = fmod(animation_offset_px, _get_animation_period_px())
 	material.set_shader_parameter("animation_offset_px", animation_offset_px)
 
 func _update_speed_from_number_keys():
@@ -56,6 +57,10 @@ func _update_antialias_for_speed(speed_px: float):
 	var speed_step: float = clamp(speed_px / SPEED_STEP_PX, 0.0, 9.0)
 	var antialias_px: float = BASE_ANTIALIAS_PX + speed_step * ANTIALIAS_PER_SPEED_STEP
 	material.set_shader_parameter("antialias_px", antialias_px)
+
+func _get_animation_period_px() -> float:
+	var ring_width_px: float = float(material.get_shader_parameter("ring_width_px"))
+	return max(ring_width_px * 2.0, 1.0)
 
 func _update_interpolated_speed(delta: float):
 	if transition_elapsed >= SPEED_TRANSITION_SECONDS:

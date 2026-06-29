@@ -1,7 +1,7 @@
-[gd_scene format=3 uid="uid://d3sr5qka4yx25"]
+[gd_scene format=3 uid="uid://b5wsoghlgpq6v"]
 
 [ext_resource type="Script" uid="uid://daf0oc0p8ok8p" path="res://background.gd" id="1_81gpv"]
-[ext_resource type="Script" uid="uid://dsbiqppm4q1t0" path="res://sacramento_model_test_01.gd" id="1_ebevh"]
+[ext_resource type="Script" uid="uid://ducbycp138kof" path="res://sacramento_model_test_01.gd" id="1_ebevh"]
 [ext_resource type="Shader" uid="uid://btogrje2uo8el" path="res://chevron.gdshader" id="2_ebevh"]
 [ext_resource type="Script" uid="uid://b2eeethv4lvpq" path="res://color_rect.gd" id="3_pf5ls"]
 [ext_resource type="Script" uid="uid://cu46pcwquevke" path="res://color_rect_2.gd" id="4_b5028"]
