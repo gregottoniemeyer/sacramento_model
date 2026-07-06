@@ -138,3 +138,21 @@ def downsample_lttb(values, target_n=720):
 
     out.append(values[-1])
     return out
+
+
+def downsample_minmax(values, target_n=720):
+    n_bins = target_n // 2
+    n = len(values)
+    bin_size = n / n_bins
+    out = []
+    for i in range(n_bins):
+        start, end = int(i * bin_size), int((i + 1) * bin_size)
+        chunk = values[start:max(end, start + 1)]
+        lo, hi = min(chunk), max(chunk)
+        lo_idx = chunk.index(lo)
+        hi_idx = chunk.index(hi)
+        if lo_idx <= hi_idx:
+            out.extend([lo, hi])
+        else:
+            out.extend([hi, lo])
+    return out

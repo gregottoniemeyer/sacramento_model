@@ -1,5 +1,5 @@
 from datetime import date, timedelta
-from pipeline_steps import fetch_rdb, parse_rdb, downsample, normalize, rolling_variation, write_output
+from pipeline_steps import fetch_rdb, parse_rdb, downsample_minmax, normalize, rolling_variation, write_output
 
 def fetch_full_range(site_no, start, end, chunk_days=100):
     all_rows = []
@@ -21,7 +21,7 @@ cfs = [r[1] for r in rows]
 print(f"total raw points: {len(rows)}")
 print(f"min/max cfs: {min(cfs)} / {max(cfs)}")
 
-down = downsample(cfs, target_n=720)
+down = downsample_minmax(cfs, target_n=720)
 norm, scaled = normalize(down, scale_factor=30000.0)
 high_var, threshold = rolling_variation(down, window=10)
 
