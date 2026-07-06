@@ -78,3 +78,63 @@ if __name__ == "__main__":
     print(f"threshold={threshold:.3f}")
     print(f"flagged frames: {spike_flags}")
     print("expected flags to cluster around index 50-60 where the spike is")
+
+
+def downsample_max(values, target_n=720):
+    """local max per bin — preserves peak height, but baseline looks noisier/higher"""
+    n = len(values)
+    if n <= target_n:
+        return values[:]
+    bin_size = n / target_n
+    out = []
+    for i in range(target_n):
+        start, end = int(i * bin_size), int((i + 1) * bin_size)
+        chunk = values[start:max(end, start + 1)]
+        out.append(max(chunk))
+    return out
+
+
+def downsample_lttb(values, target_n=720):
+    """Largest-Triangle-Three-Buckets — picks the actual raw point per bin
+    that best preserves the visual shape of the line"""
+    n = len(values)
+    if n <= target_n:
+        return values[:]
+
+    out = [values[0]]
+    bucket_size = (n - 2) / (target_n - 2)
+    a = 0  # index of last selected point
+
+    for i in range(target_n - 2):
+        # this bucket's range
+        start = int((i + 1) * bucket_size) + 1
+        end = int((i + 2) * bucket_size) + 1
+        end = min(end, n)
+
+        # average point of the NEXT bucket, used as a reference
+        next_start = min(end, n - 1)
+        next_end = min(int((i + 3) * bucket_size) + 1, n)
+        next_end = max(next_end, next_start + 1)
+        next_chunk = values[next_start:next_end]
+        avg_next = sum(next_chunk) / len(next_chunk)
+        avg_next_x = (next_start + next_end) / 2
+
+        best_area = -1
+        best_point = values[start]
+        ax, ay = a, values[a]
+
+        for j in range(start, end):
+            area = abs(
+                (ax - avg_next_x) * (values[j] - ay) -
+                (ax - j) * (avg_next - ay)
+            )
+            if area > best_area:
+                best_area = area
+                best_point = values[j]
+                best_idx = j
+
+        out.append(best_point)
+        a = best_idx
+
+    out.append(values[-1])
+    return out
