@@ -67,5 +67,5 @@ for ax in axes:
     ax.set_ylabel("cfs")
 
 plt.tight_layout()
-plt.savefig("downsample_compare_all.png", dpi=150)
-print("saved downsample_compare_all.png")
+plt.savefig("downsample_compare_plot.png", dpi=150)
+print("saved downsample_compare_plot.png")
