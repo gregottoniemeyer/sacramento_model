@@ -72,12 +72,34 @@ venv/bin/pip install -r requirements.txt
 
 ## Current occupancy model
 
-Simple threshold model (deliberately not std-dev/windowing — see project
-memory/session history for why), tuned against real labeled recordings in
-`data/`. Live constants are in `tools/live_plot.py`; replay/tune against new
-data with `tools/tune_simple.py` and `tools/replay_simple.py`.
+A **confidence score (0-100)** rather than a flat timer, computed each frame
+in `tools/live_plot.py` (`update_occupancy()` — that function is the source
+of truth; all tunable constants live in one block near the top of the file).
+Two independent signals feed it:
 
-Known accepted limitations: a person sitting perfectly still for longer than
-the hold timeout reads as empty until their next micro-movement; a hard bump
-on an empty chair reads as occupied for the hold duration. These are
-structural to a motion-only sensor, not bugs to chase.
+1. **Person-like motion** — either gyro-Z std-dev dominating X/Y (a swivel),
+   or a run of large single-sample gyro jumps (a jolt/plop). Either one
+   resets confidence to 100 and marks "last motion now."
+2. **Departure detection** — a motion burst followed within a few seconds by
+   empty-chair-grade silence (below the measured noise floor of a genuinely
+   empty chair) is treated as a confirmed stand-up, and drains confidence to
+   0 over ~2 seconds.
+
+Absent a confirmed departure, confidence decays **slowly** (90s) as a
+fallback only — presence is deliberately "sticky" so that sitting still
+doesn't get misread as empty. This two-signal design replaced an earlier
+single-timer version that failed in live testing both ways (statue-sitters
+flipped to FREE, stand-ups felt sluggish).
+
+Thresholds were tuned against `data/labeled_session_1783532146.csv` (a
+guided two-surface session, hard floor + carpet) to get zero false triggers
+across every walk-by/stand-near/stomp/dropped-object variant tested, on
+both surfaces. Re-tune with `tools/tune_simple.py` / `tools/replay_simple.py`
+against any new labeled recording.
+
+**Known remaining weaknesses** (see the constants-block comments in
+`live_plot.py` for the measurements behind these):
+- A hard bump/knock on an empty chair still reads OCCUPIED until the decay
+  or a departure event clears it.
+- On carpet, sit-down detection lags ~2-3s behind hard floor (carpet
+  absorbs the initial "plop").
