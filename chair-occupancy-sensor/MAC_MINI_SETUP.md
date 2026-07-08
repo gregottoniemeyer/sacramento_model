@@ -106,6 +106,8 @@ cat > ~/Library/LaunchAgents/com.sacramentomodel.autopull.plist << 'EOF'
     </array>
     <key>StartInterval</key>
     <integer>120</integer>
+    <key>AbandonProcessGroup</key>
+    <true/>
     <key>StandardOutPath</key>
     <string>REPLACE_WITH_HOME/sacramento_model/autopull.log</string>
     <key>StandardErrorPath</key>
@@ -114,6 +116,13 @@ cat > ~/Library/LaunchAgents/com.sacramentomodel.autopull.plist << 'EOF'
 </plist>
 EOF
 ```
+**Do not skip `AbandonProcessGroup`.** Without it, launchd kills the entire
+process group when `pull_and_refresh.sh` finishes running — including the
+dashboard process it just launched in the background — even though the
+script uses `nohup`/`disown`. The dashboard will appear to start (the log
+says so) but the process is already dead a moment later. This key tells
+launchd to leave background children alone once the wrapper script exits.
+
 **Before running the next command**, replace every `REPLACE_WITH_HOME` in
 that file with the actual home directory path (e.g. `/Users/yourusername`
 — run `echo $HOME` to get the exact value, then edit the plist file, e.g.
