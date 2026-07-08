@@ -1,7 +1,9 @@
 # Start Here — 5 things you need to know
 
 New to this? Read this file only. (`README.md` = full setup, `NOTES.md` =
-full history/reasoning — go there only once you need more detail.)
+full history/reasoning, `MAC_MINI_SETUP.md` = exact steps to set up a new
+permanent installation host from scratch — go there only once you need
+more detail.)
 
 ### 1. What this is
 A chair with an ESP32 + motion sensor detects if someone's sitting in it,

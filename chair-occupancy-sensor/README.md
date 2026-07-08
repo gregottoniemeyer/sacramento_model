@@ -11,6 +11,10 @@ for real chair state (`chairs: [bool] * 7`), broadcast as UDP JSON to drive
 the screens. The eventual hub firmware/script needs to produce that same
 `chairs` array from real sensor data instead of keypresses.
 
+**New here?** See `START_HERE.md` for the 5-point quickstart. Setting up a
+new permanent installation machine (auto-sync + auto-restarting dashboard)?
+See `MAC_MINI_SETUP.md` for exact steps.
+
 ## Layout
 
 - `firmware/` — Arduino sketches.
