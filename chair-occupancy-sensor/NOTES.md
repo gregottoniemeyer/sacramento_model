@@ -240,4 +240,3 @@ sensor data, instead of keypresses.
    replicate across all 7 chairs and spares, track each board's MAC
    address.
 
-<!-- sync test 2026-07-08 16:29:03 -->
