@@ -239,3 +239,5 @@ sensor data, instead of keypresses.
 7. Physical build-out: enclosures, mounting, battery charging workflow,
    replicate across all 7 chairs and spares, track each board's MAC
    address.
+
+<!-- sync test 2026-07-08 16:29:03 -->
