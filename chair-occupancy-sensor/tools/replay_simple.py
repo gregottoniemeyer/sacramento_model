@@ -8,6 +8,14 @@ Model (must match live_plot.py):
 Works with both the v1 CSV (no surface column) and the v2 two-surface CSV.
 Scores per surface where available. Usage:
   venv/bin/python replay_simple.py labeled_session_<ts>.csv
+
+CAVEAT: this per-second scorer UNDERSTATES departure performance. The
+collection protocol leaves only ~3s of 'empty' after each stand-up, while
+the departure detector's full latency is ~8-13s — so post-stand-up 'empty'
+seconds score as wrong here even when the detector fires fine in real use.
+Use tools/replay_departures.py (event-level, gap-extended, exact live
+logic) to evaluate stand-up detection; use this file for the trigger /
+false-trigger side (walk-bys, bumps, seated coverage).
 """
 
 import csv
@@ -23,10 +31,15 @@ Z_MOTION_THRESHOLD_RAW = 15
 RATIO_THRESHOLD = 0.65
 BIG_DELTA_RAW = 3000
 BIG_DELTA_DEBOUNCE = 3
-DEPART_BURST_STD_RAW = 250   # any-axis 1s std above this = possible departure jolt
-DEPART_QUIET_STD_RAW = 16    # all axes below this = empty-chair-grade silence
-DEPART_WINDOW_SECONDS = 5    # silence must arrive within this many s of the burst
-DEPART_DRAIN_SECONDS = 2.0   # confidence drains to 0 this fast once confirmed
+# Departure v3 (2026-07-08), per-second approximation of live_plot.py's
+# fraction-of-quiet logic (see the constants block there for the reasoning;
+# tools/replay_departures.py is the exact sample-accurate backtest).
+DEPART_BURST_STD_RAW = 250   # any-axis 1s std above this arms the detector
+DEPART_QUIET_STD_RAW = 16    # smax below this = one quiet second
+DEPART_QUIET_NEEDED = (4, 5)   # >= 4 quiet seconds among the last 5 (~0.70/4.5s)
+DEPART_PAIR_WINDOW = 12      # burst must be within this many s of the confirm
+LONG_QUIET_NEEDED = (12, 15)   # >= 12 quiet among last 15 -> burst-less release
+DEPART_DRAIN_SECONDS = 0.75  # confidence drains to 0 this fast once confirmed
 # -----------------------------------------------------------------------------
 
 # Prefix-matched so this works on both the original session (sit_down,
@@ -92,17 +105,24 @@ for sec in sorted(seconds):
     if motion:
         last_motion = sec
         departed_at = None  # person still here — cancel any drain
-    # Departure: burst then >= 2 consecutive empty-chair-grade quiet seconds
-    # soon after -> drain confidence to 0 over DEPART_DRAIN_SECONDS.
+    # Departure v3: burst then a mostly-quiet stretch (fraction, not a strict
+    # run) -> drain confidence to 0. A long mostly-quiet stretch releases
+    # even without a paired burst.
     if smax > DEPART_BURST_STD_RAW:
         burst_at = sec
-    elif (burst_at is not None and sec - burst_at >= 2
-          and sec - burst_at <= DEPART_WINDOW_SECONDS
-          and smax_by_sec.get(sec - 1, 999) < DEPART_QUIET_STD_RAW
-          and smax < DEPART_QUIET_STD_RAW):
-        departed_at = sec
-        depart_base = prev_conf
-        burst_at = None
+    elif departed_at is None:
+        sq_need, sq_win = DEPART_QUIET_NEEDED
+        lq_need, lq_win = LONG_QUIET_NEEDED
+        short_quiet = sum(1 for s2 in range(sec - sq_win + 1, sec + 1)
+                          if smax_by_sec.get(s2, 999) < DEPART_QUIET_STD_RAW)
+        long_quiet = sum(1 for s2 in range(sec - lq_win + 1, sec + 1)
+                         if smax_by_sec.get(s2, 999) < DEPART_QUIET_STD_RAW)
+        paired = burst_at is not None and sec - burst_at <= DEPART_PAIR_WINDOW
+        if ((paired and short_quiet >= sq_need)
+                or (sec >= lq_win and long_quiet >= lq_need and prev_conf > 0)):
+            departed_at = sec
+            depart_base = prev_conf
+            burst_at = None
     if last_motion is None:
         conf = 0.0
     elif departed_at is not None:

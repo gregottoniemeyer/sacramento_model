@@ -49,23 +49,42 @@ BIG_DELTA_DEBOUNCE = 3        # ...if it happens >= this many times in 1s
 # detection by ~2-3s (carpet absorbs the plop; detection starts once you
 # settle in).
 
-# Stand-up (departure) detection. Signature: a burst (some gyro axis 1s std
-# > 250) followed by SUPER-quiet within a few seconds. The quiet bar is the
-# key discriminator, measured across both sessions: a truly empty chair sits
-# at the noise floor (smax ~11-13) while a statue-sitting human still wobbles
-# it slightly (median ~15-20). Requiring < 16 (instead of the old 40) blocks
-# most false departures when someone settles into stillness:
-#   quiet=40 -> 4/8 statue segments falsely freed; quiet=16 -> 1/8; and
-#   jerk-freeze/partial-rise stay 0/10, stand-ups confirm in 3-5s (quiet=12
-#   was tested and is TOO strict — departures never confirm).
-# On confirmation, confidence drains to 0 over DEPART_DRAIN_SECONDS. Any
-# person-motion cancels the drain and restores normal behavior.
-DEPART_BURST_STD_RAW = 250    # any gyro axis 1s std-dev above this = possible departure jolt
-DEPART_QUIET_STD_RAW = 16     # all gyro axes below this = empty-chair-grade silence
-DEPART_QUIET_SECONDS = 1.0    # how long smax must stay silent (trailing-1s window
-                              # means this covers ~2s of raw data)
-DEPART_WINDOW_SECONDS = 5.0   # silence must be reached within this after the burst
-DEPART_DRAIN_SECONDS = 2.0    # confidence drains to 0 this fast once confirmed
+# Stand-up (departure) detection, v3 (2026-07-08). Signature: a burst (some
+# gyro axis 1s std > 250) followed by empty-chair-grade quiet. The quiet bar
+# (smax < 16) is the key discriminator, measured across both sessions: a
+# truly empty chair sits at the noise floor (smax ~11-14) while a statue-
+# sitting human still wobbles it slightly (median ~15-20, dips below 16 for
+# at most ~2.7s at a time before a micro-movement pops back up).
+#
+# v3 replaced the old "smax < 16 continuously for 1s, starting within 5s of
+# the burst" rule after backtesting showed two live failure modes:
+#   1. An empty chair often HOVERS around the bar (13-18) for several
+#      seconds after the person walks off — a strict continuous-quiet run
+#      keeps resetting on single noise pops, and quiet frequently begins
+#      more than 5s after the last burst, so the departure never confirmed
+#      and the chair stayed OCCUPIED for the full 90s fallback decay.
+#   2. The 1s quiet requirement was inside the statue-sitter dip range
+#      (dips up to 2.7s), so real sitters could falsely read as departed.
+# Fix: score quiet as a FRACTION of samples below the bar over a trailing
+# window — robust to isolated pops. 0.70 over 4.5s demands ~3.2s of quiet,
+# safely above the longest observed human dip (2.7s) and easily reached by
+# an empty chair. Pairing window 12s (was 5s): statue dips with a burst
+# 10.6-14.7s earlier exist in the data, so 12s max (15s was tested and
+# falsely freed one statue segment; 12s frees none).
+DEPART_BURST_STD_RAW = 250    # any gyro axis 1s std-dev above this arms the detector
+DEPART_QUIET_STD_RAW = 16     # smax below this = one empty-chair-grade quiet sample
+DEPART_QUIET_FRACTION = 0.70  # quiet-sample share needed over the quiet window
+DEPART_QUIET_WINDOW = 4.5     # trailing seconds the quiet fraction is computed over
+DEPART_PAIR_WINDOW = 12.0     # a burst within this many seconds pairs with the quiet
+DEPART_DRAIN_SECONDS = 0.75   # confidence drains to 0 this fast once confirmed
+# Burst-less safety net: if the chair is quiet 80% of a trailing 15s window,
+# release it no matter what (no burst pairing needed). Catches departures
+# whose wobble outlasted the pairing window AND clears the old known
+# limitation where a bump on an empty chair stuck OCCUPIED for the full
+# decay. A statue sitter never comes close (needs 12s of sub-16 quiet in
+# 15s; longest observed human dip is 2.7s).
+LONG_QUIET_WINDOW = 15.0      # trailing seconds for the burst-less release
+LONG_QUIET_FRACTION = 0.80    # quiet share needed for the burst-less release
 # ============================================================================
 
 LOG_FILE = Path.home() / "motion_log.txt"
@@ -170,7 +189,7 @@ def read_new_samples():
 # Confidence gets its own, longer time window — it does NOT share the x-axis
 # with accel/gyro. Fixed width (the slow 90s fallback decay would make an
 # auto-sized window uselessly wide; 40s comfortably shows arrivals, the flat
-# occupied stretch, and the 2s departure drain).
+# occupied stretch, and the sub-second departure drain).
 CONFIDENCE_WINDOW_SECONDS = 40
 
 fig = plt.figure(figsize=(10, 9.4))
@@ -236,11 +255,11 @@ BIG_DELTA = BIG_DELTA_RAW / GYRO_LSB_PER_DEG_S
 
 occupancy_state = {"last_move": None, "confidence": 0.0,
                    "burst_at": None,      # time of last departure-strength jolt
-                   "quiet_since": None,   # when continuous silence began
                    "departed_at": None,   # when a departure was confirmed
                    "depart_base": 0.0}    # confidence value at that moment
 DEPART_BURST = DEPART_BURST_STD_RAW / GYRO_LSB_PER_DEG_S
 DEPART_QUIET = DEPART_QUIET_STD_RAW / GYRO_LSB_PER_DEG_S
+quiet_history = collections.deque()       # (timestamp, is_quiet) pairs
 confidence_history = collections.deque()  # (timestamp, confidence) pairs
 
 # Big status banner: bold white text on a colored pill centered at the top.
@@ -303,27 +322,32 @@ def update_occupancy(now):
         occupancy_state["last_move"] = now
         occupancy_state["departed_at"] = None  # person still here — cancel drain
 
-    # Stand-up detection: a burst followed quickly by empty-chair-grade
-    # silence means the person left — start the fast confidence drain.
+    # Stand-up detection: a burst followed by mostly-quiet (fraction of
+    # samples below the quiet bar) means the person left — start the fast
+    # confidence drain. A long mostly-quiet stretch releases even without a
+    # paired burst (safety net for missed departures and bumped empty chairs).
     stds = gyro_stds_last_second(now)
     if stds is not None:
         smax = max(stds)
+        quiet_history.append((now, smax < DEPART_QUIET))
+        cutoff = now - max(DEPART_QUIET_WINDOW, LONG_QUIET_WINDOW)
+        while quiet_history and quiet_history[0][0] < cutoff:
+            quiet_history.popleft()
         if smax > DEPART_BURST:
             occupancy_state["burst_at"] = now
-            occupancy_state["quiet_since"] = None
-        elif smax < DEPART_QUIET:
-            if occupancy_state["quiet_since"] is None:
-                occupancy_state["quiet_since"] = now
+        if occupancy_state["departed_at"] is None:
+            short = [q for t, q in quiet_history if t >= now - DEPART_QUIET_WINDOW]
+            frac_short = sum(short) / len(short) if short else 0.0
+            frac_long = sum(q for _, q in quiet_history) / len(quiet_history)
             burst = occupancy_state["burst_at"]
-            quiet = occupancy_state["quiet_since"]
-            if (burst is not None
-                    and now - quiet >= DEPART_QUIET_SECONDS
-                    and quiet - burst <= DEPART_WINDOW_SECONDS):
+            paired = burst is not None and now - burst <= DEPART_PAIR_WINDOW
+            warmed_up = now - quiet_history[0][0] >= LONG_QUIET_WINDOW - 1.0
+            if ((paired and frac_short >= DEPART_QUIET_FRACTION)
+                    or (warmed_up and frac_long >= LONG_QUIET_FRACTION
+                        and occupancy_state["confidence"] > 0)):
                 occupancy_state["departed_at"] = now
                 occupancy_state["depart_base"] = occupancy_state["confidence"]
                 occupancy_state["burst_at"] = None
-        else:
-            occupancy_state["quiet_since"] = None
 
     last = occupancy_state["last_move"]
     departed = occupancy_state["departed_at"]
