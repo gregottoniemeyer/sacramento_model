@@ -236,6 +236,11 @@ temp_text = fig.text(0.985, 0.975, "-- °C", ha="right", va="top",
 TEMP_DISPLAY_INTERVAL = 1.0  # seconds; sensor data arrives much faster than this
 last_temp_display_update = 0.0
 
+# Small yellow dot, upper-left corner: at-a-glance visual confirmation that
+# the dashboard running on screen has picked up the latest pushed code.
+fig.add_artist(plt.Circle((0.02, 0.975), 0.012, transform=fig.transFigure,
+                          facecolor="#e6c300", edgecolor="none", zorder=10))
+
 # ---- Occupancy detection: confidence-decay model -----------------------------
 # One idea only: person-like motion snaps a confidence factor to
 # CONFIDENCE_MAX; with no motion it decays linearly to 0 over
