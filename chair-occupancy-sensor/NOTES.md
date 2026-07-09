@@ -18,19 +18,125 @@ alternative — seated weight tilting the chair — is not a usable signal:
 measured tilt from a seated adult is only ~0.2°, buried in sensor noise
 (see `tools/tilt_check.py`).
 
-## Parts
+## Original project brief (from Greg, 2026-06-14 email)
 
-- ESP32 board with an integrated 18650 battery holder (7 units for chairs +
-  1 for a hub + spares). Listings for this style of board are inconsistent
-  about which USB-serial chip is on board — see "Two chip families" below.
-- MPU-6050 / GY-521 breakout modules (gyroscope + accelerometer + onboard
-  temperature sensor, I2C interface). Ship with header pins unsoldered.
-- 18650 battery cells (Molicel P28A used here) — fit the holders but are
-  physically hard to remove by hand (minor ergonomic annoyance, unrelated
-  to charging).
-- A USB 18650 charger, for cells removed from a board (charging in-place is
-  also supported, see Battery section below).
-- Standard micro-USB data cables (confirm they're not charge-only cables).
+Verbatim framing of the whole project, from the email that started it,
+before any parts were discussed — this is the "why" behind the whole repo,
+not just this subsystem: "Our project would be to build a networked sensor
+to measure if anyone is sitting on a chair. There will be 7 chairs, and
+their occupancy status needs to be shared with a central ESP32 via ESPNow.
+The central ESP32 is connected to a computer via USB, and the computer logs
+occupancy and controls an audiovisual display. The display is another
+story, a model of the Sacramento river." That display (chevron flow
+animation, rings, `water_pipeline/`) and the central hub (`controller.py`,
+one directory up) are what this sensor subsystem ultimately feeds — see
+the top-level `README.md` for how the 7 chairs map to 7 historical
+"regimes" of the river.
+
+## Parts — decision trail (from the "Parts list" email thread with Greg)
+
+Before the formal parts list (below), an earlier board idea was floated
+and dropped: on 2026-06-16 Greg linked an AliExpress listing, "ESP32
+CP2104 DHT11 WiFi Bluetooth Soil Temperature Humidity Sensor Module ...
+18650 Battery Shield," noting "Would need to add ESPNow." This CP2104 +
+onboard-DHT11 + 18650-shield combo is the direct ancestor of the board
+that was actually ordered a week later (see Full parts list below) — it's
+also the source of the "DHT11 already on the board, no extra cost" framing
+in the parts list, and confirms the CP2104 chip as one of the "Two chip
+families" documented under Toolchain setup below.
+
+Greg Niemeyer ordered everything below (all parts, June 26, 2026). This
+section captures the *why* behind each choice, pulled from the actual
+email thread, since the sensor choice went through several rounds before
+landing on the MPU-6050:
+
+1. Max's initial split: **needed regardless** (ESP32 boards, cables,
+   enclosures) vs. **sensor choice to be made** (DHT11 default vs. LD2410
+   radar vs. VL53L0X laser distance).
+2. Greg: **the chairs are metal** — rules out hiding the LD2410 radar
+   underneath the seat (radar needs a non-metal seat to sense through). A
+   strain gauge was raised as an alternative but rejected as "not easy to
+   mount." Decision at this point: start with the DHT11 default temp
+   sensor and see if it's fast/reliable enough.
+3. Greg's follow-up idea: since the chair **seats rotate** on their
+   swivel, and "it is near impossible to sit down without rotating the
+   chair just a little bit," a gimbal/compass-style sensor could catch
+   occupancy from that rotation — and a rotation data stream could be a
+   nice bonus visualization.
+4. Greg then ordered an accelerometer/gyroscope module for this
+   (`https://www.amazon.com/dp/B00LP25V1A` — a GY-521 MPU-6050 breakout):
+   "Should do the job with temp and motion." Max confirmed: "I like the
+   idea of using a gyroscope." This is the sensor actually used — see
+   `tools/tilt_check.py` and the section above for how the tilt-vs-rotation
+   theory was verified.
+5. Greg confirmed on 2026-06-26: **all parts ordered.**
+
+### Full parts list as ordered
+
+**Needed regardless:**
+- ESP32 board w/ integrated 18650 holder — 7 for chairs, 1 for the hub, +1
+  spare (maybe 2): `https://www.aliexpress.com/item/32974107777.htm`.
+  Listings for this style of board are inconsistent about which
+  USB-serial chip is on board — see "Two chip families" below.
+- Micro-USB data cables (USB-A to micro, 5-pack), for loading code onto
+  boards and keeping the hub connected to the computer:
+  `https://www.amazon.com/dp/B0FNW9J7TS`.
+- **Project enclosures — ABS plastic boxes, ~100×68×50 mm, sold in
+  2-packs (~4 ordered):** `https://www.amazon.com/dp/B07RTYYHK7`. These
+  are the "plastic covers" protecting each chair's board + battery from
+  the person sitting on the chair. **Material is ABS** (per the listing
+  description at time of ordering) — relevant before cutting a hole in
+  one (ABS is laser-cuttable but not ideal: it can scorch/melt at the
+  edge and releases fumes that need ventilation — verify against the
+  actual physical part before cutting, since "ABS box" is the vendor's
+  description, not a lab-verified resin code).
+
+**Sensor (decision above):**
+- MPU-6050 / GY-521 breakout (gyroscope + accelerometer + onboard temp
+  sensor, I2C): `https://www.amazon.com/dp/B00LP25V1A`. Ships with header
+  pins unsoldered.
+- (Considered, not used) LD2410 24GHz presence radar —
+  `https://www.amazon.com/RAKSTORE-HLK-LD2410-Presence-Sensing-Millimeter/dp/B0BNXC1F97`
+  — ruled out by the metal chairs.
+- (Considered, not used) VL53L0X laser distance sensor (3-pack) —
+  `https://www.amazon.com/dp/B0B6ZT7NRW` — needs direct line of sight to
+  the sitter, shelved in favor of the hidden gyroscope approach.
+
+**Lab-dependent (ordered anyway):**
+- Electronics starter kit (breadboard + jumper wires + resistors), for
+  testing sensors without soldering:
+  `https://www.amazon.com/REXQualis-Electronics-Breadboard-Resistor-Raspberry/dp/B078XV3RK2`.
+- Soldering iron + multimeter kit (assumed the lab already has these).
+- 18650 battery cells ×9 (Molicel P28A):
+  `https://www.18650batterystore.com/products/molicel-p28a`. Fit the
+  holders but are physically hard to remove by hand (minor ergonomic
+  annoyance, unrelated to charging).
+- 18650 charger (Nitecore UMS4) ×1:
+  `https://www.amazon.com/NITECORE-UMS4-Intelligent-LumenTac-Organizer/dp/B07JPL476H`,
+  for cells removed from a board (charging in-place is also supported,
+  see Battery section below).
+
+**Open at order time, resolved since:** whether the ESP32 board ships
+with 18650 cells included (no — ordered separately, see above); whether
+mounting hardware (Velcro, foam tape, zip ties) was needed (not resolved
+in the thread — check before the physical build-out step in Critical
+path below).
+
+**Board received (confirmed 2026-07-06, "Board type" email):** the
+physical boards that arrived are **WEMOS/Snvi ESP32 ESP-32S with an
+18650 holder** — this is the exact model/vendor name for the boards
+ordered above, useful for re-ordering or looking up pinout docs. Verified
+with a basic blink sketch (LED on a pin, toggled with `Serial.println`
+status messages) before any sensor wiring — standard bring-up sanity
+check, confirms the board and USB-serial link both work before adding
+complexity.
+
+**Battery follow-up (2026-07-07, "Batteries" email):** Max asked Greg to
+re-confirm the exact cell spec before a supplementary purchase; Greg's
+answer: **18650 type, 3.7V rechargeable** (matches the Molicel P28A
+ordered originally — see above). Max picked up an additional pack at a
+physical store as backup/supplement to the original order, generic
+18650 3.7V rechargeable cells rather than a specific branded cell.
 
 ## Toolchain setup
 
@@ -147,6 +253,38 @@ now: a chair node that stops reporting in has a dead battery.
 
 ## The occupancy model — how it evolved
 
+**Reference: Greg's independently proposed model (2026-07-08 email,
+subject "Occupied").** Sent the same day as the departure-detection v3
+rework below, as Greg's own sketch of how the score should work — not
+implemented verbatim, but worth keeping as a design reference since it
+independently arrives at the same core shape (score-based, sticky decay,
+explicit event resets) as the model actually built:
+
+```
+occupied_score = 0
+
+if sit_down_event:
+    occupied_score = 100
+
+if rotation_or_body_motion:
+    occupied_score = min(100, occupied_score + 10)
+
+if get_up_event:
+    occupied_score = 0
+
+if very_still:
+    occupied_score -= 0.01 # decay very slowly, not quickly
+
+occupied = occupied_score > 50
+```
+
+The implemented model (below) differs mainly in having two independently
+tuned event detectors (person-motion vs. departure) instead of one score
+incremented/decremented by fixed steps, because plain "very_still" was
+exactly the case that caused the real failures (statue-sitters vs. actual
+empty-chair silence look alike on a single instantaneous reading — see
+departure v3 below for the fraction-of-quiet fix this required).
+
 1. **First attempt:** windowed std-dev of gyro noise + a flat 30-second hold
    timer, based on informal, unlabeled "sit down / stand up" tests. Failed
    immediately in real use — read "occupied" almost permanently.
@@ -187,6 +325,38 @@ now: a chair node that stops reporting in has a dead battery.
    across every empty/walk-by/stand-near/stomp/dropped-object variant
    tested, on both surfaces.
 
+5. **Departure detection reworked (v3)** after live use showed stand-ups
+   still weren't read reliably. Event-level backtesting (new tool
+   `tools/replay_departures.py`) found why the burst-then-quiet rule
+   underperformed despite looking fine in the per-second replay:
+   - An empty chair often *hovers* around the quiet bar (smax ~13–18) for
+     several seconds after the person walks off. The old rule demanded an
+     unbroken quiet run, which a single noise pop resets, and demanded
+     quiet to *begin* within 5s of the last burst — late-settling wobble
+     (chair pushed back, slow rise) missed the window entirely, leaving the
+     chair OCCUPIED for the full 90s fallback decay.
+   - Meanwhile the old 1s quiet requirement was *inside* the statue-sitter
+     dip range (a real sitter's longest measured continuous sub-bar dip is
+     2.7s), so a still sitter could falsely read as departed.
+   The fix: quiet is now a **fraction of samples below the bar over a
+   trailing window** (0.70 over 4.5s ≈ 3.2s of quiet, robust to pops, above
+   the 2.7s human dip), the burst-pairing window widened 5s→12s (15s was
+   tested and falsely freed one statue segment; 12s frees none), and a
+   **burst-less long-quiet release** (80% quiet over 15s) was added as a
+   safety net — it also clears the old bump-on-empty-chair false OCCUPIED,
+   which previously stuck for the whole decay.
+   An important measurement lesson from this round: the collection protocol
+   left only ~3s of "empty" after each stand-up, so *any* detector with
+   realistic latency scores terribly in the naive per-second replay — the
+   new backtest pads those gaps to 30s with looped real empty-chair samples
+   from the same surface. Result on both labeled sessions, gap-extended:
+   **26/26 stand-ups reach FREE (median ~8–9s, max 12.5s), zero false
+   FREEs across every seated / jerk-freeze / partial-rise segment.**
+   Accelerometer-based departure sensing was investigated and rejected
+   again: the seated-vs-empty accel DC shift is real but confounded by
+   seat swivel orientation (the ~2° mount tilt rotates between the X and Y
+   axes as the seat turns), and accZ shifts only ~5 raw counts under load.
+
 All exact tuned constants, and the measurements behind each one, are kept
 as comments directly above the model code in `tools/live_plot.py` — that
 file is the single source of truth for current numbers, since they may
@@ -195,8 +365,13 @@ and history, not the specific values.
 
 ## Known, accepted limitations (characterized, not bugs to chase)
 
-- A hard bump/knock on an *empty* chair still reads OCCUPIED until decay or
-  a departure event clears it.
+- A hard bump/knock on an *empty* chair still reads OCCUPIED briefly, but
+  since departure v3 the long-quiet release clears it in ~15-16s (it used
+  to stick until the 90s decay ran out).
+- Stand-up → FREE takes ~8-13s. Most of that is physics, not tuning slack:
+  the chair keeps wobbling near the quiet bar for seconds after the person
+  leaves, and the quiet window must stay longer than a statue-sitter's
+  longest still dip (2.7s measured) or real sitters get falsely freed.
 - On carpet, sit-down detection lags roughly 2–3 seconds behind hard floor
   (the carpet absorbs the initial "plop" that the model listens for).
 - The occupancy model currently runs in Python on a laptop reading serial
@@ -239,4 +414,13 @@ sensor data, instead of keypresses.
 7. Physical build-out: enclosures, mounting, battery charging workflow,
    replicate across all 7 chairs and spares, track each board's MAC
    address.
+   - **TODO: check transparent covers** for the chair sensor board
+     enclosures — confirm a transparent cover doesn't interfere with
+     mounting, wiring access, or the wireless range/antenna, and that it
+     looks right on the chairs. The enclosures as ordered (see Parts
+     above) are opaque **ABS**, `https://www.amazon.com/dp/B07RTYYHK7` —
+     if a transparent option/cover is swapped in, confirm the material
+     matches (or re-check laser-cutting/mounting properties for whatever
+     it turns out to be; ABS itself is laser-cuttable but not ideal —
+     scorches at the edge and needs fume ventilation).
 
