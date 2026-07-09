@@ -349,13 +349,23 @@ departure v3 below for the fraction-of-quiet fix this required).
    left only ~3s of "empty" after each stand-up, so *any* detector with
    realistic latency scores terribly in the naive per-second replay — the
    new backtest pads those gaps to 30s with looped real empty-chair samples
-   from the same surface. Result on both labeled sessions, gap-extended:
-   **26/26 stand-ups reach FREE (median ~8–9s, max 12.5s), zero false
-   FREEs across every seated / jerk-freeze / partial-rise segment.**
+   from the same surface. Result on all three labeled sessions, gap-extended:
+   **29/29 stand-ups reach FREE (median ~7–9s, max ~12s), one false FREE**
+   (a pre-existing artifact on one `seated_active` carpet segment, present
+   even in the original pre-v3 model — not something v3 introduced).
    Accelerometer-based departure sensing was investigated and rejected
    again: the seated-vs-empty accel DC shift is real but confounded by
    seat swivel orientation (the ~2° mount tilt rotates between the X and Y
    axes as the seat turns), and accZ shifts only ~5 raw counts under load.
+6. **Drain sped up 0.75s → 0.2s (2026-07-09)**, on request to make
+   stand-up detection "a bit faster." Backtesting first ruled out
+   shortening the quiet-detection window/fraction — that reintroduces a
+   false FREE on a real seated-still segment, the exact failure v3 above
+   fixed. The drain is the only latency knob that's free: it only affects
+   how fast confidence falls to 0 *after* a departure is already
+   confirmed, so shortening it doesn't touch the confirmation logic at
+   all. Re-backtested clean (still 29/29, still one pre-existing false
+   free) with every session's latency improved by ~0.5-0.6s.
 
 All exact tuned constants, and the measurements behind each one, are kept
 as comments directly above the model code in `tools/live_plot.py` — that

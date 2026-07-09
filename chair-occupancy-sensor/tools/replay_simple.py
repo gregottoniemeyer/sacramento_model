@@ -39,7 +39,7 @@ DEPART_QUIET_STD_RAW = 16    # smax below this = one quiet second
 DEPART_QUIET_NEEDED = (4, 5)   # >= 4 quiet seconds among the last 5 (~0.70/4.5s)
 DEPART_PAIR_WINDOW = 12      # burst must be within this many s of the confirm
 LONG_QUIET_NEEDED = (12, 15)   # >= 12 quiet among last 15 -> burst-less release
-DEPART_DRAIN_SECONDS = 0.75  # confidence drains to 0 this fast once confirmed
+DEPART_DRAIN_SECONDS = 0.2   # confidence drains to 0 this fast once confirmed
 # -----------------------------------------------------------------------------
 
 # Prefix-matched so this works on both the original session (sit_down,

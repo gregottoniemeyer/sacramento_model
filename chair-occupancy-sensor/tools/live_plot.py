@@ -76,7 +76,17 @@ DEPART_QUIET_STD_RAW = 16     # smax below this = one empty-chair-grade quiet sa
 DEPART_QUIET_FRACTION = 0.70  # quiet-sample share needed over the quiet window
 DEPART_QUIET_WINDOW = 4.5     # trailing seconds the quiet fraction is computed over
 DEPART_PAIR_WINDOW = 12.0     # a burst within this many seconds pairs with the quiet
-DEPART_DRAIN_SECONDS = 0.75   # confidence drains to 0 this fast once confirmed
+# Drain shortened 0.75s -> 0.2s (2026-07-09, requested speedup): this only
+# affects how fast confidence falls to 0 AFTER a departure is already
+# confirmed, so it's a free latency win with no false-free risk (backtested
+# clean on both labeled sessions). 0.2s is close to the practical floor
+# anyway — the live dashboard updates on a 100ms tick, so anything shorter
+# looks identical (1-2 frames). Most of the remaining ~8-12s stand-up
+# latency is physical (the chair keeps wobbling for seconds after someone
+# actually stands up) — shortening DEPART_QUIET_WINDOW/FRACTION instead was
+# tested and reintroduces a false FREE on a real seated-still segment, so
+# don't touch those without re-running tools/replay_departures.py.
+DEPART_DRAIN_SECONDS = 0.2
 # Burst-less safety net: if the chair is quiet 80% of a trailing 15s window,
 # release it no matter what (no burst pairing needed). Catches departures
 # whose wobble outlasted the pairing window AND clears the old known
