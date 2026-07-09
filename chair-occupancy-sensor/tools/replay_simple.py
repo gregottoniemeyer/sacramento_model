@@ -36,7 +36,7 @@ BIG_DELTA_DEBOUNCE = 3
 # tools/replay_departures.py is the exact sample-accurate backtest).
 DEPART_BURST_STD_RAW = 250   # any-axis 1s std above this arms the detector
 DEPART_QUIET_STD_RAW = 16    # smax below this = one quiet second
-DEPART_QUIET_NEEDED = (4, 5)   # >= 4 quiet seconds among the last 5 (~0.70/4.5s)
+DEPART_QUIET_NEEDED = (3, 4)   # >= 3 quiet seconds among the last 4 (~0.65/4.0s)
 DEPART_PAIR_WINDOW = 12      # burst must be within this many s of the confirm
 LONG_QUIET_NEEDED = (12, 15)   # >= 12 quiet among last 15 -> burst-less release
 DEPART_DRAIN_SECONDS = 0.2   # confidence drains to 0 this fast once confirmed

@@ -66,26 +66,32 @@ BIG_DELTA_DEBOUNCE = 3        # ...if it happens >= this many times in 1s
 #   2. The 1s quiet requirement was inside the statue-sitter dip range
 #      (dips up to 2.7s), so real sitters could falsely read as departed.
 # Fix: score quiet as a FRACTION of samples below the bar over a trailing
-# window — robust to isolated pops. 0.70 over 4.5s demands ~3.2s of quiet,
-# safely above the longest observed human dip (2.7s) and easily reached by
-# an empty chair. Pairing window 12s (was 5s): statue dips with a burst
-# 10.6-14.7s earlier exist in the data, so 12s max (15s was tested and
-# falsely freed one statue segment; 12s frees none).
+# window — robust to isolated pops. Pairing window 12s (was 5s): statue
+# dips with a burst 10.6-14.7s earlier exist in the data, so 12s max (15s
+# was tested and falsely freed one statue segment; 12s frees none).
+#
+# Window/fraction tightened 4.5s/0.70 -> 4.0s/0.65 on 2026-07-09 (requested:
+# faster responses, occasional false positives acceptable). Backtest sweep
+# across all three labeled sessions (not just two — the third session was
+# initially missed and changes the picture: tighter settings that looked
+# "only 1 new false-free" against two sessions turned out to have 2-3 new
+# ones against the full corpus). 4.0s/0.65 is the point where the tradeoff
+# is still genuinely "seldom": exactly 1 new false FREE (on top of one
+# pre-existing, unrelated one) across all three sessions combined, for a
+# ~10% latency cut. Every step past this tested (3.5/0.65, 4.5/0.65,
+# 3.0/0.60) roughly doubled or tripled the false-free count for
+# diminishing extra speed — re-run the full 3-session sweep before going
+# further rather than guessing from a partial one.
 DEPART_BURST_STD_RAW = 250    # any gyro axis 1s std-dev above this arms the detector
 DEPART_QUIET_STD_RAW = 16     # smax below this = one empty-chair-grade quiet sample
-DEPART_QUIET_FRACTION = 0.70  # quiet-sample share needed over the quiet window
-DEPART_QUIET_WINDOW = 4.5     # trailing seconds the quiet fraction is computed over
+DEPART_QUIET_FRACTION = 0.65  # quiet-sample share needed over the quiet window
+DEPART_QUIET_WINDOW = 4.0     # trailing seconds the quiet fraction is computed over
 DEPART_PAIR_WINDOW = 12.0     # a burst within this many seconds pairs with the quiet
-# Drain shortened 0.75s -> 0.2s (2026-07-09, requested speedup): this only
-# affects how fast confidence falls to 0 AFTER a departure is already
-# confirmed, so it's a free latency win with no false-free risk (backtested
-# clean on both labeled sessions). 0.2s is close to the practical floor
-# anyway — the live dashboard updates on a 100ms tick, so anything shorter
-# looks identical (1-2 frames). Most of the remaining ~8-12s stand-up
-# latency is physical (the chair keeps wobbling for seconds after someone
-# actually stands up) — shortening DEPART_QUIET_WINDOW/FRACTION instead was
-# tested and reintroduces a false FREE on a real seated-still segment, so
-# don't touch those without re-running tools/replay_departures.py.
+# Drain shortened 0.75s -> 0.2s (2026-07-09): only affects how fast
+# confidence falls to 0 AFTER a departure is already confirmed, so it's a
+# free latency win with no false-free risk on its own (backtested clean).
+# 0.2s is close to the practical floor anyway — the live dashboard updates
+# on a 100ms tick, so anything shorter looks identical (1-2 frames).
 DEPART_DRAIN_SECONDS = 0.2
 # Burst-less safety net: if the chair is quiet 80% of a trailing 15s window,
 # release it no matter what (no burst pairing needed). Catches departures

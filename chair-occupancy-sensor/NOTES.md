@@ -366,6 +366,22 @@ departure v3 below for the fraction-of-quiet fix this required).
    confirmed, so shortening it doesn't touch the confirmation logic at
    all. Re-backtested clean (still 29/29, still one pre-existing false
    free) with every session's latency improved by ~0.5-0.6s.
+7. **Quiet window/fraction tightened 4.5s/0.70 → 4.0s/0.65 (2026-07-09)**,
+   on explicit request to trade a *seldom* false positive for more
+   responsiveness. A parameter sweep across all three labeled sessions
+   (median/p90/max latency vs. false-FREE count) found this is the point
+   where that trade is still genuinely rare: **one new false FREE** (a
+   `seated_still` segment on hard floor, on top of the one pre-existing
+   unrelated `seated_active`/carpet artifact) for a ~10% latency cut
+   across every session. First swept against only two of the three
+   sessions and looked cheaper than it is — the third session (the
+   original `labeled_session_1783469350.csv`, no `surface` column)
+   surfaced 2 more false-frees at the same settings, which is why the
+   full 3-session sweep matters before picking a number. Every setting
+   tighter than 4.0s/0.65 tested (3.5/0.65, 3.0/0.60, 4.5/0.65 alone)
+   roughly doubled or tripled the false-free count for diminishing extra
+   speed — if asked to go faster again, re-run the sweep across all three
+   sessions rather than extrapolating from a partial one.
 
 All exact tuned constants, and the measurements behind each one, are kept
 as comments directly above the model code in `tools/live_plot.py` — that
