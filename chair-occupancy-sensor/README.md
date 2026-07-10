@@ -24,7 +24,16 @@ See `MAC_MINI_SETUP.md` for exact steps.
   - `receiver_esp_now.ino` — flashed to the board that stays on USB. Prints
     incoming data to Serial in a fixed text format the tools below parse.
   - `i2c_scanner.ino` — diagnostic utility to confirm a sensor responds at
-    I2C address `0x68`; not part of the deployed system.
+    I2C address `0x68`; not part of the deployed system. Distinguishes two
+    different fault types that need different fixes: a clean "No I2C
+    devices found" (or nothing at `0x68`) means a weak/cold joint or a
+    power issue, while a flood of scattered "found" addresses across the
+    whole range means a short/solder bridge or floating line — fix that by
+    *removing* excess solder (wick), not adding more.
+  - `mpu_read_test.ino` — diagnostic utility to read the MPU-6050 and print
+    straight to Serial over USB, no ESP-NOW/receiver needed. Useful for
+    bench-testing a freshly soldered sensor board on its own before
+    trusting it with the full sender firmware.
   - `proposed_2hz_radio_reduction/` — a battery-efficiency redesign (transmit
     a computed summary twice a second instead of every 100Hz sample).
     **Designed but not yet flashed to any board** — see the header comment
@@ -73,6 +82,58 @@ venv/bin/pip install -r requirements.txt
    If you replace `~/motion_log.txt` (e.g. re-running step 2 with `>`
    instead of `>>`) while the dashboard is running, restart the dashboard
    too — it holds an open handle to the old file and won't see new data.
+   Hit this for real bringing up boards 6/7 (2026-07-10): the dashboard sat
+   showing stale data for the rest of the session with no error, because
+   restarting the capture pipe after the receiver was unplugged/replugged
+   truncated the log file out from under the dashboard's open handle.
+   Symptom: the banner freezes and "last motion Ns ago" keeps climbing even
+   while you're actively wiggling a board in your hand — that's the tell
+   that it's a stale dashboard, not a dead sensor. Fix: `pkill -f
+   tools/live_plot.py` then relaunch it.
+
+## Bringing up a new/repaired chair board
+
+One sender talks over the same channel as every other one, and the packet
+format has no board-ID field (see `SensorPacket` in
+`firmware/sender_esp_now.ino`) — so **only ever power one sender board at a
+time** while testing, or their data interleaves on the dashboard with no way
+to tell which board you're looking at.
+
+1. Read the board's MAC **before flashing anything**, so a bad flash never
+   loses track of which physical board is which:
+   ```bash
+   esptool --port /dev/cu.YOUR_PORT read-mac
+   ```
+   (find `esptool` at
+   `~/Library/Arduino15/packages/esp32/tools/esptool_py/*/esptool` if it's
+   not on your `PATH`). Physically label the board with its assigned number
+   right away — cheap sharpie/tape, easy to lose track otherwise.
+2. Flash `firmware/sender_esp_now.ino` (Board: "ESP32 Dev Module", double
+   check the Port before uploading).
+3. With the receiver plugged in and the live pipeline running (above), pick
+   the board up and shake/rotate it. Pass = Accel/Gyro traces move and the
+   banner flips to OCCUPIED. If nothing moves, see the diagnostic escalation
+   below before assuming the sensor is dead.
+4. Move to the next board only after confirming the current one — pull its
+   power first.
+
+**If a board looks dead on the dashboard**, escalate in this order rather
+than guessing:
+1. `firmware/mpu_read_test.ino` — reads the sensor and prints straight to
+   Serial over the board's own USB cable, no receiver needed. If this shows
+   real, varying numbers when you wiggle the board, the sensor and I2C
+   wiring are fine — the fault is downstream (ESP-NOW/receiver/dashboard),
+   not the board itself.
+2. `firmware/i2c_scanner.ino` — if step 1 shows the sensor stuck at a
+   constant value (especially `-1` on every field, which means "no I2C
+   response at all"), this narrows down *why*: see the diagnostic note next
+   to it in the Layout section above.
+3. A board's onboard power LED (present on most GY-521 modules) not
+   lighting up, when other boards' do, is a fast way to localize a fault to
+   VCC/GND specifically before touching SDA/SCL at all — this is what
+   actually broke board 7 during the 2026-07-10 bring-up, after an initial
+   solder bridge on SDA/SCL was fixed first and turned out not to be the
+   whole story. See `NOTES.md` for the full board-by-board history.
 
 ## Current occupancy model
 

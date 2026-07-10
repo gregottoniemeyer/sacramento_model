@@ -449,4 +449,34 @@ sensor data, instead of keypresses.
      matches (or re-check laser-cutting/mounting properties for whatever
      it turns out to be; ABS itself is laser-cuttable but not ideal —
      scorches at the edge and needs fume ventilation).
+   - **All 7 chair sender boards soldered and confirmed working
+     (2026-07-10)**, each verified end-to-end (I2C sensor read + ESP-NOW
+     relay + live dashboard, wiggle-tested individually with only one
+     board powered at a time to avoid cross-talk on the shared receiver).
+     Board-number → MAC table (needed any time a physical board is
+     swapped, so `firmware/sender_esp_now.ino`'s hardcoded receiver MAC
+     logic has a parallel per-chair reference):
+     | # | MAC | notes |
+     |---|-----|-------|
+     | 1 | `88:f1:55:32:63:0c` | original/pre-existing board, tested earlier |
+     | 2 | `88:f1:55:32:5f:6c` | clean |
+     | 3 | `88:f1:55:32:49:c4` | clean |
+     | 4 | `8c:94:df:45:ca:28` | clean |
+     | 5 | `88:f1:55:30:a6:58` | clean |
+     | 6 | `8c:94:df:97:4f:34` | initially dead (SDA/SCL read `-1` — no I2C response despite ESP-NOW/power working); fixed by reflowing the SDA and SCL solder joints |
+     | 7 | `8c:94:df:45:b3:d0` | initially a **solder bridge** (i2c_scanner found ~30 scattered phantom addresses instead of a clean single hit — classic shorted/floating-line signature, not a cold joint); after removing the bridge, VCC/GND turned out to be the real fault (board's power LED wasn't lighting, unlike every other board) — fixed by resoldering VCC/GND, confirmed by i2c_scanner then reliably finding only `0x68` |
+     Receiver/hub board MAC (hardcoded in every sender, from
+     `firmware/sender_esp_now.ino`): `78:1c:3c:35:83:6c` ("Lonely Binary"
+     board, per the code comment).
+   - **Diagnostic technique that generalizes beyond this round**: when a
+     board's sensor data looked dead, `tools/firmware/i2c_scanner.ino`
+     distinguishes two very different failure modes that need different
+     fixes — a clean **"No I2C devices found"** (or a clean single hit at
+     the wrong-looking result) means a weak/cold joint or a power issue,
+     while a **flood of scattered "found" addresses** across the whole
+     0x00-0x7F range means a short/bridge or floating line, and needs the
+     excess solder *removed* (solder wick), not more solder added. A
+     board's onboard power LED (present on most GY-521 modules) not
+     lighting up, when other boards' LEDs do, is a fast way to localize a
+     fault to VCC/GND specifically before touching SDA/SCL at all.
 

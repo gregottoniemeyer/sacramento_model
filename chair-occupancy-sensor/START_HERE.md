@@ -31,4 +31,6 @@ Flash both with the Arduino IDE, board type "ESP32 Dev Module."
 ### 5. The one rule that saves the most pain
 Always double-check which port you're uploading to in the Arduino IDE
 (bottom-right corner) before clicking Upload. Flashing the wrong sketch to
-the wrong board fails silently and produces very confusing symptoms.
+the wrong board fails silently and produces very confusing symptoms. Also:
+only ever power one sender board at a time when testing — see "Bringing up
+a new/repaired chair board" in `README.md` for why and the full procedure.
