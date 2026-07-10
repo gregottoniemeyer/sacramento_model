@@ -251,6 +251,25 @@ raw cell voltage can exceed the 3.3V an ADC pin can safely read). This has
 been deliberately deprioritized in favor of a simpler practical signal for
 now: a chair node that stops reporting in has a dead battery.
 
+**Charging all 7 chair nodes at once (researched 2026-07-10):** since the
+TP5400 charges the cell in place over the board's micro-USB port, the
+simplest bulk-charging setup is a multi-port USB-A wall charger + one
+micro-USB cable per board. Verified in stock: **SHANCAO 10-port USB
+charging station**, $18.99 (4.4★, 5,700+ ratings, Amazon's Choice, ships
+from Amazon):
+`https://www.amazon.com/Charging-Technology-Guaranteed-Family-Sized-Multiple/dp/B084G2RH1C`
+(the better-known Anker PowerPort 10 is discontinued/unavailable). 10
+ports covers all 7 chair nodes with spares. Cable math: the original
+order was ONE 5-pack of USB-A-to-micro cables (`amazon.com/dp/B0FNW9J7TS`)
+— charging 7 boards simultaneously needs 7 cables, so **one more 5-pack
+is needed** regardless of charger choice.
+
+**Spares status after the 2026-07-10 bring-up:** all 7 working chair
+boards use up every MPU-6050 — **there are no spare/redundant assembled
+sensors**. Spare ESP32 boards exist (9 were ordered, 8 in use), so making
+a redundant chair node only requires ordering more GY-521/MPU-6050
+modules (`amazon.com/dp/B00LP25V1A`) and soldering one up.
+
 ## The occupancy model — how it evolved
 
 **Reference: Greg's independently proposed model (2026-07-08 email,
@@ -421,6 +440,11 @@ sensor data, instead of keypresses.
 
 ## Critical path
 
+**Plan for the week of 2026-07-13** (communicated to Greg): install all 7
+boards into their enclosures, build the hub that shows the status of all 7
+chairs at once (items 6 below, plus a status view), and flash/tune the
+battery-efficiency firmware (item 4 below).
+
 1. ~~Hardware bring-up, wiring, ESP-NOW relay, temperature sensing, live
    dashboard, first occupancy model, confidence-decay model~~ — all done.
 2. **Current step:** field-test the confidence-decay model against ordinary,
@@ -440,15 +464,33 @@ sensor data, instead of keypresses.
 7. Physical build-out: enclosures, mounting, battery charging workflow,
    replicate across all 7 chairs and spares, track each board's MAC
    address.
-   - **TODO: check transparent covers** for the chair sensor board
-     enclosures — confirm a transparent cover doesn't interfere with
-     mounting, wiring access, or the wireless range/antenna, and that it
-     looks right on the chairs. The enclosures as ordered (see Parts
-     above) are opaque **ABS**, `https://www.amazon.com/dp/B07RTYYHK7` —
-     if a transparent option/cover is swapped in, confirm the material
-     matches (or re-check laser-cutting/mounting properties for whatever
-     it turns out to be; ABS itself is laser-cuttable but not ideal —
-     scorches at the edge and needs fume ventilation).
+   - **Transparent covers — researched 2026-07-10, at Greg's request** (he
+     wants to see the LEDs working through the case). The enclosure
+     currently ordered (`https://www.amazon.com/dp/B07RTYYHK7`, Zulkit,
+     ABS, 100×68×50mm) offers plenty of *size* variants on its own listing
+     but **no clear/transparent color option at all** — every size is
+     opaque black.
+     - **Best option found (verified in stock 2026-07-10): LMioEtool,
+       same exact 100×68×50mm size, black ABS body + clear (PC) cover,
+       IP65, fixed mounting ears** —
+       `https://www.amazon.com/LMioEtool-Junction-Waterproof-Plastic-Universal/dp/B0FDQJ4N7R`.
+       $6.99 single / $8.99 2-pack, ships from Amazon (fast delivery),
+       4.9★ (34 ratings), Amazon's Choice. Black-body-with-clear-lid is
+       exactly the requirement (LEDs visible through the cover) and
+       matches the look of the current black Zulkit boxes.
+     - Runners-up, verified but worse: uxcell fully-clear ABS
+       (`https://www.amazon.com/uxcell-100x68x50mm-Electronic-Waterproof-Enclosure/dp/B07FKN8SZG`,
+       $15.69, **only 2 in stock**); Fielect grey + clear cover
+       (`https://www.amazon.com/Fielect-Transparent-Switchboard-Distribution-100x68x50mm/dp/B07ZR1W119`,
+       $14.89, third-party seller, ~3-week delivery). Unverified backups:
+       AliExpress `https://www.aliexpress.com/i/3256802662395680.html`,
+       grobotronics (EU, IP67)
+       `https://grobotronics.com/project-box-abs-100x68x50mm-flanged-and-clear-cover-ip67.html`.
+     - Whichever is ordered, re-check laser-cutting/mounting properties
+       for its actual material before cutting any holes — clear ABS is
+       laser-cuttable but not ideal (scorches at the edge, needs fume
+       ventilation); confirm it's genuinely ABS and not a different clear
+       plastic (e.g. acrylic/PETG) before assuming that guidance applies.
    - **All 7 chair sender boards soldered and confirmed working
      (2026-07-10)**, each verified end-to-end (I2C sensor read + ESP-NOW
      relay + live dashboard, wiggle-tested individually with only one
