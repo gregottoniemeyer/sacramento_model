@@ -1,4 +1,4 @@
-# river=cottonwood scale_factor=5000.0 threshold=2368.708
+# river=cottonwood scale_factor=30000.0 threshold=2368.708
 frame	cfs	norm	scaled	high_variation
 0	117.0	0.0039	0.78	0
 1	109.0	0.0036	0.73	0

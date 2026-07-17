@@ -156,3 +156,66 @@ def downsample_minmax(values, target_n=720):
         else:
             out.extend([hi, lo])
     return out
+
+
+def fetch_rdb_daily(site_no, begin_date, end_date):
+    """for sites that only report daily values (dv), not 15-min instantaneous (iv)"""
+    url = (
+        "https://waterservices.usgs.gov/nwis/dv/?format=rdb"
+        f"&sites={site_no}&parameterCd=00060"
+        f"&startDT={begin_date}&endDT={end_date}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "sacramento-model/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8")
+
+
+def parse_rdb_daily(text):
+    """daily-values rdb has no tz_cd column: agency_cd site_no datetime value qualifier"""
+    rows = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 4 or parts[0] in ("agency_cd", "5s"):
+            continue
+        try:
+            rows.append((parts[2], float(parts[3])))
+        except ValueError:
+            continue
+    return rows
+
+
+def fetch_rdb_gauge_height(site_no, begin_date, end_date):
+    url = (
+        "https://waterservices.usgs.gov/nwis/iv/?format=rdb"
+        f"&sites={site_no}&parameterCd=00065"
+        f"&startDT={begin_date}&endDT={end_date}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "sacramento-model/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8")
+
+
+def fetch_rdb_daily(site_no, begin_date, end_date):
+    """for sites that only report daily values (dv), not 15-min instantaneous (iv)"""
+    url = (
+        "https://waterservices.usgs.gov/nwis/dv/?format=rdb"
+        f"&sites={site_no}&parameterCd=00060"
+        f"&startDT={begin_date}&endDT={end_date}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "sacramento-model/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8")
+
+
+def fetch_cdec(station_id, sensor_num, begin_date, end_date, duration="D"):
+    """CDEC query. sensor_num: 3=snow water content, 18=snow depth. duration: D=daily, H=hourly"""
+    url = (
+        "https://cdec.water.ca.gov/dynamicapp/req/CSVDataServlet"
+        f"?Stations={station_id}&SensorNums={sensor_num}"
+        f"&dur_code={duration}&Start={begin_date}&End={end_date}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "sacramento-model/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8")
