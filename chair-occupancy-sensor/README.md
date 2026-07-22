@@ -104,11 +104,16 @@ venv/bin/pip install -r requirements.txt
 
 ## Bringing up a new/repaired chair board
 
-One sender talks over the same channel as every other one, and the packet
-format has no board-ID field (see `SensorPacket` in
-`firmware/sender_esp_now.ino`) — so **only ever power one sender board at a
-time** while testing, or their data interleaves on the dashboard with no way
-to tell which board you're looking at.
+**Multiple senders can be powered at once** (since 2026-07-22). The packet
+itself still has no board-ID field, but it doesn't need one: ESP-NOW hands
+the receiver the sender's MAC, which `firmware/receiver_esp_now.ino` looks
+up in its `chairMacs` table and prints as a `Chair:N` prefix on every line.
+A board that isn't in the table prints `Chair:?[mac]` — so a new or swapped
+board announces its MAC rather than arriving anonymously. Verified with two
+boards streaming simultaneously (0.07% malformed lines).
+
+Swapping a chair's physical board therefore means editing the `chairMacs`
+table and reflashing **the receiver only** — the senders are untouched.
 
 1. Read the board's MAC **before flashing anything**, so a bad flash never
    loses track of which physical board is which:
