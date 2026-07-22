@@ -596,6 +596,12 @@ battery-efficiency firmware (item 4 below).
      of an unlit GY-521 power LED. Fix: reflow VCC and GND at both ends;
      confirm by measuring 3V3-to-GND at the sensor on battery vs USB.
 
+     **Resolved the same day** by reflowing VCC and GND at both ends —
+     board 4 then read 1.037 g on battery, in line with the other six.
+     Confirms the brownout reading: nothing was wrong with the module, the
+     bus or the firmware, only the joint's resistance under a supply that
+     had less headroom to give.
+
      **Procedural lesson: verify a repair under battery power**, since that
      is how these boards actually run. A USB-only pass is not a pass.
    - **Diagnostic technique that generalizes beyond this round**: when a
