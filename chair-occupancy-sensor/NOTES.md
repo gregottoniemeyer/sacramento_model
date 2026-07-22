@@ -286,16 +286,28 @@ limping on a marginal joint):
 | Board | MAC | Role | Verified |
 |---|---|---|---|
 | 1 (rebuilt) | `8c:94:df:46:b5:54` | replaces the dead-USB original | 16,315 raw = 0.996 g |
-| 8 | `88:f1:55:30:af:b4` | **unassigned spare** | 16,220 raw = 0.990 g |
+| 8 → chair 2 | `88:f1:55:30:af:b4` | built as spare, **swapped into chair 2 the same day** | 16,220 raw = 0.990 g |
 
-Board 8 is deliberately **not** in `chairMacs` in
-`firmware/receiver_esp_now.ino`. An unassigned spare should report as
-`Chair:?[88:F1:55:30:AF:B4]` — that way, powering it up by accident is
-visible rather than silently impersonating a chair. Add it to the table
-only when it actually takes over a chair.
+**Both spares were consumed on the day they were built** — one replacing
+chair 1's dead-USB board, one replacing chair 2's corrupted-I2C board. So
+as of 2026-07-22 there is again **no working spare node**, and the two
+retired boards are each faulty in a different way (chair 1's original:
+sound electronics, no USB port, cannot be reflashed or charged in place;
+chair 2's original: intact USB, corrupted I2C reads). Either could
+plausibly be recovered — the chair-2 board by reflowing SDA/SCL, which is
+exactly what fixed board 6 — but neither should be deployed until it is.
 
-Remaining loose sensor/board counts after this build were not tallied —
-check physically before assuming another spare node can be built.
+Remaining loose sensor/board counts were not tallied — check physically
+before assuming another spare node can be built, and treat "we have
+spares" as unverified until then.
+
+**Health check worth reusing:** accelerometer magnitude at rest is a
+single number that validates solder, I2C and packet decoding end to end.
+At the MPU-6050's default ±2g scale, 16,384 raw = 1 g, and a stationary
+sensor must read 1 g because gravity is the only acceleration acting on
+it. Healthy boards land within ~1% (0.990–0.996 g measured here); the
+faulty board read 2.008 g. It must be measured **stationary** — the same
+faulty board read 2.18 g while simply being held, which is not diagnostic.
 
 ## The occupancy model — how it evolved
 
@@ -528,7 +540,7 @@ battery-efficiency firmware (item 4 below).
      | # | MAC | notes |
      |---|-----|-------|
      | 1 | `8c:94:df:46:b5:54` | **rebuilt 2026-07-22.** The original chair-1 board (`88:f1:55:32:63:0c`) had its **micro-USB connector physically torn off**. It still runs and transmits fine on battery, but the port is both how the TP5400 charges the cell in place *and* the only way to reflash — so that board can never receive a firmware update again (it would be stranded at the 100Hz sender when the 2Hz firmware is flashed). Kept as a limited emergency spare, physically labelled "DEAD USB — DO NOT DEPLOY"; its cell must be charged externally in the Nitecore UMS4. Replaced by a freshly built node rather than transplanting the old sensor, since spare sensors were available and desoldering risked the one irreplaceable part. Verified on build: accel magnitude 16,315 raw = 0.996 g. |
-     | 2 | `88:f1:55:32:5f:6c` | clean |
+     | 2 | `88:f1:55:30:af:b4` | **swapped 2026-07-22** — this is the board built that day as spare "board 8". The original chair-2 board (`88:f1:55:32:5f:6c`) developed **corrupted I2C reads** after handling: at rest it reported 2.008 g (physically impossible — a stationary sensor measures exactly 1 g), with two axes reading 1.23 g and 1.41 g *simultaneously*, noise 130× a healthy board (sd 6971 vs 54), and gyro-X frozen at a constant while Y/Z varied. Values were wrong, not absent, so the sensor was responding and the bytes were corrupt — the marginal-SDA/SCL signature, same class as board 6. Swapped rather than repaired to keep the build moving; the faulty board is worth a reflow of SDA/SCL later (that alone fixed board 6). Verified on build: 16,220 raw = 0.990 g. |
      | 3 | `88:f1:55:32:49:c4` | clean |
      | 4 | `8c:94:df:45:ca:28` | clean |
      | 5 | `88:f1:55:30:a6:58` | clean |
