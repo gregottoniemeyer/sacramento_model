@@ -79,9 +79,13 @@ venv/bin/pip install -r requirements.txt
    the port silently resets to 9600 baud if you do):
    ```bash
    exec 3<>/dev/cu.YOUR_PORT_HERE
-   stty -f /dev/fd/3 115200 raw
+   stty -f /dev/fd/3 921600 raw
    cat <&3 > ~/motion_log.txt &
    ```
+   **921600 must match `Serial.begin()` in `firmware/receiver_esp_now.ino`.**
+   These two numbers are a pair — change one and the other must change, or
+   the log fills with garbled bytes rather than failing cleanly. (It was
+   115200 until 2026-07-22; seven boards at 100Hz overrun that ~5x.)
    This dies if the board is ever unplugged — restart it after any
    reconnect (check with `wc -l ~/motion_log.txt` a few seconds apart to
    confirm it's still growing).

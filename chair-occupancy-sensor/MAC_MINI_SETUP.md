@@ -156,10 +156,14 @@ pull-and-restart job does) — it needs to be run once per session, and
 again any time the receiver board is unplugged and replugged:
 ```bash
 exec 3<>/dev/cu.YOUR_PORT_HERE
-stty -f /dev/fd/3 115200 raw
+stty -f /dev/fd/3 921600 raw
 cat <&3 > ~/motion_log.txt &
 disown
 ```
+**921600 must match `Serial.begin()` in `firmware/receiver_esp_now.ino`.**
+Auto-pull updates this machine's *code*, but it cannot reflash the receiver
+board — so if the receiver here was flashed with older firmware, reflash it
+(step 7) rather than lowering this number.
 
 ## Done — what happens automatically from here on
 
