@@ -34,6 +34,13 @@ See `MAC_MINI_SETUP.md` for exact steps.
     straight to Serial over USB, no ESP-NOW/receiver needed. Useful for
     bench-testing a freshly soldered sensor board on its own before
     trusting it with the full sender firmware.
+  - `touch_presence_test.ino` — **experiment, nothing flashed to a chair
+    yet.** Capacitive presence sensing (ESP32 touch pin + an electrode on
+    the seat), at Greg's suggestion 2026-07-21. Unlike the MPU-6050 it
+    measures presence rather than motion, so it targets both known
+    weaknesses of the current model directly. Prints raw counts to Serial
+    over USB. See its header comment for electrode options and the two
+    expected gotchas (floating battery ground, thermal drift).
   - `proposed_2hz_radio_reduction/` — a battery-efficiency redesign (transmit
     a computed summary twice a second instead of every 100Hz sample).
     **Designed but not yet flashed to any board** — see the header comment
