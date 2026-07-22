@@ -301,6 +301,25 @@ Remaining loose sensor/board counts were not tallied — check physically
 before assuming another spare node can be built, and treat "we have
 spares" as unverified until then.
 
+**Label boards with the last two MAC octets, not just a number.** On
+2026-07-22 the good board and the faulty one were briefly confused because
+their MACs differ by one character in the middle — `88:f1:55:32:5f:6c`
+(faulty) against `88:f1:55:30:af:b4` (good) — while the reused number "8"
+ended up on the *retired* board even though the records had board 8 sitting
+in chair 2. Two rules that prevent the repeat:
+
+- Every label carries the chair number **and** the MAC's last two octets,
+  e.g. `CHAIR 2 · AF:B4`. Those octets are exactly what the receiver prints
+  in a `Chair:?[...]` line, so a label can be checked against live output
+  without opening anything. `5F:6C` vs `AF:B4` is unmistakable where
+  `...55:32:...` vs `...55:30:...` is not.
+- **Retired boards get no number at all** — a spare number invites reuse.
+  Label them by fault: `DEAD · I2C · 5F:6C`, `DEAD · NO USB · 63:0C`.
+
+For the same reason, the board built on 2026-07-22 as "board 8" is better
+referred to as **chair 2 (`af:b4`)** now that it is deployed; "board 8" is
+retired as a name.
+
 **Health check worth reusing:** accelerometer magnitude at rest is a
 single number that validates solder, I2C and packet decoding end to end.
 At the MPU-6050's default ±2g scale, 16,384 raw = 1 g, and a stationary
