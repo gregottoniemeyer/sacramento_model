@@ -568,6 +568,36 @@ battery-efficiency firmware (item 4 below).
      Receiver/hub board MAC (hardcoded in every sender, from
      `firmware/sender_esp_now.ino`): `78:1c:3c:35:83:6c` ("Lonely Binary"
      board, per the code comment).
+   - **A board can pass every USB diagnostic and still be broken on
+     battery (board 4, 2026-07-22).** Chair 4 transmitted a full 100
+     samples/sec but every field — accel, gyro *and temperature* — read
+     exactly `0`. Note that all-zeros is a different fault from board 6's
+     all-`-1`: `-1` means no I2C response at all, while zeros mean the
+     device answers and reports nothing. The escalation in `README.md`
+     cleared it completely and misleadingly:
+     - `i2c_scanner` → clean single hit at `0x68`, so no cold joint and no
+       bridge;
+     - `mpu_read_test` → perfectly good data, 0.957 g, normal temperature.
+
+     Both of those run over **USB**, and the fault only appears on
+     **battery**. Reflashing the sender also appeared to fix it — but only
+     because the board was on USB at the time, which is a confound worth
+     avoiding: change one variable at a time. A fresh cell ruled out simple
+     depletion.
+
+     Signature and reading of it: the ESP32 boots, drives the radio and
+     transmits at full rate, while only the sensor fails, and it fails to
+     zeros rather than to no-response. That is a brownout pattern — the
+     ESP32 and the MPU's digital I2C interface tolerate a sagging 3V3 rail;
+     the MPU's analog sensing core does not. On USB the board runs off a
+     stiff 5V supply, whereas on battery the TP5400 boosts a 3.7V cell, so
+     a marginal VCC/GND joint that conducts enough for I2C can still starve
+     the sensor. Same fault class as board 7, but without the obvious tell
+     of an unlit GY-521 power LED. Fix: reflow VCC and GND at both ends;
+     confirm by measuring 3V3-to-GND at the sensor on battery vs USB.
+
+     **Procedural lesson: verify a repair under battery power**, since that
+     is how these boards actually run. A USB-only pass is not a pass.
    - **Diagnostic technique that generalizes beyond this round**: when a
      board's sensor data looked dead, `tools/firmware/i2c_scanner.ino`
      distinguishes two very different failure modes that need different
