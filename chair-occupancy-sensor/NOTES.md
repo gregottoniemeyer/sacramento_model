@@ -143,6 +143,16 @@ physical store as backup/supplement to the original order, generic
 Arduino IDE, ESP32 board package installed, board profile **"ESP32 Dev
 Module"** used for every board regardless of which specific variant it is.
 
+**Core version:** the ESP32 core was updated to **3.3.11** (esptool_py
+5.3.1) on 2026-07-22, mid-session, via the IDE's "Updates are available for
+some of your boards" prompt. The original 7 boards were brought up on an
+older core. Nothing broke — the ESP-NOW API is stable across 3.x and the
+packet is plain data with no version coupling — but it's worth knowing that
+the boards in the field are not all built from the same core, and that
+`esptool`'s path contains its version number (so a hardcoded
+`.../esptool_py/5.3.0/esptool` path silently breaks after an update; glob
+the version instead).
+
 **Two USB-serial chip families are in circulation across these boards**,
 identifiable by port name:
 - `/dev/cu.usbserial-XXXX` or `/dev/cu.SLAB_USBtoUART` → **CP2102** (Silicon
@@ -264,11 +274,28 @@ order was ONE 5-pack of USB-A-to-micro cables (`amazon.com/dp/B0FNW9J7TS`)
 — charging 7 boards simultaneously needs 7 cables, so **one more 5-pack
 is needed** regardless of charger choice.
 
-**Spares status after the 2026-07-10 bring-up:** all 7 working chair
-boards use up every MPU-6050 — **there are no spare/redundant assembled
-sensors**. Spare ESP32 boards exist (9 were ordered, 8 in use), so making
-a redundant chair node only requires ordering more GY-521/MPU-6050
-modules (`amazon.com/dp/B00LP25V1A`) and soldering one up.
+**Spares status (updated 2026-07-22).** The 2026-07-10 position — no spare
+assembled sensors, one spare ESP32 — no longer holds: more sensors arrived
+(Greg offered to order them in his 2026-07-12 email), and two further nodes
+were assembled on 2026-07-22. Both verified by accelerometer magnitude
+against gravity, which is a cheap end-to-end check of solder + I2C in one
+number (1g = 16,384 raw at the MPU-6050's default ±2g scale; anything
+within a percent or so of that means the sensor is genuinely working, not
+limping on a marginal joint):
+
+| Board | MAC | Role | Verified |
+|---|---|---|---|
+| 1 (rebuilt) | `8c:94:df:46:b5:54` | replaces the dead-USB original | 16,315 raw = 0.996 g |
+| 8 | `88:f1:55:30:af:b4` | **unassigned spare** | 16,220 raw = 0.990 g |
+
+Board 8 is deliberately **not** in `chairMacs` in
+`firmware/receiver_esp_now.ino`. An unassigned spare should report as
+`Chair:?[88:F1:55:30:AF:B4]` — that way, powering it up by accident is
+visible rather than silently impersonating a chair. Add it to the table
+only when it actually takes over a chair.
+
+Remaining loose sensor/board counts after this build were not tallied —
+check physically before assuming another spare node can be built.
 
 ## The occupancy model — how it evolved
 
@@ -500,7 +527,7 @@ battery-efficiency firmware (item 4 below).
      logic has a parallel per-chair reference):
      | # | MAC | notes |
      |---|-----|-------|
-     | 1 | `88:f1:55:32:63:0c` | original/pre-existing board, tested earlier |
+     | 1 | `8c:94:df:46:b5:54` | **rebuilt 2026-07-22.** The original chair-1 board (`88:f1:55:32:63:0c`) had its **micro-USB connector physically torn off**. It still runs and transmits fine on battery, but the port is both how the TP5400 charges the cell in place *and* the only way to reflash — so that board can never receive a firmware update again (it would be stranded at the 100Hz sender when the 2Hz firmware is flashed). Kept as a limited emergency spare, physically labelled "DEAD USB — DO NOT DEPLOY"; its cell must be charged externally in the Nitecore UMS4. Replaced by a freshly built node rather than transplanting the old sensor, since spare sensors were available and desoldering risked the one irreplaceable part. Verified on build: accel magnitude 16,315 raw = 0.996 g. |
      | 2 | `88:f1:55:32:5f:6c` | clean |
      | 3 | `88:f1:55:32:49:c4` | clean |
      | 4 | `8c:94:df:45:ca:28` | clean |
