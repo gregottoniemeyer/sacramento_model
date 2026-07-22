@@ -1,11 +1,18 @@
-"""Live MPU-6050 dashboard for the chair occupancy project.
+"""Live 7-chair dashboard for the chair occupancy project.
 
 Reads new lines as they are appended to ~/motion_log.txt (written by the
-background serial capture) and plots the last 10 seconds of accelerometer
-and gyro data in two labeled charts.
+background serial capture) and shows one row per chair: occupancy status,
+confidence, accelerometer and gyro traces, temperature, and link health.
 
-Run with:  ~/chair-project/venv/bin/python ~/chair-project/live_plot.py
-Stop with: Ctrl+C in the terminal, or just close the chart window.
+Expects the receiver to tag every line with the chair it came from:
+
+    Chair:3  Accel  X:..  Y:..  Z:..    Gyro  X:..  Y:..  Z:..    Temp:..
+
+An unrecognised board arrives as `Chair:?[mac]` and is surfaced in the
+header rather than silently dropped.
+
+Run with:  venv/bin/python tools/live_plot.py
+Stop with: Ctrl+C in the terminal, or just close the window.
 """
 
 import collections
@@ -16,6 +23,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.patches import FancyBboxPatch, Rectangle
 
 # ============================================================================
 #  OCCUPANCY MODEL CONSTANTS — everything tweakable lives here
@@ -103,23 +111,59 @@ LONG_QUIET_WINDOW = 15.0      # trailing seconds for the burst-less release
 LONG_QUIET_FRACTION = 0.80    # quiet share needed for the burst-less release
 # ============================================================================
 
+# ---- Link health / sensor health --------------------------------------------
+# A chair with no packet for this long reads NO SIGNAL rather than FREE. Seven
+# battery-powered boards means a flat cell is the *expected* failure, and
+# silence must not be mistaken for an empty chair. 2s is ~200 missed samples
+# at the 100Hz sender rate, far beyond any normal gap.
+SIGNAL_TIMEOUT = 2.0
+RATE_WINDOW = 2.0             # trailing seconds used for the per-chair Hz readout
+EXPECTED_HZ = 100.0           # sender transmits every sample at 100Hz
+
+# Sensor sanity, straight out of the 2026-07-22 bring-up: a stationary
+# MPU-6050 must measure exactly 1g, because gravity is the only acceleration
+# acting on it. A healthy board sits at 0.93-1.04g. The failures seen were far
+# outside that — a board with a marginal VCC/GND joint read 0.000g on battery,
+# and one with corrupted I2C read 2.008g. The band below is deliberately wide
+# so that genuine motion (which legitimately swings magnitude) does not trip
+# it; it is checked against the MEDIAN over several seconds, not an instant.
+SENSOR_OK_LOW = 0.55
+SENSOR_OK_HIGH = 1.60
+SENSOR_CHECK_WINDOW = 5.0
+
 LOG_FILE = Path.home() / "motion_log.txt"
-WINDOW_SECONDS = 10
+WINDOW_SECONDS = 10           # sparkline span
+NUM_CHAIRS = 7
+MAX_PLOT_POINTS = 240         # decimate before drawing; 100Hz x 10s x 42 series
+                              # is far more than any screen can resolve, and
+                              # plotting it all is what makes the UI lag.
+
+# Mirrors REGIMES in ../controller.py — chair N drives regime N. Kept as a
+# literal rather than imported, since controller.py is a runnable script one
+# directory up and importing it here would couple the two at start-up.
+REGIMES = [
+    "Yurok Kinship",
+    "Hydraulic Mining",
+    "Reclamation & Levees",
+    "Dams and Pumps",
+    "Environmental Reg",
+    "Climate Stress",
+    "AI Extraction",
+]
 
 # ---- Visual theme (light) ----------------------------------------------------
-PAGE_BG = "#f9f9f7"        # window background
-SURFACE = "#fcfcfb"        # chart surface
-INK = "#0b0b0b"            # primary text
-INK_2 = "#52514e"          # secondary text (axis titles)
-MUTED = "#898781"          # tick labels, detail line
-GRID = "#e1e0d9"           # hairline gridlines
-BASELINE = "#c3c2b7"       # axis baseline
+PAGE_BG = "#f9f9f7"
+SURFACE = "#fcfcfb"
+INK = "#0b0b0b"
+INK_2 = "#52514e"
+MUTED = "#898781"
+GRID = "#e1e0d9"
+BASELINE = "#c3c2b7"
 STATUS_OCCUPIED = "#d03b3b"
 STATUS_FREE = "#0ca30c"
 STATUS_WAIT = "#898781"
-# Per-axis series colors, consistent across both charts (X/Y/Z keep the same
-# hue in accel and gyro). Z gets blue — it's the trace the occupancy model
-# watches, so it should be the most legible one.
+STATUS_FAULT = "#c77b16"
+ROW_ALT = "#f4f3ef"           # subtle banding so 7 rows stay readable
 AXIS_COLORS = {"X": "#1baf7a", "Y": "#eda100", "Z": "#2a78d6"}
 
 plt.rcParams.update({
@@ -132,21 +176,32 @@ plt.rcParams.update({
     "text.color": INK,
 })
 
-# Matches: Accel  X:-12340  Y:212  Z:10700    Gyro  X:-1262  Y:-620  Z:63    Temp:2434
+# Matches:  Chair:3  Accel  X:-12340 ... Temp:2434
+# The chair token is either a digit or `?[AA:BB:...]` for an unknown board.
 LINE_RE = re.compile(
+    r"Chair:(\d+|\?\[[0-9A-Fa-f:]+\])\s+"
     r"Accel\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+"
     r"Gyro\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+"
     r"Temp:(-?\d+)"
 )
+# Same line without the Chair: prefix — i.e. a receiver still running firmware
+# from before 2026-07-22. Detected only so the header can say so explicitly,
+# instead of the dashboard sitting blank with no explanation.
+LEGACY_RE = re.compile(r"Accel\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+Gyro")
 
-# One deque per series, holding (timestamp, value) pairs.
 SERIES_NAMES = ["Accel X", "Accel Y", "Accel Z", "Gyro X", "Gyro Y", "Gyro Z"]
-series = {name: collections.deque() for name in SERIES_NAMES}
 
 # Sensitivity at the sensor's default range settings (±2g, ±250°/s):
 # raw counts per unit. Dividing raw values by these converts to real units.
 ACCEL_LSB_PER_G = 16384.0
 GYRO_LSB_PER_DEG_S = 131.0
+
+# (Converted once from raw counts to the °/s the charts use:)
+Z_FLOOR = Z_MOTION_THRESHOLD_RAW / GYRO_LSB_PER_DEG_S
+RATIO_EPS = 1.0 / GYRO_LSB_PER_DEG_S
+BIG_DELTA = BIG_DELTA_RAW / GYRO_LSB_PER_DEG_S
+DEPART_BURST = DEPART_BURST_STD_RAW / GYRO_LSB_PER_DEG_S
+DEPART_QUIET = DEPART_QUIET_STD_RAW / GYRO_LSB_PER_DEG_S
 
 
 def to_physical_units(name, raw_value):
@@ -159,274 +214,428 @@ def temp_raw_to_celsius(raw_value):
     return raw_value / 340.0 + 36.53
 
 
-log = open(LOG_FILE, "r", errors="ignore")
-log.seek(0, 2)  # start at the end: only show data from now on
-partial = ""
+class Chair:
+    """Per-chair sample buffers plus one instance of the occupancy model.
+
+    The model is unchanged from the single-chair version — same constants,
+    same tests, same v3 departure logic — only made per-chair, since each
+    board now needs its own confidence and quiet history.
+    """
+
+    def __init__(self, index):
+        self.index = index                       # 0-based
+        self.number = index + 1
+        self.regime = REGIMES[index]
+        self.series = {name: collections.deque() for name in SERIES_NAMES}
+        self.packet_times = collections.deque()
+        self.quiet_history = collections.deque()
+        self.state = {"last_move": None, "confidence": 0.0,
+                      "burst_at": None, "departed_at": None, "depart_base": 0.0}
+        self.confidence = 0.0
+        self.temp_c = None
+        self.last_packet = None
+        self.detail = ""
+
+    # -- ingest ---------------------------------------------------------------
+    def add_sample(self, t, motion_values, temp_raw):
+        for name, value in zip(SERIES_NAMES, motion_values):
+            self.series[name].append((t, to_physical_units(name, value)))
+        self.temp_c = temp_raw_to_celsius(temp_raw)
+        self.last_packet = t
+        self.packet_times.append(t)
+
+    def trim(self, now):
+        cutoff = now - WINDOW_SECONDS
+        for dq in self.series.values():
+            while dq and dq[0][0] < cutoff:
+                dq.popleft()
+        while self.packet_times and self.packet_times[0] < now - RATE_WINDOW:
+            self.packet_times.popleft()
+
+    # -- health ---------------------------------------------------------------
+    @property
+    def online(self):
+        return (self.last_packet is not None
+                and time.time() - self.last_packet < SIGNAL_TIMEOUT)
+
+    def rate_hz(self):
+        if not self.packet_times:
+            return 0.0
+        span = max(self.packet_times[-1] - self.packet_times[0], 1e-6)
+        return (len(self.packet_times) - 1) / span if len(self.packet_times) > 1 else 0.0
+
+    def sensor_fault(self, now):
+        """True when the accel magnitude is nowhere near 1g while at rest.
+
+        Checked on the MEDIAN over several seconds so that real motion, which
+        legitimately swings the magnitude around, does not trip it.
+        """
+        xs = [v for t, v in self.series["Accel X"] if t >= now - SENSOR_CHECK_WINDOW]
+        ys = [v for t, v in self.series["Accel Y"] if t >= now - SENSOR_CHECK_WINDOW]
+        zs = [v for t, v in self.series["Accel Z"] if t >= now - SENSOR_CHECK_WINDOW]
+        n = min(len(xs), len(ys), len(zs))
+        if n < 50:
+            return False
+        mags = [(xs[i] ** 2 + ys[i] ** 2 + zs[i] ** 2) ** 0.5 for i in range(n)]
+        med = statistics.median(mags)
+        return not (SENSOR_OK_LOW <= med <= SENSOR_OK_HIGH)
+
+    # -- occupancy model (logic identical to the single-chair version) --------
+    def gyro_stds_last_second(self, now):
+        xs = [v for t, v in self.series["Gyro X"] if t >= now - 1.0]
+        ys = [v for t, v in self.series["Gyro Y"] if t >= now - 1.0]
+        zs = [v for t, v in self.series["Gyro Z"] if t >= now - 1.0]
+        if len(zs) < 5:
+            return None
+        return statistics.pstdev(xs), statistics.pstdev(ys), statistics.pstdev(zs)
+
+    def big_motion_last_second(self, now):
+        count = 0
+        for name in SERIES_NAMES[3:]:
+            recent = [v for t, v in self.series[name] if t >= now - 1.0]
+            count += sum(1 for a, b in zip(recent, recent[1:]) if abs(b - a) > BIG_DELTA)
+        return count >= BIG_DELTA_DEBOUNCE
+
+    def person_motion(self, now):
+        stds = self.gyro_stds_last_second(now)
+        if stds is None:
+            return False
+        sx, sy, sz = stds
+        ratio_test = sz > Z_FLOOR and sz / (sx + sy + RATIO_EPS) > RATIO_THRESHOLD
+        return ratio_test or self.big_motion_last_second(now)
+
+    def update_occupancy(self, now):
+        st = self.state
+        if self.person_motion(now):
+            st["last_move"] = now
+            st["departed_at"] = None  # person still here — cancel drain
+
+        stds = self.gyro_stds_last_second(now)
+        if stds is not None:
+            smax = max(stds)
+            self.quiet_history.append((now, smax < DEPART_QUIET))
+            cutoff = now - max(DEPART_QUIET_WINDOW, LONG_QUIET_WINDOW)
+            while self.quiet_history and self.quiet_history[0][0] < cutoff:
+                self.quiet_history.popleft()
+            if smax > DEPART_BURST:
+                st["burst_at"] = now
+            if st["departed_at"] is None:
+                short = [q for t, q in self.quiet_history
+                         if t >= now - DEPART_QUIET_WINDOW]
+                frac_short = sum(short) / len(short) if short else 0.0
+                frac_long = (sum(q for _, q in self.quiet_history)
+                             / len(self.quiet_history))
+                burst = st["burst_at"]
+                paired = burst is not None and now - burst <= DEPART_PAIR_WINDOW
+                warmed_up = now - self.quiet_history[0][0] >= LONG_QUIET_WINDOW - 1.0
+                if ((paired and frac_short >= DEPART_QUIET_FRACTION)
+                        or (warmed_up and frac_long >= LONG_QUIET_FRACTION
+                            and st["confidence"] > 0)):
+                    st["departed_at"] = now
+                    st["depart_base"] = st["confidence"]
+                    st["burst_at"] = None
+
+        last = st["last_move"]
+        departed = st["departed_at"]
+        if last is None:
+            confidence = 0.0
+            detail = "no recent person-motion"
+        elif departed is not None:
+            frac = (now - departed) / DEPART_DRAIN_SECONDS
+            confidence = max(0.0, st["depart_base"] * (1.0 - frac))
+            detail = "stand-up detected"
+        else:
+            quiet = now - last
+            confidence = CONFIDENCE_MAX * max(
+                0.0, 1.0 - quiet / CONFIDENCE_DECAY_SECONDS)
+            detail = f"last motion {quiet:.0f}s ago"
+        st["confidence"] = confidence
+        self.confidence = confidence
+        self.detail = detail
+
+    @property
+    def occupied(self):
+        return self.online and self.confidence > OCCUPIED_WHEN_ABOVE
+
+
+chairs = [Chair(i) for i in range(NUM_CHAIRS)]
+unknown_macs = {}          # mac string -> last seen timestamp
+legacy_lines_seen = [0]    # boxed so the reader can mutate it
+
+
+# ---- log reader --------------------------------------------------------------
+class LogReader:
+    """Tails the capture file, and re-opens it if it is replaced or truncated.
+
+    Restarting the serial capture with `>` truncates the log out from under
+    this process, which previously left the dashboard showing stale data with
+    no error at all (see README, "Running the live pipeline"). Detecting a
+    shrinking file and re-opening removes that trap.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.fh = None
+        self.partial = ""
+        self._open(seek_end=True)
+
+    def _open(self, seek_end):
+        try:
+            self.fh = open(self.path, "r", errors="ignore")
+            if seek_end:
+                self.fh.seek(0, 2)
+            self.partial = ""
+        except FileNotFoundError:
+            self.fh = None
+
+    def read_lines(self):
+        if self.fh is None:
+            self._open(seek_end=False)
+            if self.fh is None:
+                return []
+        try:
+            size = self.path.stat().st_size
+        except FileNotFoundError:
+            self.fh = None
+            return []
+        if size < self.fh.tell():          # truncated / replaced
+            self._open(seek_end=False)
+            if self.fh is None:
+                return []
+        chunk = self.fh.read()
+        if not chunk:
+            return []
+        text = self.partial + chunk
+        lines = text.split("\n")
+        self.partial = lines.pop()
+        return lines
+
+
+reader = LogReader(LOG_FILE)
 last_read_time = time.time()
-latest_temp_c = None
 
 
 def read_new_samples():
-    """Pull any newly appended lines out of the log file."""
-    global partial, last_read_time, latest_temp_c
-    chunk = log.read()
-    if not chunk:
-        return
-    text = partial + chunk
-    lines = text.split("\n")
-    partial = lines.pop()  # last element may be a half-written line
+    global last_read_time
+    lines = reader.read_lines()
+    now = time.time()
     if not lines:
+        last_read_time = now
+        for c in chairs:
+            c.trim(now)
         return
 
-    now = time.time()
-    elapsed = now - last_read_time
+    elapsed = max(now - last_read_time, 1e-6)
     n = len(lines)
-    # Spread this batch evenly across the time since the last read, instead
-    # of stamping every sample in the batch with the same timestamp (which
-    # collapses several real points onto one vertical line and produces a
-    # boxy/staircase look).
+    # Spread the batch evenly across the time since the last read rather than
+    # stamping every sample identically, which would collapse many real points
+    # onto one vertical line.
     for i, line in enumerate(lines):
         m = LINE_RE.search(line)
         if not m:
+            if LEGACY_RE.search(line):
+                legacy_lines_seen[0] += 1
             continue
         t = last_read_time + elapsed * (i + 1) / n
-        *motion_values, temp_raw = [int(g) for g in m.groups()]
-        for name, value in zip(SERIES_NAMES, motion_values):
-            series[name].append((t, to_physical_units(name, value)))
-        latest_temp_c = temp_raw_to_celsius(temp_raw)  # kept fresh; display is throttled separately
+        token = m.group(1)
+        values = [int(g) for g in m.groups()[1:]]
+        *motion_values, temp_raw = values
+        if token.startswith("?"):
+            unknown_macs[token[2:-1]] = t
+            continue
+        idx = int(token) - 1
+        if 0 <= idx < NUM_CHAIRS:
+            chairs[idx].add_sample(t, motion_values, temp_raw)
     last_read_time = now
-    # Drop anything older than the display window.
-    cutoff = now - WINDOW_SECONDS
-    for dq in series.values():
-        while dq and dq[0][0] < cutoff:
-            dq.popleft()
+    for c in chairs:
+        c.trim(now)
 
 
-# Confidence gets its own, longer time window — it does NOT share the x-axis
-# with accel/gyro. Fixed width (the slow 90s fallback decay would make an
-# auto-sized window uselessly wide; 40s comfortably shows arrivals, the flat
-# occupied stretch, and the sub-second departure drain).
-CONFIDENCE_WINDOW_SECONDS = 40
+def decimate(pairs, now):
+    """Thin a deque down to at most MAX_PLOT_POINTS (x = seconds ago)."""
+    if not pairs:
+        return [], []
+    step = max(1, len(pairs) // MAX_PLOT_POINTS)
+    sl = list(pairs)[::step]
+    return [t - now for t, _ in sl], [v for _, v in sl]
 
-fig = plt.figure(figsize=(10, 9.4))
-gs = fig.add_gridspec(3, 1, height_ratios=[1, 1, 0.6], hspace=0.35)
-ax_accel = fig.add_subplot(gs[0])
-ax_gyro = fig.add_subplot(gs[1], sharex=ax_accel)
-ax_conf = fig.add_subplot(gs[2])
-fig.canvas.manager.set_window_title("MPU-6050 live — chair sensor")
+
+# ---- figure ------------------------------------------------------------------
+fig = plt.figure(figsize=(24, 13.5))
+fig.canvas.manager.set_window_title("Sacramento Model — 7 chair sensors")
 fig.patch.set_facecolor(PAGE_BG)
 
-accel_lines = {}
-gyro_lines = {}
-for name in SERIES_NAMES[:3]:
-    axis = name[-1]  # "X" / "Y" / "Z"
-    (accel_lines[name],) = ax_accel.plot([], [], label=axis, linewidth=2,
-                                         color=AXIS_COLORS[axis])
-for name in SERIES_NAMES[3:]:
-    axis = name[-1]
-    (gyro_lines[name],) = ax_gyro.plot([], [], label=axis, linewidth=2,
-                                       color=AXIS_COLORS[axis])
+gs = fig.add_gridspec(
+    NUM_CHAIRS, 3, width_ratios=[2.25, 3.4, 3.4],
+    left=0.012, right=0.988, top=0.885, bottom=0.045, hspace=0.28, wspace=0.10,
+)
 
-ax_accel.set_ylabel("Acceleration (g)", fontsize=11)
-ax_gyro.set_ylabel("Angular velocity (°/s)", fontsize=11)
-ax_conf.set_ylabel("Confidence", fontsize=11)
-ax_conf.set_xlabel("Seconds ago", fontsize=11)
-for ax in (ax_accel, ax_gyro, ax_conf):
-    ax.set_facecolor(SURFACE)
-    ax.grid(True, color=GRID, linewidth=0.8)
-    ax.set_axisbelow(True)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(BASELINE)
-    ax.tick_params(labelsize=9, length=0)
-ax_accel.set_xlim(-WINDOW_SECONDS, 0)
-ax_conf.set_xlim(-CONFIDENCE_WINDOW_SECONDS, 0)
-for ax in (ax_accel, ax_gyro):
-    leg = ax.legend(loc="upper left", ncols=3, frameon=False,
-                    fontsize=10, handlelength=1.2, columnspacing=1.2,
-                    labelcolor=INK_2)
+header_title = fig.text(0.012, 0.965, "SACRAMENTO MODEL — CHAIR SENSORS",
+                        ha="left", va="center", fontsize=21, fontweight="bold",
+                        color=INK)
+header_count = fig.text(0.5, 0.963, "—", ha="center", va="center",
+                        fontsize=34, fontweight="bold", color=STATUS_WAIT)
+header_regime = fig.text(0.5, 0.921, "", ha="center", va="center",
+                         fontsize=14, color=INK_2)
+header_link = fig.text(0.988, 0.968, "", ha="right", va="center",
+                       fontsize=13, color=MUTED)
+header_warn = fig.text(0.988, 0.933, "", ha="right", va="center",
+                       fontsize=12, color=STATUS_FAULT, fontweight="bold")
 
-temp_text = fig.text(0.985, 0.975, "-- °C", ha="right", va="top",
-                     fontsize=13, color=INK_2)
-TEMP_DISPLAY_INTERVAL = 1.0  # seconds; sensor data arrives much faster than this
-last_temp_display_update = 0.0
-
-# Small yellow dot, upper-left corner: at-a-glance visual confirmation that
-# the dashboard running on screen has picked up the latest pushed code.
-fig.add_artist(plt.Circle((0.02, 0.975), 0.012, transform=fig.transFigure,
+# Small yellow dot, upper-left: at-a-glance confirmation that the dashboard on
+# screen is running the latest pushed code.
+fig.add_artist(plt.Circle((0.006, 0.965), 0.004, transform=fig.transFigure,
                           facecolor="#e6c300", edgecolor="none", zorder=10))
 
-# ---- Occupancy detection: confidence-decay model -----------------------------
-# One idea only: person-like motion snaps a confidence factor to
-# CONFIDENCE_MAX; with no motion it decays linearly to 0 over
-# CONFIDENCE_DECAY_SECONDS. Banner reads OCCUPIED while confidence is above
-# OCCUPIED_WHEN_ABOVE. All tunable numbers live in the constants block at the
-# very top of this file.
-#
-# "Person-like motion" = either:
-#   (a) ratio test — gyroZ 1s std-dev above the Z floor AND Z std dominating
-#       X+Y std (seated micro-motion is chair swivel, nearly pure Z; walk-by
-#       floor vibration shakes all three axes and is rejected), OR
-#   (b) big-motion test — repeated large sample-to-sample gyro jumps in 1s.
-# (Converted once from raw counts to the °/s the charts use:)
-Z_FLOOR = Z_MOTION_THRESHOLD_RAW / GYRO_LSB_PER_DEG_S
-RATIO_EPS = 1.0 / GYRO_LSB_PER_DEG_S
-BIG_DELTA = BIG_DELTA_RAW / GYRO_LSB_PER_DEG_S
+rows = []
+for i, chair in enumerate(chairs):
+    ax_id = fig.add_subplot(gs[i, 0])
+    ax_acc = fig.add_subplot(gs[i, 1])
+    ax_gyr = fig.add_subplot(gs[i, 2])
 
-occupancy_state = {"last_move": None, "confidence": 0.0,
-                   "burst_at": None,      # time of last departure-strength jolt
-                   "departed_at": None,   # when a departure was confirmed
-                   "depart_base": 0.0}    # confidence value at that moment
-DEPART_BURST = DEPART_BURST_STD_RAW / GYRO_LSB_PER_DEG_S
-DEPART_QUIET = DEPART_QUIET_STD_RAW / GYRO_LSB_PER_DEG_S
-quiet_history = collections.deque()       # (timestamp, is_quiet) pairs
-confidence_history = collections.deque()  # (timestamp, confidence) pairs
+    # --- identity / status panel (drawn in 0..1 axes coordinates) ---
+    ax_id.set_xlim(0, 1)
+    ax_id.set_ylim(0, 1)
+    ax_id.set_xticks([])
+    ax_id.set_yticks([])
+    ax_id.set_facecolor(ROW_ALT if i % 2 else SURFACE)
+    for side in ax_id.spines.values():
+        side.set_visible(False)
 
-# Big status banner: bold white text on a colored pill centered at the top.
-status_text = fig.text(0.5, 0.955, "WAITING FOR DATA…", ha="center", va="center",
-                       fontsize=28, fontweight="bold", color="white",
-                       bbox=dict(boxstyle="round,pad=0.55,rounding_size=0.9",
-                                 facecolor=STATUS_WAIT, edgecolor="none"))
-# Small sub-line for the "how long" detail.
-status_detail = fig.text(0.5, 0.895, "", ha="center", va="center",
-                         fontsize=10, color=MUTED)
+    t_num = ax_id.text(0.035, 0.66, str(chair.number), fontsize=40,
+                       fontweight="bold", color=INK, va="center", ha="left")
+    t_regime = ax_id.text(0.20, 0.80, chair.regime, fontsize=13,
+                          color=INK_2, va="center", ha="left")
+    pill = FancyBboxPatch((0.20, 0.44), 0.42, 0.26,
+                          boxstyle="round,pad=0.012,rounding_size=0.06",
+                          facecolor=STATUS_WAIT, edgecolor="none",
+                          transform=ax_id.transAxes)
+    ax_id.add_patch(pill)
+    t_status = ax_id.text(0.41, 0.575, "NO SIGNAL", fontsize=15,
+                          fontweight="bold", color="white",
+                          va="center", ha="center")
 
-# Confidence chart: scrolling line + fill, same time axis as accel/gyro, with
-# a dashed cutoff at the OCCUPIED/FREE threshold and a live number top-right.
-ax_conf.set_ylim(0, CONFIDENCE_MAX)
-(conf_line,) = ax_conf.plot([], [], linewidth=2, color=STATUS_FREE)
-conf_fill = ax_conf.fill_between([], [], color=STATUS_FREE, alpha=0.15)
-ax_conf.axhline(OCCUPIED_WHEN_ABOVE, color=INK_2, linewidth=1, linestyle="--")
-conf_value = ax_conf.text(0.99, 0.92, "–", transform=ax_conf.transAxes,
-                          ha="right", va="top", fontsize=13, fontweight="bold",
-                          color=INK_2)
+    # confidence bar
+    ax_id.add_patch(Rectangle((0.20, 0.245), 0.72, 0.10, facecolor=GRID,
+                              edgecolor="none", transform=ax_id.transAxes))
+    bar = Rectangle((0.20, 0.245), 0.0, 0.10, facecolor=STATUS_WAIT,
+                    edgecolor="none", transform=ax_id.transAxes)
+    ax_id.add_patch(bar)
+    t_conf = ax_id.text(0.955, 0.295, "0", fontsize=12, color=INK_2,
+                        va="center", ha="right", fontweight="bold")
+    t_meta = ax_id.text(0.035, 0.09, "", fontsize=11, color=MUTED,
+                        va="center", ha="left")
 
+    # --- traces ---
+    acc_lines, gyr_lines = {}, {}
+    for axis in ("X", "Y", "Z"):
+        (acc_lines[axis],) = ax_acc.plot([], [], linewidth=1.4,
+                                         color=AXIS_COLORS[axis], label=axis)
+        (gyr_lines[axis],) = ax_gyr.plot([], [], linewidth=1.4,
+                                         color=AXIS_COLORS[axis], label=axis)
+    # Fixed scales, deliberately: chairs stay directly comparable at a glance,
+    # and there is no autoscale cost every frame.
+    ax_acc.set_ylim(-2.0, 2.0)
+    ax_gyr.set_ylim(-250, 250)
+    for ax in (ax_acc, ax_gyr):
+        ax.set_xlim(-WINDOW_SECONDS, 0)
+        ax.set_facecolor(ROW_ALT if i % 2 else SURFACE)
+        ax.grid(True, color=GRID, linewidth=0.7)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(BASELINE)
+        ax.tick_params(labelsize=8, length=0)
+        if i != NUM_CHAIRS - 1:
+            ax.set_xticklabels([])
+    if i == 0:
+        ax_acc.set_title("Acceleration (g)", fontsize=12, color=INK_2, pad=8)
+        ax_gyr.set_title("Angular velocity (°/s)", fontsize=12, color=INK_2, pad=8)
+        ax_acc.legend(loc="upper right", ncols=3, frameon=False, fontsize=9,
+                      handlelength=1.0, columnspacing=1.0, labelcolor=INK_2)
+    if i == NUM_CHAIRS - 1:
+        ax_acc.set_xlabel("Seconds ago", fontsize=10)
+        ax_gyr.set_xlabel("Seconds ago", fontsize=10)
 
-def set_banner(text, color, detail):
-    status_text.set_text(text)
-    status_text.get_bbox_patch().set_facecolor(color)
-    status_detail.set_text(detail)
+    rows.append(dict(pill=pill, t_status=t_status, bar=bar, t_conf=t_conf,
+                     t_meta=t_meta, t_num=t_num, t_regime=t_regime,
+                     acc=acc_lines, gyr=gyr_lines))
 
-
-def gyro_stds_last_second(now):
-    """1s trailing std-dev of each gyro axis, or None until enough data."""
-    xs = [v for t, v in series["Gyro X"] if t >= now - 1.0]
-    ys = [v for t, v in series["Gyro Y"] if t >= now - 1.0]
-    zs = [v for t, v in series["Gyro Z"] if t >= now - 1.0]
-    if len(zs) < 5:
-        return None
-    return statistics.pstdev(xs), statistics.pstdev(ys), statistics.pstdev(zs)
-
-
-def big_motion_last_second(now):
-    """>= BIG_DELTA_DEBOUNCE consecutive-sample deltas above BIG_DELTA in 1s."""
-    count = 0
-    for name in SERIES_NAMES[3:]:
-        recent = [v for t, v in series[name] if t >= now - 1.0]
-        count += sum(1 for a, b in zip(recent, recent[1:]) if abs(b - a) > BIG_DELTA)
-    return count >= BIG_DELTA_DEBOUNCE
-
-
-def person_motion(now):
-    """True when the trailing 1s of gyro data looks like a person on the chair."""
-    stds = gyro_stds_last_second(now)
-    if stds is None:
-        return False
-    sx, sy, sz = stds
-    ratio_test = sz > Z_FLOOR and sz / (sx + sy + RATIO_EPS) > RATIO_THRESHOLD
-    return ratio_test or big_motion_last_second(now)
-
-
-def update_occupancy(now):
-    if person_motion(now):
-        occupancy_state["last_move"] = now
-        occupancy_state["departed_at"] = None  # person still here — cancel drain
-
-    # Stand-up detection: a burst followed by mostly-quiet (fraction of
-    # samples below the quiet bar) means the person left — start the fast
-    # confidence drain. A long mostly-quiet stretch releases even without a
-    # paired burst (safety net for missed departures and bumped empty chairs).
-    stds = gyro_stds_last_second(now)
-    if stds is not None:
-        smax = max(stds)
-        quiet_history.append((now, smax < DEPART_QUIET))
-        cutoff = now - max(DEPART_QUIET_WINDOW, LONG_QUIET_WINDOW)
-        while quiet_history and quiet_history[0][0] < cutoff:
-            quiet_history.popleft()
-        if smax > DEPART_BURST:
-            occupancy_state["burst_at"] = now
-        if occupancy_state["departed_at"] is None:
-            short = [q for t, q in quiet_history if t >= now - DEPART_QUIET_WINDOW]
-            frac_short = sum(short) / len(short) if short else 0.0
-            frac_long = sum(q for _, q in quiet_history) / len(quiet_history)
-            burst = occupancy_state["burst_at"]
-            paired = burst is not None and now - burst <= DEPART_PAIR_WINDOW
-            warmed_up = now - quiet_history[0][0] >= LONG_QUIET_WINDOW - 1.0
-            if ((paired and frac_short >= DEPART_QUIET_FRACTION)
-                    or (warmed_up and frac_long >= LONG_QUIET_FRACTION
-                        and occupancy_state["confidence"] > 0)):
-                occupancy_state["departed_at"] = now
-                occupancy_state["depart_base"] = occupancy_state["confidence"]
-                occupancy_state["burst_at"] = None
-
-    last = occupancy_state["last_move"]
-    departed = occupancy_state["departed_at"]
-    if last is None:
-        confidence = 0.0
-        detail = "no recent person-motion"
-    elif departed is not None:
-        # Departure confirmed: drain from the value at confirmation to 0.
-        frac = (now - departed) / DEPART_DRAIN_SECONDS
-        confidence = max(0.0, occupancy_state["depart_base"] * (1.0 - frac))
-        detail = "stand-up detected"
-    else:
-        quiet = now - last
-        confidence = CONFIDENCE_MAX * max(0.0, 1.0 - quiet / CONFIDENCE_DECAY_SECONDS)
-        detail = f"last motion {quiet:.0f}s ago"
-    occupancy_state["confidence"] = confidence
-    confidence_history.append((now, confidence))
-    cutoff = now - CONFIDENCE_WINDOW_SECONDS
-    while confidence_history and confidence_history[0][0] < cutoff:
-        confidence_history.popleft()
-
-    occupied = confidence > OCCUPIED_WHEN_ABOVE
-    color = STATUS_OCCUPIED if occupied else STATUS_FREE
-    set_banner("OCCUPIED" if occupied else "FREE", color, detail)
-    conf_value.set_text(f"{confidence:.0f}")
-    conf_value.set_color(color)
-
-    global conf_fill
-    xs = [t - now for t, _ in confidence_history]
-    ys = [c for _, c in confidence_history]
-    conf_line.set_data(xs, ys)
-    conf_line.set_color(color)
-    conf_fill.remove()
-    conf_fill = ax_conf.fill_between(xs, ys, color=color, alpha=0.15)
-# -----------------------------------------------------------------------------
+dominant = {"chair": None}
 
 
 def update(_frame):
-    global last_temp_display_update
     read_new_samples()
     now = time.time()
-    for name, line in list(accel_lines.items()) + list(gyro_lines.items()):
-        data = series[name]
-        xs = [t - now for t, _ in data]  # seconds ago (negative)
-        ys = [v for _, v in data]
-        line.set_data(xs, ys)
-    ax_accel.relim(); ax_accel.autoscale_view(scalex=False)
-    ax_gyro.relim(); ax_gyro.autoscale_view(scalex=False)
+    occupied_count = 0
 
-    update_occupancy(now)
+    for chair, row in zip(chairs, rows):
+        chair.update_occupancy(now)
+        online = chair.online
+        fault = online and chair.sensor_fault(now)
 
-    if latest_temp_c is not None and now - last_temp_display_update >= TEMP_DISPLAY_INTERVAL:
-        temp_text.set_text(f"{latest_temp_c:.1f} °C")
-        last_temp_display_update = now
+        if not online:
+            label, color = "NO SIGNAL", STATUS_WAIT
+        elif fault:
+            label, color = "SENSOR FAULT", STATUS_FAULT
+        elif chair.occupied:
+            label, color = "OCCUPIED", STATUS_OCCUPIED
+        else:
+            label, color = "FREE", STATUS_FREE
+
+        if chair.occupied and not fault:
+            occupied_count += 1
+            if dominant["chair"] != chair.number:
+                dominant["chair"] = chair.number
+
+        row["pill"].set_facecolor(color)
+        row["t_status"].set_text(label)
+        row["bar"].set_width(0.72 * chair.confidence / CONFIDENCE_MAX)
+        row["bar"].set_facecolor(color)
+        row["t_conf"].set_text(f"{chair.confidence:.0f}")
+        row["t_num"].set_color(INK if online else MUTED)
+        row["t_regime"].set_color(INK_2 if online else MUTED)
+
+        if online:
+            temp = f"{chair.temp_c:.1f} °C" if chair.temp_c is not None else "-- °C"
+            meta = f"{temp}   ·   {chair.rate_hz():.0f} Hz   ·   {chair.detail}"
+        elif chair.last_packet is None:
+            meta = "never seen"
+        else:
+            meta = f"silent {now - chair.last_packet:.0f}s  ·  check battery"
+        row["t_meta"].set_text(meta)
+        row["t_meta"].set_color(STATUS_FAULT if fault else MUTED)
+
+        for axis in ("X", "Y", "Z"):
+            xs, ys = decimate(chair.series[f"Accel {axis}"], now)
+            row["acc"][axis].set_data(xs, ys)
+            xs, ys = decimate(chair.series[f"Gyro {axis}"], now)
+            row["gyr"][axis].set_data(xs, ys)
+
+    header_count.set_text(f"{occupied_count} / {NUM_CHAIRS} OCCUPIED")
+    header_count.set_color(STATUS_OCCUPIED if occupied_count else STATUS_WAIT)
+    if dominant["chair"] and occupied_count:
+        header_regime.set_text(
+            f"dominant regime — {REGIMES[dominant['chair'] - 1]}")
+    else:
+        header_regime.set_text("no chair occupied")
+
+    online_n = sum(1 for c in chairs if c.online)
+    total_hz = sum(c.rate_hz() for c in chairs)
+    header_link.set_text(f"{online_n}/{NUM_CHAIRS} boards online   ·   "
+                         f"{total_hz:.0f} samples/s")
+
+    warn = []
+    recent_unknown = [mac for mac, t in unknown_macs.items() if now - t < 10]
+    if recent_unknown:
+        warn.append("unrecognised board: " + ", ".join(sorted(recent_unknown)))
+    if legacy_lines_seen[0] and online_n == 0:
+        warn.append("receiver firmware predates chair tagging — reflash it")
+    header_warn.set_text("   ".join(warn))
 
     return []
 
 
-ani = FuncAnimation(fig, update, interval=100, cache_frame_data=False)
-fig.subplots_adjust(left=0.08, right=0.97, bottom=0.06, top=0.85)
+ani = FuncAnimation(fig, update, interval=150, cache_frame_data=False)
 plt.show()
