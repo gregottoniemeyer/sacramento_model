@@ -26,9 +26,39 @@
 // dropped and garbled lines rather than a clean error. The capture command
 // in ../README.md must use the matching rate:
 //   stty -f /dev/fd/3 921600 raw
+//
+// INTERCHANGEABLE RECEIVER BOARDS (added 2026-07-24)
+// This sketch claims RECEIVER_MAC below in software, so it can be flashed to
+// ANY ESP32 and that board becomes a working receiver. The reason it has to:
+// every sender unicasts to one hardcoded MAC (sender_esp_now.ino's
+// receiverMac), so a second receiver with its own factory MAC would receive
+// nothing at all -- it would boot cleanly, report no error, and print
+// silence. Cloning the MAC here means a second receiver needs no sender
+// changes whatsoever.
+//
+// On the original Lonely Binary board this is a no-op (it already has that
+// MAC from the factory), so one firmware serves every receiver board and
+// there is no second sketch to keep in sync.
+//
+// >>> NEVER POWER TWO RECEIVERS AT THE SAME TIME. <<<
+// They share a MAC. Two boards answering to one address in radio range will
+// both ACK the senders and corrupt each other's reception. One plugged in at
+// a time -- that is the whole point, so you can leave one at each machine
+// and stop unplugging and carrying the same board back and forth.
+//
+// The long-term fix that removes this restriction is switching the senders
+// to broadcast (FF:FF:FF:FF:FF:FF), which allows any number of simultaneous
+// receivers -- but that needs all seven senders reflashed over USB, and the
+// mounting step is itself hard on the boards, so it is worth doing only as
+// chairs come out for other reasons. See ../NOTES.md.
 
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <esp_now.h>
+
+// The single MAC every sender transmits to. Must stay identical to
+// receiverMac in sender_esp_now.ino -- if you ever change one, change both.
+uint8_t RECEIVER_MAC[6] = {0x78, 0x1C, 0x3C, 0x35, 0x83, 0x6C};
 
 typedef struct {
   int16_t accX, accY, accZ;
@@ -87,6 +117,29 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
 void setup() {
   Serial.begin(921600);
   WiFi.mode(WIFI_STA);
+
+  // Claim the address the senders transmit to. Must happen after
+  // WiFi.mode() (the interface has to exist) and before esp_now_init()
+  // (ESP-NOW binds to whatever MAC the interface has at init time).
+  esp_err_t macErr = esp_wifi_set_mac(WIFI_IF_STA, RECEIVER_MAC);
+
+  // Verify rather than assume. A silently-failed MAC set produces exactly
+  // the same symptom as a dead board -- no lines at all -- so check it here
+  // where it can be reported, instead of debugging it later at the log.
+  uint8_t actual[6];
+  esp_wifi_get_mac(WIFI_IF_STA, actual);
+  bool ok = (macErr == ESP_OK) && (memcmp(actual, RECEIVER_MAC, 6) == 0);
+
+  Serial.println();
+  Serial.print("Receiver MAC: ");
+  Serial.print(WiFi.macAddress());
+  if (ok) {
+    Serial.println("  [OK - matches the address senders transmit to]");
+  } else {
+    Serial.println("  [WRONG - senders transmit to 78:1C:3C:35:83:6C]");
+    Serial.println("This board will receive NOTHING. esp_wifi_set_mac failed.");
+  }
+
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW init failed");
     return;

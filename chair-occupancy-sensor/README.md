@@ -151,6 +151,16 @@ than guessing:
    solder bridge on SDA/SCL was fixed first and turned out not to be the
    whole story. See `NOTES.md` for the full board-by-board history.
 
+   **This check no longer works on chairs mounted from 2026-07-24 onward.**
+   Screwing the sensor module into the chair reliably destroys the GY-521
+   power LED, so a dark LED on a mounted board means nothing. Verified on
+   chair 1: LED dead, sensor streaming clean 100Hz data at a normal
+   temperature. The physics rules out a power fault as the explanation for
+   a dark LED on a *working* board — an LED needs ~2V forward to light and
+   the MPU-6050 needs ≥2.375V to run at all, so a rail too weak to light
+   the LED could not produce valid data. On a mounted board, measure
+   3V3-to-GND at the module with a multimeter instead.
+
 ## Current occupancy model
 
 A **confidence score (0-100)** rather than a flat timer, computed each frame

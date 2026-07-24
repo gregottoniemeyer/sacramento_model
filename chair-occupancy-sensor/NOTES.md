@@ -138,6 +138,51 @@ ordered originally — see above). Max picked up an additional pack at a
 physical store as backup/supplement to the original order, generic
 18650 3.7V rechargeable cells rather than a specific branded cell.
 
+## Installation day: mounting into the chairs (2026-07-24)
+
+The chairs and mounting tape arrived, and all seven sensor boards were
+screwed into them. Two failure patterns emerged that are specific to the
+physical install, both new since the last bench-verified all-seven-good
+state on 2026-07-22:
+
+- **The screw-in step reliably destroys the GY-521 power LED.** Not
+  transit damage, not a one-off — it happens on every chair. Mechanical,
+  cosmetic, and it kills the fast VCC/GND glance-check documented at the
+  bottom of this file. See that caveat and the matching one in
+  `README.md`. A dark LED on a mounted board now means nothing; use a
+  multimeter.
+- **Two previously-repaired boards regressed on VCC/GND after mounting.**
+  On a clean 6-of-7 capture (chair 2 aside): chairs 1, 3, 4, 5 streamed
+  live varying data; **chairs 6 and 7 transmitted at full 100Hz but with
+  every field pinned at exactly 0** (all-zeros, single distinct sample
+  repeated). That is the board-4 brownout signature (analog sensor core
+  starved while the digital I2C side and the radio keep running), *not*
+  an I2C fault (which reads `-1`). Notably 6 and 7 are exactly the two
+  boards with prior solder history — board 6 an SDA/SCL reflow, board 7 a
+  VCC/GND resolder — and VCC/GND is what is failing again. Reading: the
+  mounting mechanically stressed the weakest existing joints first.
+  - **Do NOT run the usual USB escalation on these** (`i2c_scanner`,
+    `mpu_read_test`). Both pass over USB and both will clear a board that
+    is genuinely broken on battery — this is the exact board-4 confound.
+    Go straight to a multimeter on battery: measure 3V3-to-GND at the
+    module and compare against a known-good chair on battery, then reflow
+    VCC and GND at both ends. Verify on battery AND after remounting,
+    since mounting is the stressor.
+- **Chair 2 is a different, more basic failure: no packets at all**, and
+  critically no `Chair:?[mac]` line either (the receiver announces
+  unknown boards by MAC, so "nothing" means not transmitting, not
+  unrecognized). The ESP32 itself is not running — a power/battery
+  problem, not the sensor. Check the cell first (this board was built
+  2026-07-22 and may never have been charged); if a fresh cell does
+  nothing, USB-power it to split battery-path fault from dead board.
+
+Accelerometer magnitudes on the four good chairs, mounted (note the
+chairs hang **inverted**, Z pointing down, so magnitudes sit just above
+1g where the bench readings sat just below — 0.930g upright and 1.104g
+inverted on the same chair straddle 1.000g symmetrically, the signature
+of a fixed zero-g offset, not a fault): chair 1 ~1.04g, chair 3 ~1.10g,
+chair 4 ~1.00g, chair 5 ~0.97g. All calibratable in software later.
+
 ## Toolchain setup
 
 Arduino IDE, ESP32 board package installed, board profile **"ESP32 Dev
@@ -242,6 +287,47 @@ MAC addresses are hardcoded in the sender sketch (it needs to know exactly
 which receiver to talk to) — if a physical board is ever swapped, re-read
 its MAC with `esptool ... read-mac` and update the constant in
 `firmware/sender_esp_now.ino`.
+
+### A second receiver board (2026-07-24)
+
+Motivation: the receiver had to be physically unplugged and carried
+between the development MacBook and the installation Mac Mini every time,
+which is tedious and is itself a reliability risk (every reconnect also
+kills the serial capture, see `README.md` step 2).
+
+The obstacle is that every sender **unicasts** to one hardcoded MAC
+(`78:1c:3c:35:83:6c`), so a second ESP32 flashed with the receiver sketch
+receives *nothing*. It boots cleanly, reports no error and prints silence
+— indistinguishable from a dead board, which is why this is worth writing
+down rather than rediscovering.
+
+**Chosen fix: the receiver sketch now claims that MAC in software**, via
+`esp_wifi_set_mac(WIFI_IF_STA, RECEIVER_MAC)` called after `WiFi.mode()`
+(the interface must exist) and before `esp_now_init()` (ESP-NOW binds to
+whatever MAC the interface has at init). Any ESP32 flashed with it becomes
+a drop-in receiver, and **no sender changes are needed at all**. On the
+original Lonely Binary board the call is a no-op, so one firmware serves
+every receiver board and there is no second sketch to keep in sync.
+
+Second board built this way: `78:1c:3c:35:04:84` (another Lonely Binary).
+Verified by flashing it and confirming it receives all six live chairs.
+
+**Constraint this buys: never power two receivers at once.** They share a
+MAC, so both answer to the same address and both ACK the senders. During
+the verification both were plugged in simultaneously and it did still
+work, but per-chair packet counts came out uneven over the window, so
+that is evidence the clone works and *not* evidence that running two is
+harmless. One at a time.
+
+**The alternative, for when the restriction starts to hurt: broadcast.**
+Point the senders at `FF:FF:FF:FF:FF:FF` and any number of receivers can
+listen simultaneously. Rejected for now only because it needs all seven
+senders reflashed over USB, and as of 2026-07-24 the mounting step is
+itself damaging boards (below), so unmounting four healthy chairs to
+reflash them is a real risk of ending up with fewer working chairs. It
+migrates incrementally though: a broadcast sender is still picked up by
+the existing receiver, so boards can be converted one at a time, ideally
+as they come out for other reasons.
 
 ## Battery / power
 
@@ -615,4 +701,18 @@ battery-efficiency firmware (item 4 below).
      board's onboard power LED (present on most GY-521 modules) not
      lighting up, when other boards' LEDs do, is a fast way to localize a
      fault to VCC/GND specifically before touching SDA/SCL at all.
+
+     **Caveat added 2026-07-24 — the LED check is dead for mounted
+     chairs.** Screwing the sensor module into a chair reliably kills the
+     GY-521 power LED (found while installing chairs 1-4, the day the
+     chairs and mounting tape arrived). This is mechanical damage from the
+     mounting step, not an electrical fault, and it happens on every
+     chair, so a dark LED on a mounted board carries no information.
+     Confirmed on chair 1: LED dead, board streaming clean 100Hz data,
+     0.968 g at rest, normal temperature. The voltages settle it in
+     general — an LED needs roughly 2V forward to light and the MPU-6050
+     needs at least 2.375V to operate, so any board producing valid data
+     necessarily has a rail well above what the LED needed. Substitute
+     check on a mounted board: measure 3V3-to-GND at the module on
+     battery.
 
