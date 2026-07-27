@@ -133,7 +133,7 @@ SENSOR_CHECK_WINDOW = 5.0
 
 LOG_FILE = Path.home() / "motion_log.txt"
 WINDOW_SECONDS = 10           # sparkline span
-NUM_CHAIRS = 7
+NUM_CHAIRS = 8               # 7 real chairs + slot 8, the bench test board
 MAX_PLOT_POINTS = 240         # decimate before drawing; 100Hz x 10s x 42 series
                               # is far more than any screen can resolve, and
                               # plotting it all is what makes the UI lag.
@@ -149,6 +149,10 @@ REGIMES = [
     "Environmental Reg",
     "Climate Stress",
     "AI Extraction",
+    # Slot 8 is the bench test board, not a chair, so it has no regime. It is
+    # here only to keep REGIMES the same length as NUM_CHAIRS, since Chair()
+    # indexes this list directly. Do not add an 8th regime to controller.py.
+    "Test Bench",
 ]
 
 # ---- Visual theme (light) ----------------------------------------------------

@@ -66,7 +66,8 @@ typedef struct {
   int16_t gyroX, gyroY, gyroZ;
 } SensorPacket;
 
-const int NUM_CHAIRS = 7;
+// 7 real chairs + 1 bench test slot (see slot 8 below).
+const int NUM_CHAIRS = 8;
 
 // Index 0 = chair 1, index 6 = chair 7. From ../NOTES.md (2026-07-10 bring-up).
 const uint8_t chairMacs[NUM_CHAIRS][6] = {
@@ -77,6 +78,13 @@ const uint8_t chairMacs[NUM_CHAIRS][6] = {
   {0x88, 0xF1, 0x55, 0x30, 0xA6, 0x58},  // chair 5
   {0x8C, 0x94, 0xDF, 0x97, 0x4F, 0x34},  // chair 6
   {0x8C, 0x94, 0xDF, 0x45, 0xB3, 0xD0},  // chair 7
+  // Slot 8 is not a chair: it is a bench test board, added 2026-07-24. This is
+  // the spare Lonely Binary board that briefly served as the MAC-cloned second
+  // receiver, reflashed as a sender so a sensor can be tested on the dashboard
+  // without unmounting a real chair. Its factory MAC is in the same
+  // 78:1c:3c:35:xx range as the receiver, which is expected -- same board
+  // family, not a duplicate of the receiver's 83:6c.
+  {0x78, 0x1C, 0x3C, 0x35, 0x04, 0x84},  // 8 = TEST BENCH board
 };
 
 // Returns 1-7 for a known board, or 0 for an unrecognized one.
