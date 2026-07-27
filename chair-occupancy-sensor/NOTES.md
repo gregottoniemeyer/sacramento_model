@@ -146,9 +146,10 @@ physical install, both new since the last bench-verified all-seven-good
 state on 2026-07-22:
 
 - **The screw-in step reliably destroys the GY-521 power LED.** Not
-  transit damage, not a one-off — it happens on every chair. Mechanical,
-  cosmetic, and it kills the fast VCC/GND glance-check documented at the
-  bottom of this file. See that caveat and the matching one in
+  transit damage, not a one-off — it happens on every chair. The dead LED
+  itself is cosmetic (but see the 2026-07-27 follow-up below: the same
+  mounting step is not cosmetic for the boards underneath), and it kills
+  the fast VCC/GND glance-check documented at the bottom of this file. See that caveat and the matching one in
   `README.md`. A dark LED on a mounted board now means nothing; use a
   multimeter.
 - **Two previously-repaired boards regressed on VCC/GND after mounting.**
@@ -182,6 +183,73 @@ chairs hang **inverted**, Z pointing down, so magnitudes sit just above
 inverted on the same chair straddle 1.000g symmetrically, the signature
 of a fixed zero-g offset, not a fault): chair 1 ~1.04g, chair 3 ~1.10g,
 chair 4 ~1.00g, chair 5 ~0.97g. All calibratable in software later.
+
+### Follow-up (2026-07-27): the install is the cause, and nothing is visibly broken
+
+Confirmed by Max: every one of these boards was **bench-verified working
+before the install**, and there is **no external damage on any of them**. So
+the mounting step is the cause, and whatever it does is internal. Two things
+follow that change how this should be worked.
+
+**1. Every failure so far is on the power path, not the sensor.** Lining up
+the three recorded on the day:
+
+| Chair | Symptom | Layer that failed |
+|---|---|---|
+| 6 | 100Hz packets, every field exactly 0 | VCC/GND to the module (analog core starved, radio and I2C alive) |
+| 7 | 100Hz packets, every field exactly 0 | same |
+| 2 | no packets at all, not even `Chair:?[mac]` | ESP32 itself not running (cell or power path) |
+
+Not one of these is a dead MPU-6050. An I2C fault reads `-1`, a corrupt
+sensor reads implausible values (the chair-2-original signature at 2.008 g),
+and a dead die reads nothing at all over USB. All-zeros at full packet rate
+is specifically **power delivered to the analog core**, and chair 2 is not
+even a sensor question. Combined with "no external damage," the reading is
+**mechanically stressed solder joints, cracked or gone high-resistance**, in
+a package that looks perfect from the outside. Supporting evidence already in
+this file: boards 6 and 7 were **exactly the two with prior solder rework**
+(6 an SDA/SCL reflow, 7 a VCC/GND resolder), so the install found the weakest
+joints first, which is what mechanical stress does and what a bad component
+batch does not.
+
+**Consequence for the repair path: reach for the soldering iron and the
+multimeter, not the parts drawer.** This is the board-4 fault mode, and board
+4 was fixed by reflowing VCC/GND. Replacement modules were ordered on
+2026-07-27 (see Spares status) and are worth having, but **there is currently
+no evidence that a single MPU-6050 is actually dead**, so swapping in a new
+module may cure nothing while consuming a spare and adding a fresh set of
+joints to the same stressor. Diagnose before swapping.
+
+**2. The count does not reconcile yet, and it matters.** Friday recorded
+three failures (chairs 2, 6, 7) against four good (1, 3, 4, 5). As of
+2026-07-27 Max puts it at roughly **four** not working, which would mean one
+of the four that passed on Friday has dropped out since. That is the more
+worrying possibility, because it would mean the damage is **progressive**
+(a cracked joint that still made contact on Friday and has since opened) and
+not a one-time event at screw-in time. **Recount all seven on battery before
+doing anything else**, and record the date of each result, because a board
+that changes state between two capture sessions is itself the finding.
+
+**Order of work when the chairs come down:**
+1. Recount and log all seven, on battery, with dates.
+2. Multimeter 3V3-to-GND at the module on battery, against a known-good
+   chair. Do **not** start with `i2c_scanner` / `mpu_read_test` over USB:
+   they pass on brownout boards and will clear a board that is genuinely
+   broken (the board-4 confound, documented above).
+3. Reflow VCC and GND at both ends. Only if that fails does the module get
+   replaced.
+4. Verify on battery, then verify **again after remounting**, since mounting
+   is the stressor and a bench pass proves nothing about a mounted board.
+
+**Open and worth solving before the next install:** what specifically the
+screw-in does. It kills the power LED on every single chair and cracks joints
+on the weak ones, which points at the module being torqued or flexed as the
+screws come down (board bowing against a standoff, or the screws pulling the
+PCB against an uneven surface). Until that is understood, remounting a
+repaired board reproduces the same stress. Worth checking whether the modules
+are being clamped flat against the chair versus standing off on the header
+pins, and whether nylon washers or a compliant pad between module and chair
+changes the outcome.
 
 ## Toolchain setup
 
@@ -386,6 +454,18 @@ exactly what fixed board 6 — but neither should be deployed until it is.
 Remaining loose sensor/board counts were not tallied — check physically
 before assuming another spare node can be built, and treat "we have
 spares" as unverified until then.
+
+**Update 2026-07-27: still no spares, replacements ordered.** The 2026-07-24
+install took out multiple mounted boards (see the Installation day follow-up
+above), against zero spares on hand. Max ordered replacement GY-521 /
+MPU-6050 modules on 2026-07-27, arriving 2026-07-28. Two caveats on that
+order: the Amazon confirmation describes the contents only as "1 Hardware
+item" and names neither the part nor the quantity, so **count the box before
+planning around it**; and, more importantly, **new modules are probably not
+the fix**. Every install failure recorded so far is a power-path fault
+(cracked joint or dead cell), not a dead sensor, so the modules are spares
+for a repair that may never need them. Do not let their arrival short-circuit
+the diagnose-then-reflow order of work.
 
 **Label boards with the last two MAC octets, not just a number.** On
 2026-07-22 the good board and the faulty one were briefly confused because
@@ -705,9 +785,15 @@ battery-efficiency firmware (item 4 below).
      **Caveat added 2026-07-24 — the LED check is dead for mounted
      chairs.** Screwing the sensor module into a chair reliably kills the
      GY-521 power LED (found while installing chairs 1-4, the day the
-     chairs and mounting tape arrived). This is mechanical damage from the
-     mounting step, not an electrical fault, and it happens on every
-     chair, so a dark LED on a mounted board carries no information.
+     chairs and mounting tape arrived). It happens on every chair, so a
+     dark LED on a mounted board carries no information.
+
+     **Do not read this as "mounting damage is only cosmetic"** (amended
+     2026-07-27). The dead LED by itself is cosmetic, but the same
+     mounting step also produced real functional failures on the boards
+     with the weakest joints, so a mounted board is *unverified*, not
+     healthy. The LED just stops being the instrument that tells you
+     which. Use the multimeter check below.
      Confirmed on chair 1: LED dead, board streaming clean 100Hz data,
      0.968 g at rest, normal temperature. The voltages settle it in
      general — an LED needs roughly 2V forward to light and the MPU-6050

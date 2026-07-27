@@ -161,6 +161,14 @@ than guessing:
    the LED could not produce valid data. On a mounted board, measure
    3V3-to-GND at the module with a multimeter instead.
 
+   **The dead LED is cosmetic; the mounting step is not** (2026-07-27).
+   Screwing boards in also cracked joints on the weakest chairs, so treat a
+   freshly mounted board as unverified until it has been checked **on
+   battery, after mounting**. Symptoms to expect are power-path, not sensor:
+   all fields pinned at exactly 0 at full packet rate (brownout, reflow
+   VCC/GND), or no packets at all (the ESP32 is not running, check the
+   cell). See `NOTES.md`, "Installation day", for the order of work.
+
 ## Current occupancy model
 
 A **confidence score (0-100)** rather than a flat timer, computed each frame
