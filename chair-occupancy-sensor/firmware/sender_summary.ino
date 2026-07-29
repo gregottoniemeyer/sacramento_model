@@ -441,8 +441,9 @@ void sendSummary(uint32_t now, bool radioOk) {
   p.bigDeltaCount = (bigCount > 255) ? 255 : (uint8_t)bigCount;
 
   // --- sensor health, computed here so the LED and the dashboard agree -----
+  bool reading = (bufCount >= 5 && !i2cFail && !allZero);
   bool magOk = false;
-  if (bufCount >= 5 && !i2cFail && !allZero) {
+  if (reading) {
     double mx = (double)sumAcc[0] / bufCount;
     double my = (double)sumAcc[1] / bufCount;
     double mz = (double)sumAcc[2] / bufCount;
@@ -450,7 +451,11 @@ void sendSummary(uint32_t now, bool radioOk) {
     magOk = (mag >= ACC_MAG_MIN_RAW && mag <= ACC_MAG_MAX_RAW);
   }
   uint16_t smaxNow = max(max(p.gyroStdX, p.gyroStdY), p.gyroStdZ);
-  updateNoiseFloor(now, smaxNow);
+  // Only fold REAL readings into the noise statistics. A sensor that is not
+  // answering reports a std-dev of 0, which sails under the quiet bar and
+  // would make a completely dead board look like the quietest chair in the
+  // room -- observed on 2026-07-29 as quiet:89% on a board reading nothing.
+  if (reading) updateNoiseFloor(now, smaxNow);
   sensorOk = magOk;
 
   // --- capacitive presence -------------------------------------------------
