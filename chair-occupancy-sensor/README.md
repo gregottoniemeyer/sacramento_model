@@ -18,9 +18,16 @@ See `MAC_MINI_SETUP.md` for exact steps.
 ## Layout
 
 - `firmware/` — Arduino sketches.
-  - `sender_esp_now.ino` — flashed to the sensor board (has the MPU-6050
-    wired to it, runs on battery). Reads the sensor at 100Hz, sends every
-    sample over ESP-NOW.
+  - `sender_summary.ino` — **the deployed chair firmware** (all seven flashed
+    2026-07-29). Samples the MPU-6050 at 100Hz, computes the occupancy model's
+    input statistics on the board over a trailing 1.0s window, and transmits
+    them at 8Hz instead of radioing every raw sample. Also drives the onboard
+    status LED and carries a capacitive-presence field. See its header comment
+    for why 8Hz and not less.
+  - `sender_esp_now.ino` — the previous firmware: raw 100Hz samples, one packet
+    per sample. **Superseded**, kept because the retired dead-USB spare board
+    can never be reflashed and therefore still speaks this format, which the
+    receiver still accepts.
   - `receiver_esp_now.ino` — flashed to the board that stays on USB. Prints
     incoming data to Serial in a fixed text format the tools below parse.
   - `i2c_scanner.ino` — diagnostic utility to confirm a sensor responds at
@@ -34,6 +41,18 @@ See `MAC_MINI_SETUP.md` for exact steps.
     straight to Serial over USB, no ESP-NOW/receiver needed. Useful for
     bench-testing a freshly soldered sensor board on its own before
     trusting it with the full sender firmware.
+  - `i2c_line_check.ino` — diagnostic utility for when `i2c_scanner` finds
+    NOTHING: says *which* data wire is open. The GY-521's own pull-up
+    resistors mean a connected line reads high against an internal
+    pull-down, so SDA and SCL can be told apart. Closes the gap where a
+    clean "No I2C devices found" left all four wires as suspects (the
+    module's power LED covers VCC/GND, this covers the other two). Found a
+    dead SCL on a brand-new replacement module on 2026-07-29.
+  - `led_probe.ino` — diagnostic utility to find which GPIO drives the
+    onboard LED. Each candidate pin blinks a number of times equal to its
+    position in the list, so the groups are self-identifying and you never
+    have to know when a sweep started. Answer on these boards: **GPIO16,
+    active low.**
   - `touch_presence_test.ino` — **experiment, nothing flashed to a chair
     yet.** Capacitive presence sensing (ESP32 touch pin + an electrode on
     the seat), at Greg's suggestion 2026-07-21. Unlike the MPU-6050 it
@@ -41,10 +60,13 @@ See `MAC_MINI_SETUP.md` for exact steps.
     weaknesses of the current model directly. Prints raw counts to Serial
     over USB. See its header comment for electrode options and the two
     expected gotchas (floating battery ground, thermal drift).
-  - `proposed_2hz_radio_reduction/` — a battery-efficiency redesign (transmit
-    a computed summary twice a second instead of every 100Hz sample).
-    **Designed but not yet flashed to any board** — see the header comment
-    in `sender_2hz_summary.ino` before resuming that work.
+  - `proposed_2hz_radio_reduction/` — **abandoned, do not flash.** The idea
+    (summarise on the board, radio less often) was right and shipped as
+    `sender_summary.ino`; the 2Hz *rate* was wrong. Backtested 2026-07-29 with
+    `tools/replay_summary.py`, 2Hz is measurably worse than the 100Hz system it
+    replaces: it misses a stand-up and adds a false FREE. 8Hz matches the
+    baseline exactly even at 20% packet loss. Kept only as the record of why
+    the rate is 8 and not 2.
 - `tools/` — Python (venv at `venv/`, see setup below).
   - `live_plot.py` — the live dashboard: real-time accel/gyro/temp charts
     plus an occupancy status banner. Source of truth for the currently
@@ -83,6 +105,9 @@ venv/bin/pip install -r requirements.txt
    cat <&3 > ~/motion_log.txt &
    ```
    **921600 must match `Serial.begin()` in `firmware/receiver_esp_now.ino`.**
+   (The 8Hz summary firmware needs far less than this — seven chairs at 8Hz is
+   ~56 lines/sec — but the rate stays 921600 because the receiver still accepts
+   100Hz v1 senders, which need it.)
    These two numbers are a pair — change one and the other must change, or
    the log fills with garbled bytes rather than failing cleanly. (It was
    115200 until 2026-07-22; seven boards at 100Hz overrun that ~5x.)

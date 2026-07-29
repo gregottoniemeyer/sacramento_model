@@ -289,6 +289,65 @@ Note that a fresh module out of the delivery box was also found dead on SCL
 (2026-07-29, see `firmware/i2c_line_check.ino`), which is consistent: these
 boards arrive fragile and do not tolerate being clamped.
 
+## v2 firmware rollout (2026-07-29): all seven flashed
+
+`sender_summary.ino` flashed to all seven chairs in one session. USB health
+readings at flash time, from the firmware's own once-a-second `STATUS` line:
+
+| Chair | accMag | gyro noise floor | Verdict |
+|---|---|---|---|
+| 1 | 0.819g | 15-16 | weak, see below |
+| 2 | 0.991g | 10-12 | good |
+| 3 | 0.937g | 11-14 | good |
+| 4 | 1.015g | 8-11 | good |
+| 5 | 1.058g | 10-12 | good |
+| 6 | 1.005g | 10-14 | good, no brownout signature |
+| 7 | 0.869g | 11-13 | good, no brownout signature |
+
+Notably **chairs 6 and 7 showed no trace of the install-day all-zeros
+brownout** and chair 2 came up fine, so the fleet is in better shape than the
+2026-07-24 capture suggested. Chair 2's "not running at all" turned out to be
+mundane: **the board was switched off.** These boards have a power switch and
+it is easy to knock, which is now the first thing to check in `OPERATING.md`.
+
+**A USB pass still proves nothing.** Chairs 4, 6 and 7 have all passed USB
+before and failed on battery — that is the board-4 confound. The gate is all
+seven **on battery, mounted**, which is the only configuration that has ever
+caught these faults.
+
+**Chair 1 is the one to watch.** Its noise floor sits at 15-16 where the others
+are 10-14, and the departure detector only counts a window as quiet below 16,
+so it measured **0% quiet windows** on the bench. It reads FREE only because
+nothing has moved it, not because a departure was ever confirmed. This is the
+same mechanism as the original "always occupied" complaint, and it survived a
+sensor swap — so it may be the board, the mounting, or bench vibration rather
+than the module. Re-check in an actual chair.
+
+### Reflashing quirk: boards land in DOWNLOAD_BOOT
+
+Two of the seven booted into the ROM bootloader instead of running the sketch
+immediately after upload, printing `boot:0x3 (DOWNLOAD_BOOT...)` and
+`waiting for download`. `arduino-cli` reported a successful upload and did not
+recover them, so the board looks completely dead: no serial, no packets.
+
+Cause is GPIO0 being sampled low at reset, from the USB-serial adapter's
+RTS/DTR timing rather than any hardware fault. Fix is a second explicit reset:
+
+```bash
+esptool --port /dev/cu.YOUR_PORT --after hard-reset chip-id
+```
+
+Worth building into any reflash procedure rather than treating it as a fault.
+**A chair that appears dead right after a firmware update is very likely this,
+not a broken board** — check for `DOWNLOAD_BOOT` on the serial line first.
+
+### Two device nodes, one board
+
+`/dev/cu.SLAB_USBtoUART` and `/dev/cu.usbserial-0001` reported the same MAC
+because both Apple's CP210x driver and Silicon Labs' own VCP driver are
+installed, and each claims the device. `README.md` implies these are different
+boards. They are not. Either node works.
+
 ## Toolchain setup
 
 Arduino IDE, ESP32 board package installed, board profile **"ESP32 Dev
