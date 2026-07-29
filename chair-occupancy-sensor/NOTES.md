@@ -315,13 +315,37 @@ before and failed on battery — that is the board-4 confound. The gate is all
 seven **on battery, mounted**, which is the only configuration that has ever
 caught these faults.
 
-**Chair 1 is the one to watch.** Its noise floor sits at 15-16 where the others
-are 10-14, and the departure detector only counts a window as quiet below 16,
-so it measured **0% quiet windows** on the bench. It reads FREE only because
-nothing has moved it, not because a departure was ever confirmed. This is the
-same mechanism as the original "always occupied" complaint, and it survived a
-sensor swap — so it may be the board, the mounting, or bench vibration rather
-than the module. Re-check in an actual chair.
+**Chair 1's noise problem was the bench, not the board.** On the desk it read
+15-16 and measured 0% quiet windows, which is the mechanism behind the original
+"always occupied" complaint and survived a sensor swap. Mounted in the chair it
+reads **11,11,11** — squarely healthy. The desk was feeding it building
+vibration. Worth remembering generally: **a bench noise-floor reading is not a
+valid measure of a chair's noise floor.**
+
+### All seven up at once (2026-07-29, later)
+
+First time the whole fleet has been live since the install. Every chair:
+`Flags:7`, `N:100`, ~8Hz, no unknown MACs, no malformed packets.
+
+| Chair | RSSI | noise floor mounted |
+|---|---|---|
+| 1 | -67 | 11,11,11 |
+| 2 | -65 | 11,11,10 |
+| 3 | -72 | 10,13,12 |
+| 4 | -66 | 11,12,8 |
+| 5 | -75 | 10,12,10 |
+| 6 | -67 | 14,13,12 |
+| 7 | -39 (still on the bench) | elevated, being handled |
+
+**Chairs 6 and 7 show no brownout signature at all**, having both been
+all-zeros on install day. Combined with chair 2 being merely switched off, the
+fleet is in materially better shape than the 2026-07-24 capture implied — the
+"four broken chairs" turned out to be one bad sensor module (chair 1), one
+power switch (chair 2), and two that recovered.
+
+**Chair 5 is the weakest link at RSSI -75** (the rest are -62 to -72). Not a
+problem at this range, but it is the one to suspect first if packet loss ever
+appears, and worth knowing it is the furthest from the receiver.
 
 ### Reflashing quirk: boards land in DOWNLOAD_BOOT
 
