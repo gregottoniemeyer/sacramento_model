@@ -251,6 +251,44 @@ are being clamped flat against the chair versus standing off on the header
 pins, and whether nylon washers or a compliant pad between module and chair
 changes the outcome.
 
+### RESOLVED (2026-07-29): stop putting screws through the PCB
+
+Max's call, and the evidence supports it: **screwing the module down is what
+breaks these sensors.** Treat this as settled and change the build, rather
+than continuing to repair boards and remount them the same way.
+
+The decisive tell is the one that looked cosmetic. **The power LED dies on
+every single chair, without exception.** A surface-mount LED does not fail
+from vibration, heat or handling; it fails when the board it is soldered to is
+*flexed*. So every mounted module has been bent far enough to crack a
+component. The VCC/GND failures on chairs 6 and 7 are the same event finding a
+different weak point, which is exactly why the two boards with prior solder
+rework were the two that went: rework joints are the most brittle thing on the
+board, so they fail first under a stress every board is receiving.
+
+Mechanism: the GY-521 is thin FR4 with mounting holes at the edge. A screw
+pulls that edge against a surface that is not perfectly flat and the whole
+board bows. The chairs are metal, so nothing yields except the PCB. Stiff
+wires soldered to the header make it worse by transmitting torque into the
+joints as the screw turns.
+
+**The rule from here: the sensor board is never a structural member.**
+- Mount the module on foam tape or a compliant pad inside the enclosure, and
+  screw the *enclosure* to the chair. Nothing clamps the PCB itself.
+- If a screw through the board is genuinely unavoidable, use nylon standoffs
+  on both sides and tighten finger-tight only; the board must stay flat and
+  unloaded.
+- Strain-relieve the wires near the module so chair movement pulls on the
+  anchor and not on the solder joints.
+
+This also reframes the repair plan. Reflowing VCC/GND on chairs 6 and 7 is
+still right, but reflowing and then remounting the same way just re-applies
+the stress that broke them. Fix the mounting first, then repair.
+
+Note that a fresh module out of the delivery box was also found dead on SCL
+(2026-07-29, see `firmware/i2c_line_check.ino`), which is consistent: these
+boards arrive fragile and do not tolerate being clamped.
+
 ## Toolchain setup
 
 Arduino IDE, ESP32 board package installed, board profile **"ESP32 Dev
