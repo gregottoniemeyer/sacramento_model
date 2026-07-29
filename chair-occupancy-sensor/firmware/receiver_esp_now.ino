@@ -93,12 +93,15 @@ typedef struct __attribute__((packed)) {
   uint16_t touchRaw;
   uint16_t touchBaseline;
   uint16_t uptimeMin;
+  uint16_t peakJump;
+  int32_t  yawSumNew;
+  uint8_t  nNew;
 } SummaryPacket;
 
 // Must match the identical assertion in sender_summary.ino. The two formats
 // are told apart by length alone, so a silent size disagreement between the
 // files would present as every packet arriving as "BAD PACKET".
-static_assert(sizeof(SummaryPacket) == 32, "SummaryPacket size changed -- update sender_summary.ino to match");
+static_assert(sizeof(SummaryPacket) == 39, "SummaryPacket size changed -- update sender_summary.ino to match");
 static_assert(sizeof(SensorPacket) == 14, "SensorPacket size changed -- v1 senders would stop being recognised");
 
 // 7 real chairs + 1 bench test slot (see slot 8 below).
@@ -178,6 +181,9 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
     Serial.print("  N:"); Serial.print(p.sampleCount);
     Serial.print("  Touch:"); Serial.print(p.touchRaw);
     Serial.print("  TBase:"); Serial.print(p.touchBaseline);
+    Serial.print("  Peak:"); Serial.print(p.peakJump);
+    Serial.print("  YawS:"); Serial.print(p.yawSumNew);
+    Serial.print("  YawN:"); Serial.print(p.nNew);
     Serial.print("  Up:"); Serial.print(p.uptimeMin);
     Serial.print("  Seq:"); Serial.print(p.seq);
     Serial.print("  Flags:"); Serial.print(p.flags);

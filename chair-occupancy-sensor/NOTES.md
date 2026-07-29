@@ -372,6 +372,95 @@ because both Apple's CP210x driver and Silicon Labs' own VCP driver are
 installed, and each claims the device. `README.md` implies these are different
 boards. They are not. Either node works.
 
+## MODEL REBUILT (2026-07-29 evening) — the false positives, solved
+
+The v2 fleet false-positived badly in the real installation. Diagnosed from a
+new 7-chair labeled dataset plus a raw-100Hz single-chair dataset. **The fix
+was to DELETE code, not add it.**
+
+### The core detector was never broken
+
+Max's original ratio test — gyro-Z std dominating X+Y, i.e. a swivel —
+discriminates cleanly. Measured on 9 real sit/stand cycles:
+
+| condition | % of 1s windows firing |
+|---|---|
+| seated | **96%** |
+| sitting down | 75% |
+| walking past | **4%** |
+| empty | **0%** |
+
+### What actually broke it
+
+The machinery added on top to handle statue-sitters: confidence set to 100 on
+any single fire, a 90-second linear decay, and release gated on a departure
+event measured against a **global** quiet threshold of 16 raw. Two fatal
+consequences:
+
+1. A 4% false-fire rate during a walk-by got latched into 90 seconds of
+   OCCUPIED. That is the entire false-positive complaint.
+2. A chair whose noise floor sits above the global bar can never register as
+   quiet, so it can never be released at all. **Chair 6 has only 3.2% of its
+   empty samples below 16 — permanently OCCUPIED by construction.**
+
+This also explains why the single-chair version worked well months ago: it
+worked *before* the statue problem was chased. The compensation for stillness
+is what broke normal operation.
+
+### The fundamental problem with motion magnitude
+
+**Walking past an empty chair produces more signal than a person sitting still
+in it.** Chair 1 median smax: empty 13, person motionless 23, someone walking
+past 168. The floor transmits footsteps into the chair far more strongly than a
+still body does. No threshold on motion magnitude can separate those.
+
+### The rebuilt model (`tools/occupancy_model.py`)
+
+Three signals, all computed on the sender over the full 100Hz stream and sent
+at 8Hz. No confidence, no decay, no departure detector.
+
+- **vote** — fraction of recent packets firing the ratio test, over a 5s
+  window, with hysteresis (enter 0.50, exit 0.25). State follows the evidence
+  and stops when the evidence stops.
+- **peak** — largest single-sample gyro step. Sitting down is an impulse:
+  **2009-10976 raw across nine sit-downs against a maximum of 952 for walking
+  past.** A clean gap. Triggers entry immediately, halving sit latency from
+  5.5s to 2.6s. Impulse entries are PROVISIONAL and revert within 4s if the
+  vote fraction does not back them up, so a knock cannot latch.
+- **yaw** — net rotation about vertical, **Max's idea, and the thing that
+  removed the last false positive.** These are swivel chairs: sitting rotates
+  the seat, passing footsteps do not. Median **2.8 degrees** for a sit-down
+  against **0.2** for a walk-by.
+
+**Measured (9 cycles, chair 2), identical on raw 100Hz and on 8Hz summaries:**
+
+    sit detected     9/9    median latency 2.6s
+    stand released   9/9    median latency 6.0s
+    seated held      100%, worst segment 100%
+    false positives  0/9 walk-around blocks
+
+### Gyro bias is not optional
+
+Integrating gyro-Z without removing bias fabricates rotation: chair 2's Z bias
+alone produces **3.4 degrees of fake yaw every 8 seconds**, larger than a real
+sit-down. Learned per chair adaptively, only while the chair reads FREE and
+quiet, so a seated person's real rotation is never absorbed into it. No hand
+calibration across seven chairs.
+
+### Verified NOT the problem
+
+Max suspected the on-board summarising. Ruled out: std-devs computed offline
+from raw give p50=12; the firmware reported p50=12 on the same chair. The
+summary is faithful. The 8Hz version of the new model scores identically to raw
+100Hz while using **12x fewer transmissions**.
+
+### Honest limits
+
+Tuned and measured on **9 cycles from one chair**, not validated against data it
+did not see — which is exactly how the previous model came to look better than
+it was. Before trusting these numbers, re-run `collect_dataset.py --profile
+basics` on a second chair and score it.
+
 ## Toolchain setup
 
 Arduino IDE, ESP32 board package installed, board profile **"ESP32 Dev

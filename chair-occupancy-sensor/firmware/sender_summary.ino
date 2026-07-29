@@ -159,7 +159,7 @@ uint8_t receiverMac[] = {0x78, 0x1C, 0x3C, 0x35, 0x83, 0x6C};
 // ===========================================================================
 //  WIRE FORMAT
 // ===========================================================================
-// 32 bytes, versus 14 for the v1 raw SensorPacket. The receiver tells them
+// 39 bytes, versus 14 for the v1 raw SensorPacket. The receiver tells them
 // apart by length, so a half-flashed fleet keeps working during rollout and
 // the retired dead-USB spare board (which can never be reflashed) still
 // reports if it is ever pressed into service. See receiver_esp_now.ino.
@@ -179,7 +179,39 @@ typedef struct __attribute__((packed)) {
   uint16_t touchRaw;
   uint16_t touchBaseline;
   uint16_t uptimeMin;      // minutes since power-up -- the battery gauge, see below
+  // --- added 2026-07-29 for the rebuilt occupancy model ---------------------
+  uint16_t peakJump;       // largest single-sample gyro step in the window
+  int32_t  yawSumNew;      // sum of gyroZ over samples since the LAST packet
+  uint8_t  nNew;           // how many samples that sum covers
 } SummaryPacket;
+
+// WHY peakJump AND yawSumNew EXIST
+// -------------------------------
+// The rebuilt model (see NOTES.md, 2026-07-29) needs two things the std-devs
+// cannot provide, and both must be computed here because both need the full
+// 100Hz stream that never leaves the board.
+//
+// peakJump is the sit-down. Sitting down is an impulse: the largest
+// single-sample gyro step measured 2009-10976 raw across nine real sit-downs,
+// while walking past an empty chair never exceeded 952. That gap is what lets
+// a sit-down be detected the instant it happens instead of waiting several
+// seconds for a vote window to fill. bigDeltaCount cannot serve: it counts
+// steps over a fixed 3000, which throws away the magnitude that carries the
+// discrimination.
+//
+// yawSumNew is the swivel, Max's idea and the thing that removes false
+// positives entirely. These are swivel chairs, so sitting down rotates the
+// seat slightly about the vertical axis while footsteps passing by do not.
+// Integrating gyroZ recovers that as a real angle -- median 2.8 degrees for a
+// sit-down against 0.2 for a walk-by. It is summed over only the samples SINCE
+// THE LAST PACKET, deliberately: consecutive packets then partition the
+// timeline instead of overlapping, so the receiver can add them up over any
+// span without double counting.
+//
+// Note that the receiver must subtract the gyro bias (bias * nNew) before
+// integrating. The bias is not small: chair 2's Z bias alone fabricates 3.4
+// degrees of fake rotation every 8 seconds, which is larger than a real
+// sit-down produces. Uncorrected, this field is worse than useless.
 
 // WHY uptimeMin IS THE BATTERY GAUGE
 // ----------------------------------
@@ -205,7 +237,7 @@ typedef struct __attribute__((packed)) {
 // on this number. Asserting it here and in receiver_esp_now.ino turns a
 // mismatch into a compile error instead of a fleet that boots cleanly, reports
 // no error, and prints "BAD PACKET" forever.
-static_assert(sizeof(SummaryPacket) == 32, "SummaryPacket size changed -- update receiver_esp_now.ino to match");
+static_assert(sizeof(SummaryPacket) == 39, "SummaryPacket size changed -- update receiver_esp_now.ino to match");
 
 const uint8_t FLAG_SENSOR_OK  = 0x01;
 const uint8_t FLAG_RADIO_OK   = 0x02;
@@ -230,6 +262,10 @@ int     bigCount = 0;
 int16_t lastTemp = 0;
 int16_t prevGyro[3] = {0, 0, 0};
 bool    havePrevGyro = false;
+uint16_t bufJump[WINDOW_SAMPLES];   // per-sample gyro step, for the window peak
+int32_t  yawAccum = 0;              // gyroZ summed since the last transmission
+uint8_t  yawCount = 0;
+uint16_t lastPeakJump = 0;          // last transmitted peak, for the STATUS line
 
 uint16_t seqCounter = 0;
 volatile uint32_t lastSendOkMs = 0;
@@ -368,6 +404,12 @@ void pushSample(int16_t ax, int16_t ay, int16_t az,
   bufAcc[0][bufHead] = ax; bufAcc[1][bufHead] = ay; bufAcc[2][bufHead] = az;
   bufGyro[0][bufHead] = gx; bufGyro[1][bufHead] = gy; bufGyro[2][bufHead] = gz;
   bufBig[bufHead] = big;
+  bufJump[bufHead] = (d > 65535) ? 65535 : (uint16_t)d;
+
+  // Accumulate yaw for the next packet. Reset at transmission, so consecutive
+  // packets partition the timeline rather than overlapping.
+  yawAccum += gz;
+  if (yawCount < 255) yawCount++;
 
   sumAcc[0] += ax; sumAcc[1] += ay; sumAcc[2] += az;
   sumGyro[0] += gx; sumGyro[1] += gy; sumGyro[2] += gz;
@@ -439,6 +481,22 @@ void sendSummary(uint32_t now, bool radioOk) {
   p.gyroStdY = stdOf(1);
   p.gyroStdZ = stdOf(2);
   p.bigDeltaCount = (bigCount > 255) ? 255 : (uint8_t)bigCount;
+
+  // Peak single-sample gyro step over the trailing window. Deliberately taken
+  // over the whole 1s window rather than just the new samples: a max does not
+  // double count, and the overlap means a single dropped packet cannot hide
+  // the sit-down impulse from the receiver.
+  uint16_t peak = 0;
+  for (int i = 0; i < bufCount; i++) {
+    int idx = (bufHead - 1 - i + WINDOW_SAMPLES) % WINDOW_SAMPLES;
+    if (bufJump[idx] > peak) peak = bufJump[idx];
+  }
+  p.peakJump = peak;
+  lastPeakJump = peak;
+  p.yawSumNew = yawAccum;
+  p.nNew = yawCount;
+  yawAccum = 0;
+  yawCount = 0;
 
   // --- sensor health, computed here so the LED and the dashboard agree -----
   bool reading = (bufCount >= 5 && !i2cFail && !allZero);
@@ -580,6 +638,7 @@ void loop() {
     Serial.print(")  n:"); Serial.print(bufCount);
     Serial.print("  touch:"); Serial.print(touchRaw);
     Serial.print("/"); Serial.print(touchBaseline);
+    Serial.print("  peak:"); Serial.print(lastPeakJump);
     Serial.print("  minStd:"); Serial.print(minSmax);
     Serial.print("  quiet:"); Serial.print(quietFrac * 100.0f, 0); Serial.print("%");
     Serial.print(noiseHistoryFull ? "" : "(warming)");
