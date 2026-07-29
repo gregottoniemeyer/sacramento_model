@@ -60,11 +60,46 @@
 // receiverMac in sender_esp_now.ino -- if you ever change one, change both.
 uint8_t RECEIVER_MAC[6] = {0x78, 0x1C, 0x3C, 0x35, 0x83, 0x6C};
 
+// TWO WIRE FORMATS, TOLD APART BY LENGTH (added 2026-07-29)
+// v1 (14 bytes) is the original raw 100Hz sample from sender_esp_now.ino.
+// v2 (32 bytes) is the 8Hz on-device summary from sender_summary.ino.
+//
+// Both are accepted, on purpose, for two reasons that both matter during
+// rollout: chairs get reflashed one at a time, so the fleet is mixed for as
+// long as that takes; and the retired chair-1 board has a torn-off micro-USB
+// connector, so it can NEVER be reflashed -- if it is ever pressed into
+// service as an emergency spare it will speak v1 forever.
+//
+// v2 lines print the same "Accel ... Temp:" section as v1 and append the new
+// fields AFTER it. Every LINE_RE in tools/*.py uses re.search() anchored
+// between "Accel" and "Temp:", so appending is invisible to them and no tool
+// needs changing to keep working. Only live_plot.py reads the extra fields.
 typedef struct {
   int16_t accX, accY, accZ;
   int16_t temp;
   int16_t gyroX, gyroY, gyroZ;
 } SensorPacket;
+
+typedef struct __attribute__((packed)) {
+  uint8_t  version;
+  uint8_t  flags;
+  uint16_t seq;
+  int16_t  accMeanX, accMeanY, accMeanZ;
+  int16_t  gyroMeanX, gyroMeanY, gyroMeanZ;
+  uint16_t gyroStdX, gyroStdY, gyroStdZ;
+  uint8_t  bigDeltaCount;
+  uint8_t  sampleCount;
+  int16_t  temp;
+  uint16_t touchRaw;
+  uint16_t touchBaseline;
+  uint16_t uptimeMin;
+} SummaryPacket;
+
+// Must match the identical assertion in sender_summary.ino. The two formats
+// are told apart by length alone, so a silent size disagreement between the
+// files would present as every packet arriving as "BAD PACKET".
+static_assert(sizeof(SummaryPacket) == 32, "SummaryPacket size changed -- update sender_summary.ino to match");
+static_assert(sizeof(SensorPacket) == 14, "SensorPacket size changed -- v1 senders would stop being recognised");
 
 // 7 real chairs + 1 bench test slot (see slot 8 below).
 const int NUM_CHAIRS = 8;
@@ -95,31 +130,74 @@ int chairForMac(const uint8_t *mac) {
   return 0;
 }
 
-void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  SensorPacket packet;
-  memcpy(&packet, data, sizeof(packet));
-
-  int chair = chairForMac(info->src_addr);
+void printChairPrefix(const uint8_t *mac) {
+  int chair = chairForMac(mac);
   if (chair > 0) {
     Serial.print("Chair:"); Serial.print(chair);
   } else {
     // Unknown board -- print the MAC so it can be added to the table above.
     Serial.print("Chair:?[");
     for (int i = 0; i < 6; i++) {
-      if (info->src_addr[i] < 0x10) Serial.print('0');
-      Serial.print(info->src_addr[i], HEX);
+      if (mac[i] < 0x10) Serial.print('0');
+      Serial.print(mac[i], HEX);
       if (i < 5) Serial.print(':');
     }
     Serial.print(']');
   }
+}
 
-  Serial.print("  Accel  X:"); Serial.print(packet.accX);
-  Serial.print("  Y:"); Serial.print(packet.accY);
-  Serial.print("  Z:"); Serial.print(packet.accZ);
-  Serial.print("    Gyro  X:"); Serial.print(packet.gyroX);
-  Serial.print("  Y:"); Serial.print(packet.gyroY);
-  Serial.print("  Z:"); Serial.print(packet.gyroZ);
-  Serial.print("    Temp:"); Serial.println(packet.temp);
+// The shared "Accel ... Temp:" section. Every tools/*.py parser depends on
+// this exact text, so both packet versions emit it identically.
+void printMotion(int16_t ax, int16_t ay, int16_t az,
+                 int16_t gx, int16_t gy, int16_t gz, int16_t temp) {
+  Serial.print("  Accel  X:"); Serial.print(ax);
+  Serial.print("  Y:"); Serial.print(ay);
+  Serial.print("  Z:"); Serial.print(az);
+  Serial.print("    Gyro  X:"); Serial.print(gx);
+  Serial.print("  Y:"); Serial.print(gy);
+  Serial.print("  Z:"); Serial.print(gz);
+  Serial.print("    Temp:"); Serial.print(temp);
+}
+
+void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  // RSSI comes free with every packet and is the cheapest early warning there
+  // is that a chair is about to start dropping out -- worth logging even
+  // though nothing consumes it yet.
+  int rssi = info->rx_ctrl ? info->rx_ctrl->rssi : 0;
+
+  if (len == (int)sizeof(SummaryPacket)) {
+    SummaryPacket p;
+    memcpy(&p, data, sizeof(p));
+    printChairPrefix(info->src_addr);
+    printMotion(p.accMeanX, p.accMeanY, p.accMeanZ,
+                p.gyroMeanX, p.gyroMeanY, p.gyroMeanZ, p.temp);
+    Serial.print("    Std  X:"); Serial.print(p.gyroStdX);
+    Serial.print("  Y:"); Serial.print(p.gyroStdY);
+    Serial.print("  Z:"); Serial.print(p.gyroStdZ);
+    Serial.print("    Big:"); Serial.print(p.bigDeltaCount);
+    Serial.print("  N:"); Serial.print(p.sampleCount);
+    Serial.print("  Touch:"); Serial.print(p.touchRaw);
+    Serial.print("  TBase:"); Serial.print(p.touchBaseline);
+    Serial.print("  Up:"); Serial.print(p.uptimeMin);
+    Serial.print("  Seq:"); Serial.print(p.seq);
+    Serial.print("  Flags:"); Serial.print(p.flags);
+    Serial.print("  Rssi:"); Serial.println(rssi);
+
+  } else if (len == (int)sizeof(SensorPacket)) {
+    SensorPacket packet;
+    memcpy(&packet, data, sizeof(packet));
+    printChairPrefix(info->src_addr);
+    printMotion(packet.accX, packet.accY, packet.accZ,
+                packet.gyroX, packet.gyroY, packet.gyroZ, packet.temp);
+    Serial.print("  Rssi:"); Serial.println(rssi);
+
+  } else {
+    // Neither format. Report it rather than dropping it silently -- a
+    // mismatched struct between sender and receiver is otherwise invisible
+    // and looks exactly like a dead board.
+    printChairPrefix(info->src_addr);
+    Serial.print("  BAD PACKET len:"); Serial.println(len);
+  }
 }
 
 void setup() {

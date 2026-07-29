@@ -118,7 +118,10 @@ LONG_QUIET_FRACTION = 0.80    # quiet share needed for the burst-less release
 # at the 100Hz sender rate, far beyond any normal gap.
 SIGNAL_TIMEOUT = 2.0
 RATE_WINDOW = 2.0             # trailing seconds used for the per-chair Hz readout
-EXPECTED_HZ = 100.0           # sender transmits every sample at 100Hz
+EXPECTED_HZ = 100.0           # v1 sender transmits every sample at 100Hz
+# The v2 summary sender transmits 8 times a second instead. 2s of silence is
+# still 16 missed packets, so SIGNAL_TIMEOUT holds up unchanged for both.
+EXPECTED_HZ_SUMMARY = 8.0
 
 # Sensor sanity, straight out of the 2026-07-22 bring-up: a stationary
 # MPU-6050 must measure exactly 1g, because gravity is the only acceleration
@@ -193,6 +196,23 @@ LINE_RE = re.compile(
 # instead of the dashboard sitting blank with no explanation.
 LEGACY_RE = re.compile(r"Accel\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+Gyro")
 
+# The v2 summary firmware (firmware/sender_summary.ino, 8Hz) appends its extra
+# fields AFTER Temp:, which is why LINE_RE above still matches those lines
+# unchanged and why no other tools/*.py needed touching. This picks up the
+# appended part; a line without it is a v1 raw-sample line.
+SUMMARY_RE = re.compile(
+    r"Std\s+X:(\d+)\s+Y:(\d+)\s+Z:(\d+)\s+"
+    r"Big:(\d+)\s+N:(\d+)\s+"
+    r"Touch:(\d+)\s+TBase:(\d+)\s+"
+    r"Up:(\d+)\s+Seq:(\d+)\s+Flags:(\d+)"
+)
+
+# Sender health bits, mirroring the FLAG_* constants in sender_summary.ino.
+FLAG_SENSOR_OK = 0x01
+FLAG_TOUCH_OK = 0x04
+FLAG_I2C_FAIL = 0x08
+FLAG_ALL_ZERO = 0x10
+
 SERIES_NAMES = ["Accel X", "Accel Y", "Accel Z", "Gyro X", "Gyro Y", "Gyro Z"]
 
 # Sensitivity at the sensor's default range settings (±2g, ±250°/s):
@@ -239,6 +259,14 @@ class Chair:
         self.temp_c = None
         self.last_packet = None
         self.detail = ""
+        # "raw" until a v2 summary line arrives from this board, then "summary"
+        # for good. Per-chair rather than global, because the fleet is mixed
+        # while chairs are reflashed one at a time.
+        self.mode = "raw"
+        self.summary_flags = None
+        self.touch_raw = None
+        self.touch_base = None
+        self.uptime_min = None
 
     # -- ingest ---------------------------------------------------------------
     def add_sample(self, t, motion_values, temp_raw):
@@ -268,12 +296,26 @@ class Chair:
         span = max(self.packet_times[-1] - self.packet_times[0], 1e-6)
         return (len(self.packet_times) - 1) / span if len(self.packet_times) > 1 else 0.0
 
+    @property
+    def expected_hz(self):
+        return EXPECTED_HZ_SUMMARY if self.mode == "summary" else EXPECTED_HZ
+
     def sensor_fault(self, now):
         """True when the accel magnitude is nowhere near 1g while at rest.
 
         Checked on the MEDIAN over several seconds so that real motion, which
         legitimately swings the magnitude around, does not trip it.
         """
+        # In summary mode the sender already ran exactly this check, against
+        # the full 100Hz window rather than the 8Hz means that reach us, so
+        # trust its verdict. Recomputing it here would also be broken: the
+        # n >= 50 guard below can never be satisfied by 8 packets a second
+        # over a 5s window, so the fault check would silently never fire.
+        if self.mode == "summary":
+            if self.summary_flags is None:
+                return False
+            return not (self.summary_flags & FLAG_SENSOR_OK)
+
         xs = [v for t, v in self.series["Accel X"] if t >= now - SENSOR_CHECK_WINDOW]
         ys = [v for t, v in self.series["Accel Y"] if t >= now - SENSOR_CHECK_WINDOW]
         zs = [v for t, v in self.series["Accel Z"] if t >= now - SENSOR_CHECK_WINDOW]
@@ -308,54 +350,90 @@ class Chair:
         ratio_test = sz > Z_FLOOR and sz / (sx + sy + RATIO_EPS) > RATIO_THRESHOLD
         return ratio_test or self.big_motion_last_second(now)
 
-    def update_occupancy(self, now):
+    def add_summary(self, t, stds_raw, big_count, flags,
+                    touch_raw, touch_base, uptime_min):
+        """Ingest one v2 summary packet and step the state machine once.
+
+        The state machine steps PER PACKET here, not per animation frame. That
+        is what tools/replay_summary.py backtested (8Hz matched the 100Hz
+        baseline exactly, at 0/10/20% packet loss); stepping it on the 100ms
+        display tick instead would re-evaluate the same numbers up to twelve
+        times and is not the thing that was validated.
+        """
+        self.mode = "summary"
+        self.summary_flags = flags
+        self.touch_raw = touch_raw
+        self.touch_base = touch_base
+        self.uptime_min = uptime_min
+
+        # The sender computed these over a trailing 1.0s window at the full
+        # 100Hz sample rate, which is the same window this model always used —
+        # so the tuned constants above keep their meaning unchanged.
+        sx, sy, sz = (v / GYRO_LSB_PER_DEG_S for v in stds_raw)
+        ratio_test = sz > Z_FLOOR and sz / (sx + sy + RATIO_EPS) > RATIO_THRESHOLD
+        motion = ratio_test or big_count >= BIG_DELTA_DEBOUNCE
+        self._step(t, sx, sy, sz, motion)
+
+    def _step(self, now, sx, sy, sz, motion):
+        """The departure/confidence state machine, shared by both modes."""
         st = self.state
-        if self.person_motion(now):
+        if motion:
             st["last_move"] = now
             st["departed_at"] = None  # person still here — cancel drain
 
+        smax = max(sx, sy, sz)
+        self.quiet_history.append((now, smax < DEPART_QUIET))
+        cutoff = now - max(DEPART_QUIET_WINDOW, LONG_QUIET_WINDOW)
+        while self.quiet_history and self.quiet_history[0][0] < cutoff:
+            self.quiet_history.popleft()
+        if smax > DEPART_BURST:
+            st["burst_at"] = now
+        if st["departed_at"] is None:
+            short = [q for t, q in self.quiet_history
+                     if t >= now - DEPART_QUIET_WINDOW]
+            frac_short = sum(short) / len(short) if short else 0.0
+            frac_long = (sum(q for _, q in self.quiet_history)
+                         / len(self.quiet_history))
+            burst = st["burst_at"]
+            paired = burst is not None and now - burst <= DEPART_PAIR_WINDOW
+            warmed_up = now - self.quiet_history[0][0] >= LONG_QUIET_WINDOW - 1.0
+            if ((paired and frac_short >= DEPART_QUIET_FRACTION)
+                    or (warmed_up and frac_long >= LONG_QUIET_FRACTION
+                        and st["confidence"] > 0)):
+                st["departed_at"] = now
+                st["depart_base"] = st["confidence"]
+                st["burst_at"] = None
+
+        st["confidence"], _ = self._confidence_at(now)
+
+    def _confidence_at(self, now):
+        """Confidence as a pure function of the state and the clock."""
+        st = self.state
+        last, departed = st["last_move"], st["departed_at"]
+        if last is None:
+            return 0.0, "no recent person-motion"
+        if departed is not None:
+            frac = (now - departed) / DEPART_DRAIN_SECONDS
+            return max(0.0, st["depart_base"] * (1.0 - frac)), "stand-up detected"
+        quiet = now - last
+        return (CONFIDENCE_MAX * max(0.0, 1.0 - quiet / CONFIDENCE_DECAY_SECONDS),
+                f"last motion {quiet:.0f}s ago")
+
+    def update_occupancy(self, now):
+        # In summary mode the state machine already advanced in add_summary()
+        # when the packet landed. All that is left each frame is to let the
+        # displayed confidence keep decaying between packets.
+        if self.mode == "summary":
+            self.confidence, self.detail = self._confidence_at(now)
+            return
+
+        # Raw mode computes the same statistics locally from the 100Hz stream
+        # and then runs the identical state machine, so the two modes cannot
+        # drift apart as the model gets retuned.
         stds = self.gyro_stds_last_second(now)
         if stds is not None:
-            smax = max(stds)
-            self.quiet_history.append((now, smax < DEPART_QUIET))
-            cutoff = now - max(DEPART_QUIET_WINDOW, LONG_QUIET_WINDOW)
-            while self.quiet_history and self.quiet_history[0][0] < cutoff:
-                self.quiet_history.popleft()
-            if smax > DEPART_BURST:
-                st["burst_at"] = now
-            if st["departed_at"] is None:
-                short = [q for t, q in self.quiet_history
-                         if t >= now - DEPART_QUIET_WINDOW]
-                frac_short = sum(short) / len(short) if short else 0.0
-                frac_long = (sum(q for _, q in self.quiet_history)
-                             / len(self.quiet_history))
-                burst = st["burst_at"]
-                paired = burst is not None and now - burst <= DEPART_PAIR_WINDOW
-                warmed_up = now - self.quiet_history[0][0] >= LONG_QUIET_WINDOW - 1.0
-                if ((paired and frac_short >= DEPART_QUIET_FRACTION)
-                        or (warmed_up and frac_long >= LONG_QUIET_FRACTION
-                            and st["confidence"] > 0)):
-                    st["departed_at"] = now
-                    st["depart_base"] = st["confidence"]
-                    st["burst_at"] = None
-
-        last = st["last_move"]
-        departed = st["departed_at"]
-        if last is None:
-            confidence = 0.0
-            detail = "no recent person-motion"
-        elif departed is not None:
-            frac = (now - departed) / DEPART_DRAIN_SECONDS
-            confidence = max(0.0, st["depart_base"] * (1.0 - frac))
-            detail = "stand-up detected"
-        else:
-            quiet = now - last
-            confidence = CONFIDENCE_MAX * max(
-                0.0, 1.0 - quiet / CONFIDENCE_DECAY_SECONDS)
-            detail = f"last motion {quiet:.0f}s ago"
-        st["confidence"] = confidence
-        self.confidence = confidence
-        self.detail = detail
+            self._step(now, stds[0], stds[1], stds[2], self.person_motion(now))
+        self.confidence, self.detail = self._confidence_at(now)
 
     @property
     def occupied(self):
@@ -450,6 +528,16 @@ def read_new_samples():
         idx = int(token) - 1
         if 0 <= idx < NUM_CHAIRS:
             chairs[idx].add_sample(t, motion_values, temp_raw)
+            # A v2 summary line is a v1 line with extra fields appended, so it
+            # matched LINE_RE above and its means went into the traces; this
+            # adds the statistics the occupancy model actually runs on.
+            s = SUMMARY_RE.search(line)
+            if s:
+                g = [int(x) for x in s.groups()]
+                chairs[idx].add_summary(
+                    t, (g[0], g[1], g[2]), g[3],
+                    flags=g[9], touch_raw=g[5], touch_base=g[6],
+                    uptime_min=g[7])
     last_read_time = now
     for c in chairs:
         c.trim(now)
