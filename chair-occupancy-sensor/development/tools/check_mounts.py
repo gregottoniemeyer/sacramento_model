@@ -117,7 +117,7 @@ def main():
         sx, sy, sz, n = acc[c]
         if n == 0:
             continue
-        # 16384 raw = 1 g at the MPU-6050's default +/-2g scale (NOTES.md).
+        # 16384 raw = 1 g at the MPU-6050's default +/-2g scale (ARCHIVE.md).
         x, y, z = sx / n / 16384.0, sy / n / 16384.0, sz / n / 16384.0
         mag = math.sqrt(x * x + y * y + z * z)
         if mag < 0.5:

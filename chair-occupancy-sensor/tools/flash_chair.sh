@@ -2,7 +2,7 @@
 # Flash one chair sender, identifying the board by MAC before writing anything.
 #
 # WHY IT CHECKS THE MAC FIRST
-# NOTES.md records that flashing sender code onto the receiver "succeeds" with no
+# ../development/ARCHIVE.md records that flashing sender code onto the receiver "succeeds" with no
 # error and leaves the two boards disagreeing about the packet struct, which then
 # presents as shifted field values rather than as a failure. The port name cannot
 # prevent that: a CP2102 chair and the receiver can both land on a
@@ -33,7 +33,8 @@ ESPTOOL=$(echo "$HOME"/Library/Arduino15/packages/esp32/tools/esptool_py/*/espto
 FQBN="esp32:esp32:esp32"
 RECEIVER_MAC="78:1c:3c:35:83:6c"
 
-# Chair number by MAC, from the table in NOTES.md. Labels carry the last two
+# Chair number by MAC, mirroring the table in firmware/receiver_esp_now.ino.
+# Labels carry the last two
 # octets precisely so a board can be identified without opening anything.
 mac_to_chair() {
   case "$1" in
@@ -46,7 +47,7 @@ mac_to_chair() {
     8c:94:df:45:b3:d0) echo 7 ;;
     78:1c:3c:35:83:6c) echo receiver ;;
     # Slot 8 = the recovered original chair-2 board, reassigned 2026-07-30.
-    # It was retired on 2026-07-22 for corrupted I2C reads (see NOTES.md); its
+    # It was retired on 2026-07-22 for corrupted I2C reads (see ../development/ARCHIVE.md); its
     # sensor must pass a bench check before this board is trusted as a spare.
     88:f1:55:32:5f:6c) echo 8 ;;
     # 78:1c:3c:35:04:84 (the Lonely Binary bench board, ex-MAC-cloned second
@@ -79,8 +80,9 @@ if [[ "$ROLE" == "sender" ]]; then
     exit 1
   fi
   if [[ "$WHO" == "unknown" ]]; then
-    echo "REFUSING: MAC $MAC is not in the chair table in NOTES.md." >&2
-    echo "Add it there first, so the receiver can label its packets." >&2
+    echo "REFUSING: MAC $MAC is not in the chair table." >&2
+    echo "Add it to firmware/receiver_esp_now.ino AND to this script first," >&2
+    echo "so the receiver can label its packets. See README.md." >&2
     exit 1
   fi
   SKETCH=sender_summary

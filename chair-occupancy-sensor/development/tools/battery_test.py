@@ -1,13 +1,13 @@
 """Battery runtime test: how long does a chair actually run on one charge?
 
-This has never been measured (see NOTES.md, Battery section: "Max is
+This has never been measured (see ARCHIVE.md, Battery section: "Max is
 establishing the hours-per-charge figure on the bench; until that number
 exists, charge them overnight"). Greg needs the number to know a safe
 charging cadence while running the exhibit alone.
 
 WHAT IT MEASURES AND WHY THAT IS ENOUGH
 There is no battery-voltage telemetry on this board (no ADC wired to the
-cell -- see NOTES.md). The only observable signal of a dead battery is the
+cell -- see ARCHIVE.md). The only observable signal of a dead battery is the
 chair going silent: "a chair node that stops reporting in has a dead
 battery" is already the documented operating assumption. So the test is
 exactly that: watch the receiver, and time from first packet to last packet.

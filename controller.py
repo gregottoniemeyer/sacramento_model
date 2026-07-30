@@ -8,7 +8,7 @@ where, and broadcasts the state on UDP 5005 at 60Hz.
   python3 controller.py --source keyboard    # press 1-7, no chairs needed
   python3 chair_state_monitor.py             # see what is being sent
 
-See INTEGRATION.md for the packet format, chair identification and fault modes.
+See chair-occupancy-sensor/README.md for the packet format, chair identification and fault modes.
 """
 
 import argparse
@@ -292,7 +292,7 @@ class SensorSource(Source):
         if not LOG.exists():
             raise SystemExit(
                 f"{LOG} does not exist, so the serial capture is not running.\n"
-                "See INTEGRATION.md, 'Starting the chain', step 2.")
+                "See chair-occupancy-sensor/README.md, 'Run it', step 2.")
         self.log = LOG
         self.models = {c: ChairModel() for c in range(1, NUM_CHAIRS + 1)}
         self.last_seen = {c: None for c in range(1, NUM_CHAIRS + 1)}

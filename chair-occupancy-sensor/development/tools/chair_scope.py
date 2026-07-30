@@ -38,7 +38,7 @@ from matplotlib.animation import FuncAnimation
 
 LOG = Path.home() / "motion_log.txt"
 
-# ---- model constants (the rebuilt model; see NOTES.md 2026-07-29) ----------
+# ---- model constants (the rebuilt model; see ARCHIVE.md 2026-07-29) ----------
 Z_FLOOR_RAW = 15         # gyro-Z 1s std must clear this
 RATIO_THRESHOLD = 0.65   # ...and dominate X+Y by this much
 VOTE_WINDOW = 5.0        # seconds of votes that decide occupancy

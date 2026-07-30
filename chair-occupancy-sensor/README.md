@@ -1,229 +1,328 @@
-# Chair Occupancy Sensor
+# Chair occupancy sensors
 
-ESP32 + MPU-6050 per-chair motion sensor, feeding occupancy state into the
-Sacramento Model's chevron/ring animations. Each chair gets a battery-powered
-ESP32 that senses motion and radios it (ESP-NOW) to one USB-tethered receiver
-board, which a Python dashboard reads to infer occupied/empty per chair.
+Seven chairs detect whether someone is sitting in them and drive the Sacramento
+River installation.
 
-**Downstream integration point:** `../controller.py` already exists and is
-built to consume this — it currently uses keyboard keys 1-7 as a placeholder
-for real chair state (`chairs: [bool] * 7`), broadcast as UDP JSON to drive
-the screens. The eventual hub firmware/script needs to produce that same
-`chairs` array from real sensor data instead of keypresses.
+Each chair has a battery-powered ESP32 with a motion sensor. They report
+wirelessly, eight times a second, to a receiver plugged into the Mac by USB.
+`controller.py` turns that into occupancy and broadcasts it to the screens.
 
-**New here?** See `START_HERE.md` for the 5-point quickstart. Setting up a
-new permanent installation machine (auto-sync + auto-restarting dashboard)?
-See `MAC_MINI_SETUP.md` for exact steps.
-
-## Layout
-
-- `firmware/` — Arduino sketches.
-  - `sender_summary.ino` — **the deployed chair firmware** (all seven flashed
-    2026-07-29). Samples the MPU-6050 at 100Hz, computes the occupancy model's
-    input statistics on the board over a trailing 1.0s window, and transmits
-    them at 8Hz instead of radioing every raw sample. Also drives the onboard
-    status LED and carries a capacitive-presence field. See its header comment
-    for why 8Hz and not less.
-  - `sender_esp_now.ino` — the previous firmware: raw 100Hz samples, one packet
-    per sample. **Superseded**, kept because the retired dead-USB spare board
-    can never be reflashed and therefore still speaks this format, which the
-    receiver still accepts.
-  - `receiver_esp_now.ino` — flashed to the board that stays on USB. Prints
-    incoming data to Serial in a fixed text format the tools below parse.
-  - `i2c_scanner.ino` — diagnostic utility to confirm a sensor responds at
-    I2C address `0x68`; not part of the deployed system. Distinguishes two
-    different fault types that need different fixes: a clean "No I2C
-    devices found" (or nothing at `0x68`) means a weak/cold joint or a
-    power issue, while a flood of scattered "found" addresses across the
-    whole range means a short/solder bridge or floating line — fix that by
-    *removing* excess solder (wick), not adding more.
-  - `mpu_read_test.ino` — diagnostic utility to read the MPU-6050 and print
-    straight to Serial over USB, no ESP-NOW/receiver needed. Useful for
-    bench-testing a freshly soldered sensor board on its own before
-    trusting it with the full sender firmware.
-  - `i2c_line_check.ino` — diagnostic utility for when `i2c_scanner` finds
-    NOTHING: says *which* data wire is open. The GY-521's own pull-up
-    resistors mean a connected line reads high against an internal
-    pull-down, so SDA and SCL can be told apart. Closes the gap where a
-    clean "No I2C devices found" left all four wires as suspects (the
-    module's power LED covers VCC/GND, this covers the other two). Found a
-    dead SCL on a brand-new replacement module on 2026-07-29.
-  - `led_probe.ino` — diagnostic utility to find which GPIO drives the
-    onboard LED. Each candidate pin blinks a number of times equal to its
-    position in the list, so the groups are self-identifying and you never
-    have to know when a sweep started. Answer on these boards: **GPIO16,
-    active low.**
-  - `touch_presence_test.ino` — **experiment, nothing flashed to a chair
-    yet.** Capacitive presence sensing (ESP32 touch pin + an electrode on
-    the seat), at Greg's suggestion 2026-07-21. Unlike the MPU-6050 it
-    measures presence rather than motion, so it targets both known
-    weaknesses of the current model directly. Prints raw counts to Serial
-    over USB. See its header comment for electrode options and the two
-    expected gotchas (floating battery ground, thermal drift).
-  - `proposed_2hz_radio_reduction/` — **abandoned, do not flash.** The idea
-    (summarise on the board, radio less often) was right and shipped as
-    `sender_summary.ino`; the 2Hz *rate* was wrong. Backtested 2026-07-29 with
-    `tools/replay_summary.py`, 2Hz is measurably worse than the 100Hz system it
-    replaces: it misses a stand-up and adds a false FREE. 8Hz matches the
-    baseline exactly even at 20% packet loss. Kept only as the record of why
-    the rate is 8 and not 2.
-- `tools/` — Python (venv at `venv/`, see setup below).
-  - `live_plot.py` — the live dashboard: real-time accel/gyro/temp charts
-    plus an occupancy status banner. Source of truth for the currently
-    deployed occupancy model.
-  - `collect_data.py` / `collect_standup_data.py` — guided, labeled data
-    collection sessions (on-screen instructions + sound cues), write to
-    `data/*.csv` with ground-truth phase labels.
-  - `simple_model.py`, `tune_simple.py`, `replay_simple.py`,
-    `replay_detector.py` — offline model development/scoring against labeled
-    CSVs in `data/`.
-  - `analyze_experiment.py`, `compare_phases.py`, `tilt_check.py` — earlier,
-    informal (pre-labeled-data) analysis scripts. Superseded by the
-    labeled-session workflow above, kept for reference.
-- `data/` — recorded sessions (raw and labeled CSVs). Some files are several
-  MB; that's expected for 100Hz sensor recordings.
-
-## Setup on a new machine
-
-```bash
-cd chair-occupancy-sensor
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
+```
+7 chairs  ──radio──▶  receiver on USB  ──▶  controller.py  ──UDP──▶  screens
 ```
 
-## Running the live pipeline
+**Everything needed day to day is in this file.** The engineering history, every
+fault signature, and the reasoning behind each decision is in
+[`development/ARCHIVE.md`](development/ARCHIVE.md).
 
-1. Plug in the **receiver** board (stays on USB). Find its port:
-   `ls /dev/cu.*` — look for a `wchusbserial*` (CH340) or `usbserial*`/
-   `SLAB_USBtoUART` (CP2102) entry.
-2. Start the serial capture (keeps the port's baud setting alive across the
-   whole session — do not split the `stty` and `cat` into separate opens,
-   the port silently resets to 9600 baud if you do):
-   ```bash
-   exec 3<>/dev/cu.YOUR_PORT_HERE
-   stty -f /dev/fd/3 921600 raw
-   cat <&3 > ~/motion_log.txt &
-   ```
-   **921600 must match `Serial.begin()` in `firmware/receiver_esp_now.ino`.**
-   (The 8Hz summary firmware needs far less than this — seven chairs at 8Hz is
-   ~56 lines/sec — but the rate stays 921600 because the receiver still accepts
-   100Hz v1 senders, which need it.)
-   These two numbers are a pair — change one and the other must change, or
-   the log fills with garbled bytes rather than failing cleanly. (It was
-   115200 until 2026-07-22; seven boards at 100Hz overrun that ~5x.)
-   This dies if the board is ever unplugged — restart it after any
-   reconnect (check with `wc -l ~/motion_log.txt` a few seconds apart to
-   confirm it's still growing).
-3. Launch the dashboard: `venv/bin/python tools/live_plot.py`
-   If you replace `~/motion_log.txt` (e.g. re-running step 2 with `>`
-   instead of `>>`) while the dashboard is running, restart the dashboard
-   too — it holds an open handle to the old file and won't see new data.
-   Hit this for real bringing up boards 6/7 (2026-07-10): the dashboard sat
-   showing stale data for the rest of the session with no error, because
-   restarting the capture pipe after the receiver was unplugged/replugged
-   truncated the log file out from under the dashboard's open handle.
-   Symptom: the banner freezes and "last motion Ns ago" keeps climbing even
-   while you're actively wiggling a board in your hand — that's the tell
-   that it's a stale dashboard, not a dead sensor. Fix: `pkill -f
-   tools/live_plot.py` then relaunch it.
+---
 
-## Bringing up a new/repaired chair board
+## Run it
 
-**Multiple senders can be powered at once** (since 2026-07-22). The packet
-itself still has no board-ID field, but it doesn't need one: ESP-NOW hands
-the receiver the sender's MAC, which `firmware/receiver_esp_now.ino` looks
-up in its `chairMacs` table and prints as a `Chair:N` prefix on every line.
-A board that isn't in the table prints `Chair:?[mac]` — so a new or swapped
-board announces its MAC rather than arriving anonymously. Verified with two
-boards streaming simultaneously (0.07% malformed lines).
+Four things must be running. Each one fails invisibly, which is why they are
+listed separately.
 
-Swapping a chair's physical board therefore means editing the `chairMacs`
-table and reflashing **the receiver only** — the senders are untouched.
+**1. Switch the chairs on.** The power switch is on the underside of each
+board. A chair is healthy when its blue light flashes briefly every 3 seconds.
 
-1. Read the board's MAC **before flashing anything**, so a bad flash never
-   loses track of which physical board is which:
-   ```bash
-   esptool --port /dev/cu.YOUR_PORT read-mac
-   ```
-   (find `esptool` at
-   `~/Library/Arduino15/packages/esp32/tools/esptool_py/*/esptool` if it's
-   not on your `PATH`). Physically label the board with its assigned number
-   right away — cheap sharpie/tape, easy to lose track otherwise.
-2. Flash `firmware/sender_esp_now.ino` (Board: "ESP32 Dev Module", double
-   check the Port before uploading).
-3. With the receiver plugged in and the live pipeline running (above), pick
-   the board up and shake/rotate it. Pass = Accel/Gyro traces move and the
-   banner flips to OCCUPIED. If nothing moves, see the diagnostic escalation
-   below before assuming the sensor is dead.
-4. Move to the next board only after confirming the current one — pull its
-   power first.
+**2. Start the serial capture.** Find the receiver's port first, because the
+name changes depending on which USB socket it is in:
 
-**If a board looks dead on the dashboard**, escalate in this order rather
-than guessing:
-1. `firmware/mpu_read_test.ino` — reads the sensor and prints straight to
-   Serial over the board's own USB cable, no receiver needed. If this shows
-   real, varying numbers when you wiggle the board, the sensor and I2C
-   wiring are fine — the fault is downstream (ESP-NOW/receiver/dashboard),
-   not the board itself.
-2. `firmware/i2c_scanner.ino` — if step 1 shows the sensor stuck at a
-   constant value (especially `-1` on every field, which means "no I2C
-   response at all"), this narrows down *why*: see the diagnostic note next
-   to it in the Layout section above.
-3. A board's onboard power LED (present on most GY-521 modules) not
-   lighting up, when other boards' do, is a fast way to localize a fault to
-   VCC/GND specifically before touching SDA/SCL at all — this is what
-   actually broke board 7 during the 2026-07-10 bring-up, after an initial
-   solder bridge on SDA/SCL was fixed first and turned out not to be the
-   whole story. See `NOTES.md` for the full board-by-board history.
+```bash
+ls /dev/cu.*
+```
 
-   **This check no longer works on chairs mounted from 2026-07-24 onward.**
-   Screwing the sensor module into the chair reliably destroys the GY-521
-   power LED, so a dark LED on a mounted board means nothing. Verified on
-   chair 1: LED dead, sensor streaming clean 100Hz data at a normal
-   temperature. The physics rules out a power fault as the explanation for
-   a dark LED on a *working* board — an LED needs ~2V forward to light and
-   the MPU-6050 needs ≥2.375V to run at all, so a rail too weak to light
-   the LED could not produce valid data. On a mounted board, measure
-   3V3-to-GND at the module with a multimeter instead.
+Look for `wchusbserial*`. Then, with the real name substituted in:
 
-   **The dead LED is cosmetic; the mounting step is not** (2026-07-27).
-   Screwing boards in also cracked joints on the weakest chairs, so treat a
-   freshly mounted board as unverified until it has been checked **on
-   battery, after mounting**. Symptoms to expect are power-path, not sensor:
-   all fields pinned at exactly 0 at full packet rate (brownout, reflow
-   VCC/GND), or no packets at all (the ESP32 is not running, check the
-   cell). See `NOTES.md`, "Installation day", for the order of work.
+```bash
+exec 3<>/dev/cu.wchusbserial10
+stty -f /dev/fd/3 921600 raw
+cat <&3 > ~/motion_log.txt &
+disown
+```
 
-## Current occupancy model
+**Check it is really running.** This step fails silently, and a stopped capture
+freezes everything downstream with no error anywhere:
 
-A **confidence score (0-100)** rather than a flat timer, computed each frame
-in `tools/live_plot.py` (`update_occupancy()` — that function is the source
-of truth; all tunable constants live in one block near the top of the file).
-Two independent signals feed it:
+```bash
+wc -l ~/motion_log.txt; sleep 5; wc -l ~/motion_log.txt
+```
 
-1. **Person-like motion** — either gyro-Z std-dev dominating X/Y (a swivel),
-   or a run of large single-sample gyro jumps (a jolt/plop). Either one
-   resets confidence to 100 and marks "last motion now."
-2. **Departure detection** — a motion burst followed within a few seconds by
-   empty-chair-grade silence (below the measured noise floor of a genuinely
-   empty chair) is treated as a confirmed stand-up, and drains confidence to
-   0 over ~2 seconds.
+It should climb by about **280 every 5 seconds** (7 chairs x 8 per second). If
+it does not climb, nothing downstream is real no matter how healthy it looks.
 
-Absent a confirmed departure, confidence decays **slowly** (90s) as a
-fallback only — presence is deliberately "sticky" so that sitting still
-doesn't get misread as empty. This two-signal design replaced an earlier
-single-timer version that failed in live testing both ways (statue-sitters
-flipped to FREE, stand-ups felt sluggish).
+**3. Start the controller**, from the repo root:
 
-Thresholds were tuned against `data/labeled_session_1783532146.csv` (a
-guided two-surface session, hard floor + carpet) to get zero false triggers
-across every walk-by/stand-near/stomp/dropped-object variant tested, on
-both surfaces. Re-tune with `tools/tune_simple.py` / `tools/replay_simple.py`
-against any new labeled recording.
+```bash
+python3 controller.py
+```
 
-**Known remaining weaknesses** (see the constants-block comments in
-`live_plot.py` for the measurements behind these):
-- A hard bump/knock on an empty chair still reads OCCUPIED until the decay
-  or a departure event clears it.
-- On carpet, sit-down detection lags ~2-3s behind hard floor (carpet
-  absorbs the initial "plop").
+**4. Start the renderers** on the screen Macs.
+
+---
+
+## Check it is working
+
+```bash
+python3 chair_state_monitor.py
+```
+
+Shows every chair's state, its temperature, and the vote fraction, which is the
+number the model actually uses to decide. Add `--plain` for a terminal version
+that needs nothing installed.
+
+To test the whole downstream half with no chairs at all:
+
+```bash
+python3 controller.py --source keyboard
+```
+
+Press 1-7 to fake chairs. It sends identical packets, so nothing downstream can
+tell the difference, and the monitor marks the source amber so a test is never
+mistaken for real chairs.
+
+---
+
+## The blue light on each chair
+
+Look at the board through the enclosure window.
+
+| The light | Means | Do |
+|---|---|---|
+| **One brief flash every 3s** | Fine | Nothing |
+| **Blinking continuously** | Something is wrong on that chair | See below |
+| **Nothing at all** | Board is not running | Charge that chair |
+
+That is the whole code, there is nothing to count.
+
+**If every chair blinks at once the problem is not the chairs.** None of them
+can reach the receiver: check it is plugged in and the Mac is awake.
+
+**If one chair blinks** it is still transmitting, it just knows something is
+off. Note which one and carry on. Not urgent unless it also stops responding.
+
+---
+
+## Charging
+
+Each chair charges over its own **micro-USB port with the battery left in
+place**. A red light near the chip comes on while charging.
+
+**A chair runs about 20 hours on a charge** (measured 2026-07-30). Charging
+overnight whenever the gallery is closed leaves several hours of margin. Two
+full days of running without a charge will not fit.
+
+A chair that goes dark or disappears has a flat battery. That is the expected
+failure, not a fault.
+
+> **The enclosures still need a charging notch cut.** Until then, reaching the
+> port means unscrewing every chair every time. That matters for reliability
+> rather than convenience: the boards that failed in July failed from being
+> handled and flexed, and opening seven boxes per charge reapplies exactly that
+> stress. Procedure in [`development/ARCHIVE.md`](development/ARCHIVE.md).
+
+---
+
+## When something stops working
+
+Work down the list and stop at the first thing that explains it.
+
+**One chair is offline**
+
+1. Is its light doing anything? Nothing at all means charge it.
+2. Is the power switch on? A chair read as dead on 30 July purely because of
+   this.
+3. Was it just reflashed? Boards sometimes land in the bootloader after an
+   upload and look completely dead. Fix: `esptool --after hard-reset chip-id`.
+
+**Every chair is offline at once**
+
+Not the chairs. Either the receiver is unplugged or the serial capture died.
+Check the capture with the `wc -l` test above. **This is the most common
+failure and it is invisible: a stopped capture leaves every display frozen on
+its last values.**
+
+**A chair reads occupied with nobody in it**
+
+Brief flickers when someone knocks or brushes a chair are expected and clear
+within about 4 seconds. Permanently stuck occupied is not expected: report it.
+
+**Everything looks fine but the screens do not react**
+
+Run `python3 chair_state_monitor.py`. If it shows correct states then the
+controller is fine and the problem is in the renderers.
+
+---
+
+## Please do not
+
+- **Do not screw the sensor boards down.** This broke four chairs in July. The
+  enclosure takes the screws, never the circuit board. If one comes loose,
+  re-tape it.
+- **Do not power a second receiver** while one is running.
+- **Do not unplug the receiver** to charge something. Use another port.
+
+---
+
+## Which chair is which
+
+**Chair identity lives in the receiver, not in the chair firmware.** Every ESP32
+has a permanent factory MAC address, and `firmware/receiver_esp_now.ino` maps
+each one to a chair number.
+
+This means every chair runs **identical firmware**, a board cannot lose its
+identity by being reflashed, and renumbering chairs is a two-line edit rather
+than unmounting boards. That last point matters because unmounting is what
+physically broke boards in July.
+
+Boards are labelled with the **last two octets** of their MAC, for example
+`B5:54` for chair 1. Two boards in this fleet differ only in the middle of
+their address, so labelling by the end is deliberate.
+
+An unrecognised board announces itself: the receiver prints
+`Chair:?[88F155325F6C]`, and that address can be pasted straight into the table.
+
+To read a board's MAC:
+
+```bash
+tools/flash_chair.sh /dev/cu.YOUR_PORT
+```
+
+**Slot 8 is not a chair.** It is the bench spare, for testing a sensor without
+unmounting an installed chair. The controller ignores it.
+
+---
+
+## Feeding the artwork
+
+`controller.py` broadcasts JSON over **UDP port 5005, 60 times a second**, to
+`127.0.0.1` and the broadcast address.
+
+```json
+{
+  "chairs":      [0, 1, 0, 0, 0, 0, 0],
+  "n_occupied":  1,
+  "speed":       1,
+  "ring_alpha":  0.14,
+  "regime":      1,
+  "regime_name": "Hydraulic Mining",
+  "stale":       [],
+  "source":      "sensors",
+  "temp_c":      [22.4, 23.1, 22.8, 22.5, 22.9, 23.0, 22.6],
+  "vote":        [0.0, 0.85, 0.0, 0.0, 0.0, 0.0, 0.0]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `chairs` | 7 flags, **index 0 is chair 1**. 1 = occupied |
+| `n_occupied` | how many are occupied |
+| `speed` | 0-9, scales with `n_occupied`. Drives flow rate |
+| `ring_alpha` | 0.0-1.0, same scaling. Drives ring opacity |
+| `regime` | index of the **most recently occupied** chair, or -1 |
+| `regime_name` | that regime's name, or `"None"` |
+| `stale` | chairs silent over 3s: flat battery or switched off |
+| `source` | `"sensors"` or `"keyboard"`, so tests are never mistaken for real |
+| `temp_c` | per chair, degrees C. Diagnostic only |
+| `vote` | per chair, 0.0-1.0, the model's own confidence. Diagnostic only |
+
+A complete consumer:
+
+```python
+import json, socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("", 5005))
+while True:
+    state = json.loads(s.recv(4096).decode())
+    speed = state["speed"]
+    alpha = state["ring_alpha"]
+    # drive the render from here
+```
+
+Worth knowing:
+
+- Packets arrive at 60Hz whether or not anything changed. Treat each one as the
+  current truth, not as an event.
+- **A silent chair is reported empty, not held.** A flat battery would otherwise
+  latch its regime on forever, which looks identical to someone sitting there
+  for hours.
+- `regime` is the **most recent** arrival, not the lowest-numbered occupied
+  chair.
+- UDP drops packets. Another arrives in 17ms, so never block waiting.
+
+> **Not connected yet:** the renderers do not listen on UDP. That last hop is a
+> change to `flow_chevrons_live.py` using the snippet above.
+
+> **Unverified:** the chair-to-regime mapping in `controller.py` is inherited
+> from the original file and has never been checked against the physical chairs.
+
+---
+
+## Setting up a new machine
+
+```bash
+brew install arduino-cli
+arduino-cli core install esp32:esp32
+git clone https://github.com/gregottoniemeyer/sacramento_model.git
+cd sacramento_model/chair-occupancy-sensor
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+```
+
+**USB-serial drivers.** The boards use two different chips. Most need Silicon
+Labs' CP210x driver; the receiver uses a CH340 and needs that vendor's driver.
+If a board never appears in `/dev/cu.*`, this is why.
+
+**The baud rate is 921600** and must match `Serial.begin()` in
+`firmware/receiver_esp_now.ino`. Change one and the log fills with garbage
+rather than failing cleanly.
+
+**Automatic updates.** `tools/pull_and_refresh.sh` on a timer pulls new code and
+restarts the controller. The serial capture does **not** auto-start and must be
+started by hand after any reboot or replug.
+
+---
+
+## Reflashing a board
+
+```bash
+tools/flash_chair.sh /dev/cu.YOUR_PORT              # a chair
+tools/flash_chair.sh /dev/cu.YOUR_PORT receiver     # the receiver
+```
+
+It reads the MAC before writing anything and refuses to flash chair code onto
+the receiver, which otherwise succeeds silently and breaks the whole fleet.
+
+**Flash the receiver before the chairs** if both need updating. A new chair
+talking to an old receiver reads as `BAD PACKET` and looks exactly like a dead
+board.
+
+---
+
+## What is where
+
+```
+controller.py             reads the chairs, broadcasts to the screens
+chair_state_monitor.py    check the chain is working
+
+chair-occupancy-sensor/
+  README.md               this file
+  firmware/               sender_summary.ino   -> all 7 chairs
+                          receiver_esp_now.ino -> the USB receiver
+                          i2c_*, mpu_read_test -> wiring diagnostics
+  tools/                  flash_chair.sh, pull_and_refresh.sh
+  data/                   recorded sessions
+  development/            everything used to build and validate it, plus
+                          ARCHIVE.md: the full history and reasoning
+```
+
+The occupancy model lives inside `controller.py`, so the file that runs the
+installation depends on nothing else. The development tools import it from
+there, so there is only ever one copy of the model.
+
+**Validated 2026-07-30** on data the model had never seen: 9/9 sit-downs, 9/9
+stand-ups across all seven chairs, zero false positives. Reproduce it with:
+
+```bash
+venv/bin/python development/tools/score_model.py data/dataset_20260730_122544.csv
+```

@@ -1,7 +1,7 @@
 """Simplified live dashboard: one line per chair, current occupancy only.
 
 Deliberately not live_plot.py, which still runs the OLD confidence/decay model
-(see NOTES.md, "MODEL REBUILT") -- this imports tools/occupancy_model.py
+(see ARCHIVE.md, "MODEL REBUILT") -- this imports tools/occupancy_model.py
 directly, so what you see here is what the rebuilt model actually decides.
 
 Full-screen, redraws in place, plain ANSI (no curses dependency). Reads
@@ -9,7 +9,7 @@ Full-screen, redraws in place, plain ANSI (no curses dependency). Reads
 and tools/occupancy_model.
 
 A chair is STALE if no packet has arrived in STALE_S seconds -- per
-OPERATING.md, "a chair reading zero has either a flat battery or is switched
+../../README.md, "a chair reading zero has either a flat battery or is switched
 off." That is distinct from FREE, which means "sensor is fine and nobody is
 sitting here," and the dashboard never lets one be mistaken for the other.
 
