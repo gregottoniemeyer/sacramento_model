@@ -625,6 +625,40 @@ raw cell voltage can exceed the 3.3V an ADC pin can safely read). This has
 been deliberately deprioritized in favor of a simpler practical signal for
 now: a chair node that stops reporting in has a dead battery.
 
+**Hours per charge: about 20 h (measured 2026-07-30).** Chair 7 ran mounted and
+idle from 2026-07-29 17:24 to 2026-07-30 11:40, so 18.3 h, and was still
+transmitting when the cell was pulled. On the Nitecore UMS4 it read 3.82 V while
+charging at 1.978 A, with a measured internal resistance of **184 mOhm**. That
+IR gives a 0.36 V drop at the charge current, so the resting voltage was about
+**3.46 V, roughly 9% remaining**. Extrapolating from a full start:
+**~20 h total, with ~1.8 h of reserve left at the pull.** Overnight charging
+covers a gallery day comfortably; two days of continuous running does not fit.
+
+**Caveat, and it matters: the cell measured is not the one in the parts list
+above.** It was a **Dantona LIION-1865-34 labelled 3400 mAh**, not a Molicel
+P28A (2800 mAh). The two are not comparable. A P28A measures roughly 20-30
+mOhm, so 184 mOhm is far outside what that cell should read. The label does not
+reconcile with the arithmetic either: for 3400 mAh to be genuine the board would
+have had to average **169 mA**, where an ESP32 with the radio up, plus the MPU
+and the boost converter's losses, should draw **100-120 mA** from the cell. At
+110 mA only ~2000 mAh left the cell in 18.3 h, implying true usable capacity
+nearer **2200 mAh**.
+
+Consequences: **the 20 h figure describes the cell that was in chair 7, not
+necessarily the rest of the fleet.** If the chairs hold a mix of cell types their
+runtimes differ. A genuine P28A should beat 20 h despite its lower nominal
+capacity, because high IR both stores less and sags harder under load, which
+makes the TP5400 reach cutoff earlier and strands capacity that was never
+usable. **Worth confirming which cell is actually in each chair.**
+
+**`tools/battery_test.py` cannot tell a flat cell from a stopped capture.** It
+watches `~/motion_log.txt`, not the chair, so "DIED" only means no packets
+landed in that file for 120 s. On 2026-07-30 it reported chair 7 dead at 10:14
+while the chair was demonstrably still running (LED flashing, dashboard
+responding to movement) and the cell still held ~9%. Judge liveness by the LED,
+never by the dashboard alone: a stalled capture leaves the dashboard frozen on
+stale data with no error, which is the same trap recorded for 2026-07-10.
+
 **Charging all 7 chair nodes at once (researched 2026-07-10):** since the
 TP5400 charges the cell in place over the board's micro-USB port, the
 simplest bulk-charging setup is a multi-port USB-A wall charger + one

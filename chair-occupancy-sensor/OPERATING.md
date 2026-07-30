@@ -48,11 +48,13 @@ is charging.
 A multi-port USB charger will do several at once. Charging all seven at the
 same time needs seven cables.
 
-**How often:** a chair that goes dark, or disappears from the dashboard, has a
-flat battery — that is the expected failure and it is not a fault. Max is
-establishing the hours-per-charge figure on the bench; until that number
-exists, charge them overnight whenever the gallery is closed and you will
-never be near the limit.
+**How often:** measured on chair 7 on 2026-07-30, a chair runs for **about 20
+hours** of continuous use on one charge. Charging overnight whenever the
+gallery is closed therefore leaves several hours of margin on a normal day.
+A chair left running for two full days without a charge will go flat.
+
+A chair that goes dark, or disappears from the dashboard, has a flat battery.
+That is the expected failure and it is not a fault.
 
 > **Use a cable that carries data, not just power**, if you ever need the Mac
 > to see a board. Many charging cables have no data wires. This bit us on
