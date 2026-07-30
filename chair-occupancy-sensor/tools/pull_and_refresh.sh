@@ -17,6 +17,16 @@ BEFORE=$(git rev-parse HEAD)
 git pull --ff-only
 AFTER=$(git rev-parse HEAD)
 
+# One-time cleanup after 2026-07-30. This job used to start tools/live_plot.py,
+# a dashboard running the confidence-decay model that was deleted on 2026-07-29.
+# A host that has not been touched since is still running it, and nothing below
+# would stop it, so it would sit next to the controller showing the abandoned
+# model as though it were live. Harmless to run forever once it is gone.
+if pgrep -f "live_plot.py" > /dev/null; then
+  echo "[$(date)] stopping stale live_plot.py (retired dashboard, old model)"
+  pkill -f "live_plot.py" 2>/dev/null || true
+fi
+
 # Restarts controller.py, which is what feeds the artwork. It used to restart
 # tools/live_plot.py, a dashboard that ran the old confidence-decay model, so
 # this machine was keeping the abandoned model alive and nothing was driving
