@@ -45,7 +45,14 @@ mac_to_chair() {
     8c:94:df:97:4f:34) echo 6 ;;
     8c:94:df:45:b3:d0) echo 7 ;;
     78:1c:3c:35:83:6c) echo receiver ;;
-    78:1c:3c:35:04:84) echo receiver2 ;;
+    # Slot 8 = the recovered original chair-2 board, reassigned 2026-07-30.
+    # It was retired on 2026-07-22 for corrupted I2C reads (see NOTES.md); its
+    # sensor must pass a bench check before this board is trusted as a spare.
+    88:f1:55:32:5f:6c) echo 8 ;;
+    # 78:1c:3c:35:04:84 (the Lonely Binary bench board, ex-MAC-cloned second
+    # receiver) HELD slot 8 until 2026-07-30 and is now displaced, so it is
+    # deliberately absent here and will be refused as "unknown". To bring it
+    # back, give it a slot in receiver_esp_now.ino first, then add it here.
     *) echo unknown ;;
   esac
 }

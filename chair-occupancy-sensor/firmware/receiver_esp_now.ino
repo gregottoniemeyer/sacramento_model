@@ -116,13 +116,23 @@ const uint8_t chairMacs[NUM_CHAIRS][6] = {
   {0x88, 0xF1, 0x55, 0x30, 0xA6, 0x58},  // chair 5
   {0x8C, 0x94, 0xDF, 0x97, 0x4F, 0x34},  // chair 6
   {0x8C, 0x94, 0xDF, 0x45, 0xB3, 0xD0},  // chair 7
-  // Slot 8 is not a chair: it is a bench test board, added 2026-07-24. This is
-  // the spare Lonely Binary board that briefly served as the MAC-cloned second
-  // receiver, reflashed as a sender so a sensor can be tested on the dashboard
-  // without unmounting a real chair. Its factory MAC is in the same
-  // 78:1c:3c:35:xx range as the receiver, which is expected -- same board
-  // family, not a duplicate of the receiver's 83:6c.
-  {0x78, 0x1C, 0x3C, 0x35, 0x04, 0x84},  // 8 = TEST BENCH board
+  // Slot 8 is not a chair: it is the spare / bench test slot, so a sensor can
+  // be tested on the dashboard without unmounting a real chair.
+  //
+  // REASSIGNED 2026-07-30 to 88:f1:55:32:5f:6c, the ORIGINAL chair-2 board,
+  // retired 2026-07-22 for corrupted I2C reads (2.008 g at rest, noise 130x a
+  // healthy board -- the marginal SDA/SCL signature, same class as board 6,
+  // which a reflow fixed). It is being recovered as the fleet's only spare
+  // node, since NOTES.md records both previous spares were consumed on
+  // 2026-07-22. Do not trust it until its sensor passes a bench check:
+  // accMag within ~1% of 1 g, i2c:OK, N:100.
+  //
+  // The previous occupant, 78:1c:3c:35:04:84 (the Lonely Binary board that
+  // briefly served as the MAC-cloned second receiver), is now DISPLACED and
+  // has no slot. Powering it as a sender will log an unknown MAC until it is
+  // given one. Its 78:1c:3c:35:xx MAC looks like the receiver's because they
+  // are the same board family, not because it is a duplicate of 83:6c.
+  {0x88, 0xF1, 0x55, 0x32, 0x5F, 0x6C},  // 8 = SPARE / BENCH board
 };
 
 // Returns 1-7 for a known board, or 0 for an unrecognized one.
