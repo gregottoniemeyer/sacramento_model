@@ -238,9 +238,14 @@ def main():
             f"WATCH CHAIR 4 (1.15x, held 47%) and CHAIR 7 (1.36x, held 73%)")
         return []
 
-    FuncAnimation(fig, update, interval=400, blit=False,
-                  cache_frame_data=False)
+    # The return value MUST be held. matplotlib keeps only a weak reference to
+    # a FuncAnimation, so an unassigned one is garbage-collected and its timer
+    # dies while the window stays on screen: it draws frame one and then freezes
+    # with no error, which looks exactly like a dead serial capture.
+    anim = FuncAnimation(fig, update, interval=400, blit=False,
+                         cache_frame_data=False)
     plt.show()
+    del anim
     stop.set()
 
 
