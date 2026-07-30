@@ -265,6 +265,9 @@ class Source:
         self.chairs = [0] * NUM_CHAIRS
         self.last_chair = -1
         self.stale = []
+        # Diagnostics for chair_state_monitor.py. The artwork ignores these.
+        self.temp_c = [None] * NUM_CHAIRS
+        self.vote = [0.0] * NUM_CHAIRS
 
     def _mark(self, idx, now_occupied):
         was = self.chairs[idx]
@@ -312,6 +315,9 @@ class SensorSource(Source):
                          pkt["peak"] or 0, pkt["yawSum"], pkt["yawN"],
                          pkt["gyroZ"])
                 self._mark(c - 1, m.occupied)
+                # MPU-6050 datasheet conversion.
+                self.temp_c[c - 1] = round(pkt["temp"] / 340.0 + 36.53, 1)
+                self.vote[c - 1] = round(m.vote_frac, 3)
 
     def poll(self):
         now = time.time()
@@ -322,6 +328,8 @@ class SensorSource(Source):
                 if seen is None or now - seen > STALE_S:
                     self.stale.append(c)
                     self._mark(c - 1, False)
+                    self.temp_c[c - 1] = None
+                    self.vote[c - 1] = 0.0
 
 
 class KeyboardSource(Source):
@@ -351,6 +359,7 @@ class KeyboardSource(Source):
         if key in "1234567":
             idx = int(key) - 1
             self._mark(idx, not self.chairs[idx])
+            self.vote[idx] = 1.0 if self.chairs[idx] else 0.0
             status = "ON" if self.chairs[idx] else "OFF"
             print(f"Chair {key} ({REGIMES[idx]}): {status} | "
                   f"{sum(self.chairs)}/{NUM_CHAIRS} occupied")
@@ -403,6 +412,8 @@ def main():
                     "chairs": list(src.chairs),
                     "n_occupied": sum(src.chairs),
                     "stale": list(src.stale),
+                    "temp_c": list(src.temp_c),
+                    "vote": list(src.vote),
                     "source": args.source,
                     "timestamp": now,
                     **params,
