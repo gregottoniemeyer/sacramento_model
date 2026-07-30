@@ -57,40 +57,22 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import receiver_parse as rp  # noqa: E402  (path set above)
+
 LOG = Path.home() / "motion_log.txt"
 OUT_DIR = Path(__file__).resolve().parent.parent / "data"
 
 NUM_CHAIRS = 7
 
-# Two wire formats are accepted, because model development needs raw samples
-# while the deployed fleet sends summaries. The receiver already emits both
-# (it tells them apart by packet length), so a single chair can be flashed with
-# the old raw firmware and recorded alongside six summary chairs.
-#
-# V2_RE is the 8Hz on-device summary. V1_RE is the raw 100Hz sample, which has
-# no Std/Big/Touch fields -- those columns are written empty for v1 rows, and
-# the raw samples let any feature be computed offline instead of being limited
-# to whatever the firmware chose to send.
-V2_RE = re.compile(
-    r"Chair:(\d+)\s+"
-    r"Accel\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+"
-    r"Gyro\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+"
-    r"Temp:(-?\d+)\s+"
-    r"Std\s+X:(\d+)\s+Y:(\d+)\s+Z:(\d+)\s+"
-    r"Big:(\d+)\s+N:(\d+)\s+"
-    r"Touch:(\d+)\s+TBase:(\d+)\s+"
-    r"Up:(\d+)\s+Seq:(\d+)\s+Flags:(\d+)\s+Rssi:(-?\d+)"
-)
-V1_RE = re.compile(
-    r"Chair:(\d+)\s+"
-    r"Accel\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+"
-    r"Gyro\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+"
-    r"Temp:(-?\d+)"
-)
-
-FIELDS = ["accX", "accY", "accZ", "gyroX", "gyroY", "gyroZ", "temp",
-          "stdX", "stdY", "stdZ", "big", "n",
-          "touch", "tbase", "up", "seq", "flags", "rssi"]
+# The wire format lives in tools/receiver_parse.py and nowhere else. This file
+# used to carry its own copy of the regexes, which is how it came to be unable
+# to read the receiver's own output: the firmware gained Peak/YawS/YawN between
+# TBase: and Up:, the summary pattern here stopped matching, and the raw
+# fallback -- a prefix of the same line -- matched instead. Every summary packet
+# would have been recorded as a raw sample with blank statistics, silently.
+# One parser, so that cannot recur.
+FIELDS = rp.SUMMARY_FIELDS
 
 # A phase is one instruction with a fixed duration.
 #   occupied    : chairs with a person actually IN them for this phase
@@ -315,53 +297,46 @@ class Tailer(threading.Thread):
         self.state = state
         self.stop_flag = threading.Event()
         self.counts = {c: 0 for c in range(1, NUM_CHAIRS + 1)}
+        # Chairs whose packet length the receiver rejects, i.e. chairs running
+        # firmware the receiver was not built for. Counted rather than ignored,
+        # because a chair in this state records ZERO rows and would otherwise be
+        # indistinguishable from a flat battery when the file is analysed later.
+        self.bad = {}
 
     def run(self):
-        f = open(LOG, "r", errors="replace")
-        f.seek(0, os.SEEK_END)
-        inode = LOG.stat().st_ino
-        while not self.stop_flag.is_set():
-            try:
-                if LOG.stat().st_ino != inode:      # capture restarted
-                    f.close()
-                    f = open(LOG, "r", errors="replace")
-                    f.seek(0, os.SEEK_END)
-                    inode = LOG.stat().st_ino
-            except FileNotFoundError:
-                time.sleep(0.2)
+        for line in rp.follow(LOG, self.stop_flag):
+            pkt = rp.parse(line)
+            if pkt is None:
                 continue
-
-            line = f.readline()
-            if not line:
-                time.sleep(0.02)
+            chair = pkt["chair"]
+            if pkt["fmt"] == "bad":
+                self.bad[chair] = self.bad.get(chair, 0) + 1
                 continue
-            m = V2_RE.search(line)
-            raw = False
-            if not m:
-                m = V1_RE.search(line)
-                raw = True
-                if not m:
-                    continue
 
             now = time.time()
             ph = self.state.get("phase")
             if ph is None:
                 continue
-            chair = int(m.group(1))
-            if raw:
-                # v1 carries accel, gyro and temp only. Everything the firmware
-                # would have derived is left blank and computed offline.
-                vals = [int(m.group(i)) for i in range(2, 9)] + [""] * 11
+            if pkt["fmt"] == "raw":
+                # A raw 100Hz sender carries accel, gyro and temp only.
+                # Everything the summary firmware would have derived is left
+                # blank here and computed offline instead.
+                body = {k: pkt.get(k, "") for k in FIELDS}
+                for k in ("stdX", "stdY", "stdZ", "big", "n", "touch", "tbase",
+                          "peak", "yawSum", "yawN", "up", "seq", "flags"):
+                    body[k] = ""
             else:
-                vals = [int(m.group(i)) for i in range(2, 20)]
+                # None means the firmware cannot report the field, and is
+                # written blank so it is never mistaken for a measured zero.
+                body = {k: ("" if pkt.get(k) is None else pkt[k]) for k in FIELDS}
             occ = self.state["occupied"]
             self.counts[chair] = self.counts.get(chair, 0) + 1
 
             self.writer.writerow({
                 "t": f"{now:.3f}",
                 "chair": chair,
-                "fmt": "raw" if raw else "sum",
-                **dict(zip(FIELDS, vals)),
+                "fmt": pkt["fmt"],
+                **body,
                 "is_occupied": 1 if chair in occ else 0,
                 "occupied_chairs": "|".join(str(c) for c in sorted(occ)),
                 "n_occupied": len(occ),

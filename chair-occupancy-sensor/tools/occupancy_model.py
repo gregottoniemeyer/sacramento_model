@@ -70,11 +70,25 @@ RATIO_THRESHOLD = 0.65    # ...and exceed this * (stdX + stdY)
 
 VOTE_WINDOW = 5.0         # trailing seconds of votes that decide occupancy
 ENTER_FRAC = 0.50         # vote fraction to become OCCUPIED
-EXIT_FRAC = 0.25          # vote fraction to fall back to FREE (hysteresis)
+# 0.25 -> 0.15 on 2026-07-29, on request, to hold a very still sitter slightly
+# longer. Deliberately the SMALLEST available lever: it touches only the release
+# side, so sit-down latency and the entry gates are bit-for-bit unchanged.
+# Swept against both labeled datasets before picking (see tools/score_model.py):
+#   EXIT_FRAC  release latency  still-sitter held  false positives
+#     0.25          6.0s              81%               0%
+#     0.15          6.5s              85%               0%     <- chosen
+#     0.10          6.7s              88%               0%
+# Stopped at 0.15 because "a tiny bit" was the request and the curve is nearly
+# linear, so going further is available later at a known price. NOT a return to
+# the old stickiness: there is still no decay and no confidence, so the state
+# stops when the evidence stops. Lengthening VOTE_WINDOW would buy the same hold
+# but slows entry too, which is why it was left alone.
+EXIT_FRAC = 0.15          # vote fraction to fall back to FREE (hysteresis)
 
 PEAK_JUMP_RAW = 1500      # sit-down impulse; walk-bys peaked at 952, sits at 2009+
 PROVISIONAL_S = 4.0       # an impulse entry must be confirmed within this
 CONFIRM_FRAC = 0.40       # ...by at least this vote fraction, or it reverts
+IMPULSE_REFRACTORY_S = 4.0  # after an unconfirmed impulse, ignore impulses this long
 
 YAW_WINDOW = 6.0          # trailing seconds over which net rotation accumulates
 YAW_MIN_DEG = 1.0         # net yaw required for a vote-based entry
@@ -98,6 +112,8 @@ class ChairModel:
         self.vote_frac = 0.0
         self.yaw_deg = 0.0
         self.last_peak = 0
+        self.prev_peak = None      # for rising-edge detection, see _decide
+        self.impulse_blocked_until = None
         self.reason = "no data"
 
     # -- inputs ---------------------------------------------------------------
@@ -140,8 +156,23 @@ class ChairModel:
         self._decide(t, peak_jump, have_yaw)
 
     def _decide(self, t, peak_jump, have_yaw):
+        # RISING EDGE, not level. peak_jump is a MAX over the sender's trailing
+        # 1s window, so sustained motion holds it above the threshold
+        # continuously: measured on chair 2 during vigorous play, 95% of packets
+        # were above it, in unbroken runs of up to 17 seconds. A level test
+        # therefore re-arms the instant an unconfirmed entry reverts, and the
+        # state machine oscillates FREE/OCCUPIED with a period of exactly
+        # PROVISIONAL_S. That was observed live on 2026-07-29 and is the reason
+        # this is an edge test. "Sitting down is an impulse" means a transient,
+        # and a level test on a window maximum cannot express a transient.
+        rising = (self.prev_peak is not None
+                  and self.prev_peak < PEAK_JUMP_RAW <= peak_jump)
+        blocked = (self.impulse_blocked_until is not None
+                   and t < self.impulse_blocked_until)
+        self.prev_peak = peak_jump
+
         if not self.occupied:
-            if peak_jump >= PEAK_JUMP_RAW:
+            if rising and not blocked:
                 # The sit-down impulse. Provisional: a knock on an empty chair
                 # looks the same for an instant, so it must be confirmed.
                 self.occupied = True
@@ -163,6 +194,12 @@ class ChairModel:
                 else:
                     self.occupied = False
                     self.provisional_at = None
+                    # Hold the impulse path off briefly. The edge test above
+                    # already stops a latched peak from re-firing, but a train
+                    # of separate knocks still produces separate edges, and
+                    # without this a repeatedly-disturbed empty chair could
+                    # still stutter.
+                    self.impulse_blocked_until = t + IMPULSE_REFRACTORY_S
                     self.reason = "impulse not confirmed - was a knock"
             return
 
