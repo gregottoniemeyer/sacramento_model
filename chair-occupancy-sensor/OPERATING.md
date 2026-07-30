@@ -42,8 +42,48 @@ carry on; it is not urgent unless that chair also stops responding on screen.
 ## Charging
 
 Each chair charges over its own **micro-USB port, with the battery left in
-place** — nothing needs taking apart. A red LED near the chip lights while it
-is charging.
+place**. A red LED near the chip lights while it is charging.
+
+> **Not yet true if the enclosures have no charging notch.** Until one is cut,
+> reaching that port means unscrewing the enclosure on every chair, every time.
+> **That is worth avoiding for reliability, not just for convenience:** the
+> boards that failed on 24 July failed from being handled and flexed, and
+> opening seven boxes on every charge cycle reapplies exactly that stress. See
+> "Cutting the charging notch" below.
+
+## Cutting the charging notch (one-off, not yet done)
+
+Not done as of 2026-07-31. Max was not able to cut them before leaving.
+
+**Cut a notch down from the top rim of the opaque body wall, at the board's USB
+connector. Do NOT drill the clear lid.** The lid is clear so the status LED is
+visible through it, which is what this sheet asks you to judge chairs by, and
+clear covers are usually polycarbonate or acrylic. Acrylic cracks when drilled
+with an ordinary twist bit, especially near an edge. The body takes the notch;
+the lid sits over it and hides it.
+
+A notch beats a hole: it is open on one side, so it can be filed from the edge
+inward rather than started in the middle of a wall, it self-aligns to the
+connector height, and no drill bit ends up pointing at the board.
+
+**Tools, best first:**
+1. Rotary tool with a small sanding drum, run **slow** (high speed melts plastic
+   and clogs the bit). About 30 seconds per box.
+2. A half-round needle file. Two or three minutes per box, no risk at all.
+3. Drill two 4 mm holes at the notch depth and file down to the rim.
+
+Not a soldering iron: ABS releases fumes that need ventilation, and molten
+plastic ruins the tip for actual soldering afterwards.
+
+**Measure the plug, not the port.** Plug a micro-USB cable into a board and
+measure the plastic **overmold**, typically 10-12 mm wide and 6-8 mm tall, which
+is much larger than the connector itself. Cut about 1 mm wider than that.
+Sizing the opening to the port is the usual way this job fails: the cable then
+will not seat.
+
+**Drill or file with the board OUT of the box**, then do one box, charge a chair
+through it to confirm the plug seats fully, and only then do the rest. There are
+**8** enclosures to do: seven chairs plus the spare, node 8.
 
 A multi-port USB charger will do several at once. Charging all seven at the
 same time needs seven cables.
