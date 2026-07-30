@@ -52,6 +52,14 @@ FLOOR_ALPHA = 1.0 / 256.0   # slow tracker, only adapts while FREE
 SEP_WEAK = 1.25             # seated/floor ratio below this cannot be trusted
 SEP_OK = 1.6
 
+# Measured separation (seated smax / empty smax) and hold rate per chair from
+# the 2026-07-30 validation, dataset_20260730_122544.csv. Shown greyed with a
+# "~" until somebody actually sits in that chair during this session, so the
+# known-bad chairs are flagged from the moment the dashboard opens rather than
+# only after all seven have been tested. A live sit always supersedes it.
+KNOWN_SEP = {1: (1.64, 100), 2: (2.00, 100), 3: (1.93, 100), 4: (1.15, 47),
+             5: (2.31, 99), 6: (2.57, 100), 7: (1.36, 73)}
+
 
 class Chair:
     def __init__(self):
@@ -154,14 +162,18 @@ def render(chairs, lock, started):
                 fl = ch.floor or 0
                 sd = f"{ch.smax:>3}/{fl:>4.1f}" if fl else f"{ch.smax:>3}/  ?"
                 sep = ch.separation()
+                live = sep is not None
+                if not live and c in KNOWN_SEP:
+                    sep = KNOWN_SEP[c][0]
+                pre = " " if live else "~"      # ~ means from the validation
                 if sep is None:
                     mark = f"{DIM}  no sit yet{RESET}"
                 elif sep < SEP_WEAK:
-                    mark = f"{RED}  {sep:>4.1f}x WEAK{RESET}"
+                    mark = f"{RED}{BOLD} {pre}{sep:>4.2f}x WEAK{RESET}"
                 elif sep < SEP_OK:
-                    mark = f"{YELLOW}  {sep:>4.1f}x thin{RESET}"
+                    mark = f"{YELLOW} {pre}{sep:>4.2f}x thin{RESET}"
                 else:
-                    mark = f"{GREEN}  {sep:>4.1f}x ok  {RESET}"
+                    mark = f"{GREEN} {pre}{sep:>4.2f}x ok  {RESET}"
                 hz = ch.hz()
                 hzs = (f"{GREEN}{hz:>4.1f}{RESET}" if 7.0 <= hz <= 9.0
                        else f"{YELLOW}{hz:>4.1f}{RESET}")
@@ -171,14 +183,23 @@ def render(chairs, lock, started):
 
             lines.append(f"  {c}   {state}  {DIM}{detail[:24]:<24}{RESET} "
                          f"{stats}{tag}")
-    lines += ["", f"{DIM}  std/floor: current 1s window max vs this chair's own "
-                  f"learned empty floor.{RESET}",
-              f"{DIM}  the x figure is the best separation seen while OCCUPIED. "
-              f"WEAK means a sitter{RESET}",
-              f"{DIM}  barely moves that chair, so FREE there may mean "
-              f"'cannot feel anybody' (chair 4,{RESET}",
-              f"{DIM}  2026-07-30: held only 47%). Sit in each chair once to "
-              f"populate it.{RESET}"]
+    lines += ["",
+              f"  {RED}{BOLD}WATCH CHAIR 4{RESET}  1.15x separation, registered a "
+              f"sitter only {BOLD}47%{RESET} of the time.",
+              f"  {YELLOW}WATCH CHAIR 7{RESET}  1.36x, held {BOLD}73%{RESET}. "
+              f"Also the weakest radio link.",
+              f"  {DIM}Chairs 1, 2, 3, 5, 6 are fine (1.6x to 2.6x, held "
+              f"99-100%).{RESET}",
+              "",
+              f"{DIM}  std/floor = current 1s window vs the floor this chair "
+              f"learns for itself while FREE.{RESET}",
+              f"{DIM}  The x figure is how far a sitter lifts it above that "
+              f"floor. \"~\" = from the{RESET}",
+              f"{DIM}  2026-07-30 validation; sit in a chair and it is replaced "
+              f"by a live figure.{RESET}",
+              f"{DIM}  WEAK matters because an empty chair and a chair that "
+              f"cannot feel anybody{RESET}",
+              f"{DIM}  both print FREE.{RESET}"]
     print(CLEAR + "\n".join(lines), end="", flush=True)
 
 
