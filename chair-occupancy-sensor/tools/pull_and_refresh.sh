@@ -17,11 +17,17 @@ BEFORE=$(git rev-parse HEAD)
 git pull --ff-only
 AFTER=$(git rev-parse HEAD)
 
-if [ "$BEFORE" != "$AFTER" ] || ! pgrep -f "tools/live_plot.py" > /dev/null; then
-  echo "[$(date)] restarting dashboard (code changed: $([ "$BEFORE" != "$AFTER" ] && echo yes || echo no), was running: $(pgrep -f "tools/live_plot.py" > /dev/null && echo yes || echo no))"
-  pkill -f "tools/live_plot.py" 2>/dev/null || true
+# Restarts controller.py, which is what feeds the artwork. It used to restart
+# tools/live_plot.py, a dashboard that ran the old confidence-decay model, so
+# this machine was keeping the abandoned model alive and nothing was driving
+# the piece.
+if [ "$BEFORE" != "$AFTER" ] || ! pgrep -f "controller.py" > /dev/null; then
+  echo "[$(date)] restarting controller (code changed: $([ "$BEFORE" != "$AFTER" ] && echo yes || echo no), was running: $(pgrep -f "controller.py" > /dev/null && echo yes || echo no))"
+  pkill -f "controller.py" 2>/dev/null || true
   sleep 1
-  cd "$APP_DIR"
-  nohup venv/bin/python tools/live_plot.py > "$REPO_ROOT/dashboard.log" 2>&1 &
+  cd "$REPO_ROOT"
+  PY="$APP_DIR/venv/bin/python"
+  [ -x "$PY" ] || PY=python3
+  nohup "$PY" -u controller.py --source sensors > "$REPO_ROOT/controller.log" 2>&1 &
   disown
 fi

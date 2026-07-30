@@ -1,9 +1,3 @@
-// Diagnostic utility, not part of the deployed system: reads the MPU-6050
-// over I2C and prints values straight to Serial (no ESP-NOW, no receiver
-// needed) so a board can be checked over just its USB cable. Same register
-// read sequence as sender_esp_now.ino -- if this looks alive, that board's
-// I2C wiring is good.
-
 #include <Wire.h>
 
 const int MPU_ADDR = 0x68;
@@ -11,12 +5,12 @@ const int MPU_ADDR = 0x68;
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Wire.begin(21, 22);       // SDA=21, SCL=22
-  Wire.setClock(400000);    // match sender_esp_now.ino's speed
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
 
   Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x6B);  // power management register
-  Wire.write(0);     // wake the sensor up
+  Wire.write(0x6B);
+  Wire.write(0);
   Wire.endTransmission(true);
 
   Serial.println("MPU-6050 read test starting...");
@@ -24,7 +18,7 @@ void setup() {
 
 void loop() {
   Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B);  // starting register for accel data
+  Wire.write(0x3B);
   Wire.endTransmission(false);
   Wire.requestFrom(MPU_ADDR, 14, true);
 
@@ -44,5 +38,5 @@ void loop() {
   Serial.print("  Z:"); Serial.print(gyroZ);
   Serial.print("    Temp:"); Serial.println(temp);
 
-  delay(200);  // 5 samples/sec -- plenty fast to see wiggle, slow enough to read
+  delay(200);
 }

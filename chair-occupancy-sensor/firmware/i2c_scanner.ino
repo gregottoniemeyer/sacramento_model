@@ -1,14 +1,9 @@
-// Diagnostic utility, not part of the deployed system: confirms an MPU-6050
-// (or any I2C device) responds on the bus. The MPU-6050 should show up at
-// address 0x68. Useful any time a new board/sensor pairing needs verifying
-// before trusting it in the real sender sketch.
-
 #include <Wire.h>
 
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Wire.begin(21, 22);  // SDA=21, SCL=22
+  Wire.begin(21, 22);
   Serial.println("\nI2C scanner starting...");
 }
 

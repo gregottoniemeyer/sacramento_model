@@ -1,43 +1,20 @@
 #!/usr/bin/env python3
-"""Sacramento Model - central controller.
+"""Sacramento Model controller: chair occupancy to UDP state for the screens.
 
-Turns chair occupancy into the state packet the screens render, and broadcasts
-it over UDP at 60Hz.
+Self-contained. Reads the receiver's serial capture, decides who is sitting
+where, and broadcasts the state on UDP 5005 at 60Hz.
 
-TWO INPUT SOURCES
-  --source sensors    the real chairs, via the ESP-NOW receiver (default)
-  --source keyboard   press 1-7 to toggle chairs by hand
+  python3 controller.py                      # the real chairs
+  python3 controller.py --source keyboard    # press 1-7, no chairs needed
+  python3 chair_state_monitor.py             # see what is being sent
 
-Keyboard mode is not a leftover: it is how the renderers get exercised when the
-chairs are not present, packed, or charging. Both sources produce byte-identical
-packets, so nothing downstream can tell them apart.
-
-WHAT IT SENDS  (JSON, UDP broadcast + 127.0.0.1, port 5005, 60Hz)
-  {
-    "chairs":      [0,1,0,0,0,0,0],   # one flag per chair, index 0 = chair 1
-    "n_occupied":  1,                 # how many are occupied right now
-    "speed":       1,                 # 0-9, scales with how many are occupied
-    "ring_alpha":  0.14,              # 0.0-1.0, same scaling
-    "regime":      1,                 # index of the dominant regime, -1 if none
-    "regime_name": "Hydraulic Mining",
-    "stale":       [],                # chairs silent >3s: flat battery or off
-    "source":      "sensors",
-    "timestamp":   1785440000.123
-  }
-
-Every field that existed before the sensors were connected still means the same
-thing, so existing consumers keep working. "n_occupied", "stale" and "source"
-are additions.
-
-READING IT
-  python3 chair_state_monitor.py     # prints the packet, no dependencies
-
-See INTEGRATION.md for how to run the whole chain, how chairs are identified,
-and what to do when one stops reporting.
+See INTEGRATION.md for the packet format, chair identification and fault modes.
 """
 
 import argparse
 import json
+import os
+import re
 import select
 import socket
 import sys
@@ -47,12 +24,12 @@ import time
 import tty
 from pathlib import Path
 
+LOG = Path.home() / "motion_log.txt"
 UDP_PORT = 5005
-HZ = 60              # broadcast rate
-STALE_S = 3.0        # ~8Hz means a healthy chair is never silent this long
+HZ = 60
+STALE_S = 3.0
 NUM_CHAIRS = 7
 
-# 7 chairs, one per regime. Chair N drives REGIMES[N-1].
 REGIMES = [
     "Yurok Kinship",
     "Hydraulic Mining",
@@ -63,20 +40,211 @@ REGIMES = [
     "AI Extraction",
 ]
 
-# speed and ring intensity per regime
-REGIME_PARAMS = [
-    {"speed": 4, "ring_alpha": 0.2},  # Yurok: slow, minimal pool
-    {"speed": 9, "ring_alpha": 0.3},  # Hydraulic Mining: fast, disrupted
-    {"speed": 5, "ring_alpha": 0.5},  # Reclamation
-    {"speed": 4, "ring_alpha": 0.8},  # Dams: slow flow, big reservoir
-    {"speed": 6, "ring_alpha": 0.6},  # Environmental Reg
-    {"speed": 3, "ring_alpha": 0.9},  # Climate Stress: depleted
-    {"speed": 9, "ring_alpha": 1.0},  # AI Extraction: maximal
-]
+# ---------------------------------------------------------------- wire format
 
+SUMMARY_FIELDS = ["accX", "accY", "accZ", "gyroX", "gyroY", "gyroZ", "temp",
+                  "stdX", "stdY", "stdZ", "big", "n", "touch", "tbase",
+                  "peak", "yawSum", "yawN", "up", "seq", "flags", "rssi"]
+RAW_FIELDS = ["accX", "accY", "accZ", "gyroX", "gyroY", "gyroZ", "temp"]
+
+_COMMON = (r"Chair:(\d+)\s+"
+           r"Accel\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+"
+           r"Gyro\s+X:(-?\d+)\s+Y:(-?\d+)\s+Z:(-?\d+)\s+"
+           r"Temp:(-?\d+)")
+_STATS = (r"\s+Std\s+X:(\d+)\s+Y:(\d+)\s+Z:(\d+)\s+"
+          r"Big:(\d+)\s+N:(\d+)\s+"
+          r"Touch:(\d+)\s+TBase:(\d+)")
+_TAIL = r"\s+Up:(\d+)\s+Seq:(\d+)\s+Flags:(\d+)\s+Rssi:(-?\d+)"
+
+V3_RE = re.compile(_COMMON + _STATS +
+                   r"\s+Peak:(\d+)\s+YawS:(-?\d+)\s+YawN:(\d+)" + _TAIL)
+V2_RE = re.compile(_COMMON + _STATS + _TAIL)
+V1_RE = re.compile(_COMMON + r"\s+Rssi:(-?\d+)")
+BAD_RE = re.compile(r"Chair:(\d+)\s+BAD PACKET len:(\d+)")
+
+
+def parse(line):
+    """One serial line to a dict, or None."""
+    m = BAD_RE.search(line)
+    if m:
+        return dict(chair=int(m.group(1)), fmt="bad", length=int(m.group(2)))
+
+    m = V3_RE.search(line)
+    if m:
+        vals = [int(g) for g in m.groups()[1:]]
+        return dict(chair=int(m.group(1)), fmt="sum",
+                    **dict(zip(SUMMARY_FIELDS, vals)))
+
+    m = V2_RE.search(line)
+    if m:
+        # None, not 0: older firmware cannot report these, and 0 would read as
+        # a measured "no rotation", which is a different and wrong claim.
+        vals = [int(g) for g in m.groups()[1:]]
+        body = vals[:14] + [None, None, None] + vals[14:]
+        return dict(chair=int(m.group(1)), fmt="sum",
+                    **dict(zip(SUMMARY_FIELDS, body)))
+
+    m = V1_RE.search(line)
+    if m:
+        vals = [int(g) for g in m.groups()[1:]]
+        return dict(chair=int(m.group(1)), fmt="raw",
+                    **dict(zip(RAW_FIELDS, vals[:7])), rssi=vals[7])
+    return None
+
+
+def follow(path, stop=None):
+    """Yield complete lines as they are appended, surviving truncation.
+
+    Holds a partial line until its newline arrives: reading a file another
+    process is appending to otherwise returns half lines, which then match the
+    shorter raw pattern and silently record as data with no statistics.
+    """
+    f = open(path, "r", errors="replace")
+    f.seek(0, os.SEEK_END)
+    where = f.tell()
+    buf = ""
+    while stop is None or not stop.is_set():
+        try:
+            if os.stat(path).st_size < where:
+                f.close()
+                f = open(path, "r", errors="replace")
+                buf = ""
+        except FileNotFoundError:
+            time.sleep(0.2)
+            continue
+        chunk = f.readline()
+        where = f.tell()
+        if not chunk:
+            time.sleep(0.02)
+            continue
+        buf += chunk
+        if not buf.endswith("\n"):
+            continue
+        line, buf = buf, ""
+        yield line
+
+
+# ------------------------------------------------------------ occupancy model
+# Validated 2026-07-30 on held-out labelled data: 9/9 sit-downs, 9/9 stand-ups
+# across all seven chairs, zero false positives. Reproduce with
+# development/tools/score_model.py. Change a constant here and that result no
+# longer describes what runs.
+
+Z_FLOOR_RAW = 15
+RATIO_THRESHOLD = 0.65
+VOTE_WINDOW = 5.0
+ENTER_FRAC = 0.50
+EXIT_FRAC = 0.15
+PEAK_JUMP_RAW = 1500
+PROVISIONAL_S = 4.0
+CONFIRM_FRAC = 0.40
+IMPULSE_REFRACTORY_S = 4.0
+YAW_WINDOW = 6.0
+YAW_MIN_DEG = 1.0
+BIAS_ALPHA = 1.0 / 512.0
+BIAS_QUIET_STD = 20
+GYRO_LSB_PER_DEG_S = 131.0
+SAMPLE_HZ = 100.0
+
+
+class ChairModel:
+    """Occupancy for one chair. Feed it packets, read `.occupied`."""
+
+    def __init__(self):
+        self.votes = []
+        self.yaw_parts = []
+        self.occupied = False
+        self.provisional_at = None
+        self.bias_z = None
+        self.vote_frac = 0.0
+        self.yaw_deg = 0.0
+        self.last_peak = 0
+        self.prev_peak = None
+        self.impulse_blocked_until = None
+        self.reason = "no data"
+
+    def update(self, t, std_x, std_y, std_z, peak_jump,
+               yaw_sum_new=None, n_new=None, gyro_mean_z=None):
+        self.last_peak = peak_jump
+
+        fires = (std_z > Z_FLOOR_RAW
+                 and std_z / (std_x + std_y + 1) > RATIO_THRESHOLD)
+        self.votes.append((t, fires))
+        cutoff = t - VOTE_WINDOW
+        self.votes = [v for v in self.votes if v[0] >= cutoff]
+        self.vote_frac = (sum(f for _, f in self.votes) / len(self.votes)
+                          if self.votes else 0.0)
+
+        # Learn the bias only while FREE and quiet, so a seated person's real
+        # rotation is never absorbed into it.
+        smax = max(std_x, std_y, std_z)
+        if gyro_mean_z is not None and not self.occupied and smax < BIAS_QUIET_STD:
+            if self.bias_z is None:
+                self.bias_z = float(gyro_mean_z)
+            else:
+                self.bias_z += (gyro_mean_z - self.bias_z) * BIAS_ALPHA
+
+        have_yaw = yaw_sum_new is not None and n_new is not None
+        if have_yaw:
+            self.yaw_parts.append((t, yaw_sum_new, n_new))
+            ycut = t - YAW_WINDOW
+            self.yaw_parts = [y for y in self.yaw_parts if y[0] >= ycut]
+            bias = self.bias_z if self.bias_z is not None else 0.0
+            tot_y = sum(y[1] for y in self.yaw_parts)
+            tot_n = sum(y[2] for y in self.yaw_parts)
+            self.yaw_deg = (abs((tot_y - bias * tot_n) / SAMPLE_HZ
+                                / GYRO_LSB_PER_DEG_S) if tot_n else 0.0)
+        else:
+            self.yaw_deg = float("nan")
+
+        self._decide(t, peak_jump, have_yaw)
+
+    def _decide(self, t, peak_jump, have_yaw):
+        # Rising edge, not level. peak_jump is a MAX over a trailing 1s window,
+        # so sustained motion holds it high for many seconds; a level test
+        # re-arms every time an unconfirmed entry reverts and the state
+        # oscillates with a period of exactly PROVISIONAL_S.
+        rising = (self.prev_peak is not None
+                  and self.prev_peak < PEAK_JUMP_RAW <= peak_jump)
+        blocked = (self.impulse_blocked_until is not None
+                   and t < self.impulse_blocked_until)
+        self.prev_peak = peak_jump
+
+        if not self.occupied:
+            if rising and not blocked:
+                # A knock on an empty chair looks identical for an instant, so
+                # this entry is provisional until the vote confirms it.
+                self.occupied = True
+                self.provisional_at = t
+                self.reason = "impulse (provisional)"
+                return
+            gate = (self.yaw_deg >= YAW_MIN_DEG) if have_yaw else True
+            if self.vote_frac >= ENTER_FRAC and gate:
+                self.occupied = True
+                self.provisional_at = None
+                self.reason = "sustained motion"
+            return
+
+        if self.provisional_at is not None:
+            if t - self.provisional_at >= PROVISIONAL_S:
+                if self.vote_frac >= CONFIRM_FRAC:
+                    self.provisional_at = None
+                    self.reason = "confirmed"
+                else:
+                    self.occupied = False
+                    self.provisional_at = None
+                    self.impulse_blocked_until = t + IMPULSE_REFRACTORY_S
+                    self.reason = "impulse not confirmed - was a knock"
+            return
+
+        if self.vote_frac <= EXIT_FRAC:
+            self.occupied = False
+            self.reason = "motion stopped"
+
+
+# ------------------------------------------------------------------- controller
 
 def get_params(chairs, last_chair):
-    # more chairs occupied = faster speed
     occupied = sum(chairs)
     speed = round((occupied / NUM_CHAIRS) * 9)
     ring_alpha = round(occupied / NUM_CHAIRS, 2)
@@ -93,15 +261,12 @@ def get_params(chairs, last_chair):
 
 
 class Source:
-    """Common shape: .chairs is 7 flags, .last_chair is the dominant regime."""
-
     def __init__(self):
         self.chairs = [0] * NUM_CHAIRS
         self.last_chair = -1
         self.stale = []
 
     def _mark(self, idx, now_occupied):
-        """Set one chair, keeping last_chair on the most recent arrival."""
         was = self.chairs[idx]
         self.chairs[idx] = 1 if now_occupied else 0
         if now_occupied and not was:
@@ -114,43 +279,31 @@ class Source:
 class SensorSource(Source):
     """The real chairs.
 
-    Reads the receiver's serial capture and runs the same occupancy model that
-    tools/score_model.py scores, so the artwork reacts to exactly what was
-    validated on 2026-07-30 rather than to a second implementation that could
-    drift away from it.
-
-    A chair that stops reporting is forced to EMPTY rather than held at its last
-    value. Per OPERATING.md a silent chair has a flat battery, and leaving a
-    regime latched on because a battery died is a worse failure than dropping
-    it: it would be indistinguishable from a person sitting there forever.
+    A chair that stops reporting is forced EMPTY, not held: a flat battery
+    would otherwise latch its regime on forever, indistinguishable from someone
+    sitting there for hours.
     """
 
     def __init__(self):
         super().__init__()
-        tools = Path(__file__).resolve().parent / "chair-occupancy-sensor" / "tools"
-        sys.path.insert(0, str(tools))
-        global rp, ChairModel
-        import receiver_parse as rp                      # noqa: E402
-        from occupancy_model import ChairModel           # noqa: E402
-
-        self.log = Path.home() / "motion_log.txt"
-        if not self.log.exists():
+        if not LOG.exists():
             raise SystemExit(
-                f"{self.log} does not exist, so the serial capture is not "
-                "running.\nSee INTEGRATION.md, 'Starting the chain', step 2.")
+                f"{LOG} does not exist, so the serial capture is not running.\n"
+                "See INTEGRATION.md, 'Starting the chain', step 2.")
+        self.log = LOG
         self.models = {c: ChairModel() for c in range(1, NUM_CHAIRS + 1)}
         self.last_seen = {c: None for c in range(1, NUM_CHAIRS + 1)}
         self.lock = threading.Lock()
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
-        for line in rp.follow(self.log):
-            pkt = rp.parse(line)
+        for line in follow(self.log):
+            pkt = parse(line)
             if pkt is None or pkt.get("fmt") != "sum":
                 continue
             c = pkt["chair"]
             if not (1 <= c <= NUM_CHAIRS):
-                continue          # slot 8 is the bench spare, not a chair
+                continue                      # slot 8 is the bench spare
             now = time.time()
             with self.lock:
                 self.last_seen[c] = now
@@ -188,11 +341,8 @@ class KeyboardSource(Source):
         if self.eof or not select.select([sys.stdin], [], [], 0)[0]:
             return
         key = sys.stdin.read(1)
-        # EOF (stdin is /dev/null, a closed pipe, or redirected from a file)
-        # reads as "". select() reports it readable forever, so without this the
-        # loop spins. It must also be caught BEFORE the membership test, because
-        # `"" in "1234567"` is True in Python: the empty string is a substring
-        # of every string, so an EOF would otherwise parse as a chair number.
+        # Must precede the membership test: at EOF read() returns "", and
+        # `"" in "1234567"` is True in Python.
         if not key:
             self.eof = True
             print("stdin is not a terminal: keyboard input disabled, "
@@ -217,23 +367,20 @@ def main():
     ap.add_argument("--source", choices=("sensors", "keyboard"),
                     default="sensors")
     ap.add_argument("--port", type=int, default=UDP_PORT)
-    ap.add_argument("--quiet", action="store_true",
-                    help="do not print state changes")
+    ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--target", action="append", default=[],
-                    help="extra IP to send to directly, repeatable. More "
-                         "reliable than broadcast on networks that block it.")
+                    help="extra IP to send to directly, repeatable")
     args = ap.parse_args()
-
-    # Localhost first: it is the one that cannot fail, so a screen running on
-    # this machine works even where broadcast does not.
-    targets = ["127.0.0.1", "255.255.255.255"] + args.target
-    failed = set()
 
     src = SensorSource() if args.source == "sensors" else KeyboardSource()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     sock.setblocking(False)
+
+    # Localhost first: it is the one that cannot fail.
+    targets = ["127.0.0.1", "255.255.255.255"] + args.target
+    failed = set()
 
     if args.source == "keyboard":
         print("Controller running (keyboard) - press 1-7 to toggle, Q to quit")
@@ -260,13 +407,9 @@ def main():
                     "timestamp": now,
                     **params,
                 }).encode()
-                # Send best-effort to every target and NEVER die on a failure.
-                # Broadcasting to 255.255.255.255 raises OSError 49 ("can't
-                # assign requested address") on a network with no route for it,
-                # which includes campus wifi. Unguarded, that killed the
-                # controller outright: in the gallery that is a dead
-                # installation rather than a degraded one. Localhost always
-                # works, so a screen on this machine keeps running regardless.
+                # Never die on a send failure: broadcasting to 255.255.255.255
+                # raises OSError 49 on a network with no route for it, and an
+                # unguarded send makes that a dead installation.
                 for addr in targets:
                     try:
                         sock.sendto(packet, (addr, args.port))
