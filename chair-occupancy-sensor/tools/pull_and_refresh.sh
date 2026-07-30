@@ -27,6 +27,10 @@ if pgrep -f "live_plot.py" > /dev/null; then
   pkill -f "live_plot.py" 2>/dev/null || true
 fi
 
+# Keep the serial capture alive. It never auto-started, and its failure is the
+# only one in the chain that is completely silent: every display just freezes.
+"$APP_DIR/tools/start_capture.sh" || true
+
 # Restarts controller.py, which is what feeds the artwork. It used to restart
 # tools/live_plot.py, a dashboard that ran the old confidence-decay model, so
 # this machine was keeping the abandoned model alive and nothing was driving
