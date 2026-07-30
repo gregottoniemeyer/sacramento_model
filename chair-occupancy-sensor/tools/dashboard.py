@@ -42,12 +42,56 @@ YELLOW = "\x1b[33m"
 RESET = "\x1b[0m"
 
 
+# A chair only reads OCCUPIED if a sitter moves it measurably more than its own
+# empty floor. The 2026-07-30 validation showed that separation is NOT uniform:
+# chair 6 went 14 -> 36 (held 100%), chair 7 went 14 -> 19 (held 73%), and chair
+# 4 went 13 -> 15 and held only 47%. Same firmware, same thresholds, so the
+# spread is mechanical. Showing it live is the only way to tell a chair that is
+# genuinely empty from one that cannot feel anybody, since both print FREE.
+FLOOR_ALPHA = 1.0 / 256.0   # slow tracker, only adapts while FREE
+SEP_WEAK = 1.25             # seated/floor ratio below this cannot be trusted
+SEP_OK = 1.6
+
+
 class Chair:
     def __init__(self):
         self.model = ChairModel()
         self.last_seen = None
         self.degraded = False
         self.bad = 0
+        self.smax = 0            # newest 1s window max std
+        self.floor = None        # this chair's own learned empty noise floor
+        self.peak = 0
+        self.rssi = None
+        self.stamps = []         # recent arrival times, for the live rate
+        self.seen_seated = 0.0   # best smax observed while OCCUPIED
+
+    def note(self, t, pkt):
+        self.smax = max(pkt["stdX"], pkt["stdY"], pkt["stdZ"])
+        self.peak = pkt["peak"] or 0
+        self.rssi = pkt["rssi"]
+        self.stamps.append(t)
+        if len(self.stamps) > 40:
+            del self.stamps[:-40]
+        if self.model.occupied:
+            self.seen_seated = max(self.seen_seated, self.smax)
+        else:
+            # Learn the floor only while FREE, the same discipline the gyro bias
+            # tracker uses, so an occupant can never raise it.
+            self.floor = float(self.smax) if self.floor is None else \
+                self.floor + FLOOR_ALPHA * (self.smax - self.floor)
+
+    def hz(self):
+        if len(self.stamps) < 2:
+            return 0.0
+        span = self.stamps[-1] - self.stamps[0]
+        return (len(self.stamps) - 1) / span if span > 0 else 0.0
+
+    def separation(self):
+        """How far the best seen occupancy rose above this chair's own floor."""
+        if not self.floor or not self.seen_seated:
+            return None
+        return self.seen_seated / self.floor
 
 
 def reader(chairs, lock, stop):
@@ -70,11 +114,14 @@ def reader(chairs, lock, stop):
             ch.model.update(ch.last_seen, pkt["stdX"], pkt["stdY"], pkt["stdZ"],
                              pkt["peak"] or 0, pkt["yawSum"], pkt["yawN"],
                              pkt["gyroZ"])
+            ch.note(ch.last_seen, pkt)
 
 
 def render(chairs, lock, started):
     lines = [f"{BOLD}CHAIR OCCUPANCY{RESET}   {DIM}{time.strftime('%H:%M:%S')}"
-             f"  (Ctrl+C to quit){RESET}", ""]
+             f"  (Ctrl+C to quit){RESET}", "",
+             f"{DIM}  ch  state       why                       vote   yaw    "
+             f"std/floor      Hz   rssi{RESET}"]
     now = time.time()
     with lock:
         for c in range(1, NUM_CHAIRS + 1):
@@ -97,8 +144,41 @@ def render(chairs, lock, started):
                 # fires. Left as-is that reads as "not receiving packets"
                 # right next to a state that says the opposite.
                 detail = "quiet" if ch.model.reason == "no data" else ch.model.reason
-            tag = f"  {YELLOW}[degraded]{RESET}" if ch.degraded else ""
-            lines.append(f"  chair {c}   {state}   {DIM}{detail}{tag}{RESET}")
+            tag = f" {YELLOW}[degraded]{RESET}" if ch.degraded else ""
+
+            online = ch.last_seen is not None and now - ch.last_seen <= STALE_S
+            if online:
+                vote = f"{ch.model.vote_frac:>4.2f}"
+                yaw = ("  n/a" if ch.model.yaw_deg != ch.model.yaw_deg
+                       else f"{ch.model.yaw_deg:>4.1f}")
+                fl = ch.floor or 0
+                sd = f"{ch.smax:>3}/{fl:>4.1f}" if fl else f"{ch.smax:>3}/  ?"
+                sep = ch.separation()
+                if sep is None:
+                    mark = f"{DIM}  no sit yet{RESET}"
+                elif sep < SEP_WEAK:
+                    mark = f"{RED}  {sep:>4.1f}x WEAK{RESET}"
+                elif sep < SEP_OK:
+                    mark = f"{YELLOW}  {sep:>4.1f}x thin{RESET}"
+                else:
+                    mark = f"{GREEN}  {sep:>4.1f}x ok  {RESET}"
+                hz = ch.hz()
+                hzs = (f"{GREEN}{hz:>4.1f}{RESET}" if 7.0 <= hz <= 9.0
+                       else f"{YELLOW}{hz:>4.1f}{RESET}")
+                stats = f"{vote}  {yaw}  {sd}{mark} {hzs}  {ch.rssi:>4}"
+            else:
+                stats = f"{DIM}     -     -        -            -      -{RESET}"
+
+            lines.append(f"  {c}   {state}  {DIM}{detail[:24]:<24}{RESET} "
+                         f"{stats}{tag}")
+    lines += ["", f"{DIM}  std/floor: current 1s window max vs this chair's own "
+                  f"learned empty floor.{RESET}",
+              f"{DIM}  the x figure is the best separation seen while OCCUPIED. "
+              f"WEAK means a sitter{RESET}",
+              f"{DIM}  barely moves that chair, so FREE there may mean "
+              f"'cannot feel anybody' (chair 4,{RESET}",
+              f"{DIM}  2026-07-30: held only 47%). Sit in each chair once to "
+              f"populate it.{RESET}"]
     print(CLEAR + "\n".join(lines), end="", flush=True)
 
 

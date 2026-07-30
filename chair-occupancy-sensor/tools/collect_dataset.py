@@ -114,6 +114,39 @@ def P(block, label, target, occupied, duration, cue, transition=False):
 # the false-positive case is sampled under the same conditions as the true one.
 PROFILES = {
     "basics": dict(reps=9, sit_hold=25, after=15, walk=35, baseline=45),
+    # FINAL is the last validation pass before the exhibit runs unattended,
+    # inside a 20-minute budget. The selection rule is GALLERY REALISM: only
+    # what a visitor actually does, on all seven chairs. Contrived robustness
+    # cases are dropped, and the time saved is spent on longer, more
+    # representative occupancies instead.
+    #
+    # What a visitor actually does: walks around the room, sits down, watches
+    # the river piece for a while (largely still), shifts about, stands up.
+    # That is blocks B, C and F, and nothing else is needed.
+    #
+    #   - both baselines, because comparing the closing one against the opening
+    #     one is the only check for drift over a session;
+    #   - the sit/stand cycle on ALL SEVEN chairs, with a 35s mostly-still
+    #     stretch rather than 20s, because watching an artwork is a long quiet
+    #     occupancy and the model was tuned on 9 cycles from ONE chair;
+    #   - walk_past, the one disturbance that is real: visitors circulate. A 4%
+    #     false-fire rate during a walk-by is what latched the old model into 90
+    #     seconds of OCCUPIED;
+    #   - the statue case, on two chairs. Not an edge case for THIS piece: a
+    #     person sitting nearly motionless watching the animation is the primary
+    #     use, and a motionless sitter reading as empty is the failure that
+    #     broke the first model.
+    #
+    # Dropped as not-what-will-be-used: bump and bag_on_seat (block B), and the
+    # fast/slow variants and perch/partial-rise (blocks D and E, via
+    # variant_chairs=0). Note DISTURBANCE_CUES justifies bag_on_seat as "the
+    # case a naive load-based model gets wrong" -- but this model is not
+    # load-based. It reads rotation and motion, never weight, so that rationale
+    # was inherited from a design this project no longer has.
+    "final": dict(baseline=45, still=35, active=15, after=12,
+                  variant_chairs=0, statue_chairs=2, statue=90,
+                  disturbances=("walk_past",),
+                  neighbours=False),
     "standard": dict(baseline=90, still=25, active=15, after=18,
                      variant_chairs=2, statue_chairs=2, statue=90,
                      disturbances=("walk_past", "bump", "bag_on_seat"),
