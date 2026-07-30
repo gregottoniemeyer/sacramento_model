@@ -11,77 +11,34 @@ wirelessly, eight times a second, to a receiver plugged into the Mac by USB.
 7 chairs  ──radio──▶  receiver on USB  ──▶  controller.py  ──UDP──▶  screens
 ```
 
-**Everything needed day to day is in this file.** The engineering history, every
-fault signature, and the reasoning behind each decision is in
-[`development/ARCHIVE.md`](development/ARCHIVE.md).
+**Live on the Mac Mini since 2026-07-30**, running an occupancy model validated
+against data it had never seen: 9/9 sit-downs, 9/9 stand-ups across all seven
+chairs, zero false positives.
+
+This file covers everything needed day to day. History, reasoning and every
+fault signature are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
+
+**Jump to what you need:**
+[minding the exhibit](#minding-the-exhibit) ·
+[when something breaks](#when-something-breaks) ·
+[working on it](#working-on-it) ·
+[feeding the artwork](#feeding-the-artwork) ·
+[a new machine](#setting-up-a-new-machine)
 
 ---
 
-## Run it
+# Minding the exhibit
 
-Four things must be running. Each one fails invisibly, which is why they are
-listed separately.
+## It starts itself
 
-**1. Switch the chairs on.** The power switch is on the underside of each
-board. A chair is healthy when its blue light flashes briefly every 3 seconds.
+**On the Mac Mini nothing needs starting by hand.** A job runs every couple of
+minutes that pulls any new code, starts the serial capture if it has stopped,
+and starts the controller if it has stopped.
 
-**2. Start the serial capture.** Find the receiver's port first, because the
-name changes depending on which USB socket it is in:
+So if something goes wrong, **wait a minute before doing anything**. A reboot, a
+knocked USB cable or a crash all recover on their own.
 
-```bash
-ls /dev/cu.*
-```
-
-Look for `wchusbserial*`. Then, with the real name substituted in:
-
-```bash
-exec 3<>/dev/cu.wchusbserial10
-stty -f /dev/fd/3 921600 raw
-cat <&3 > ~/motion_log.txt &
-disown
-```
-
-**Check it is really running.** This step fails silently, and a stopped capture
-freezes everything downstream with no error anywhere:
-
-```bash
-wc -l ~/motion_log.txt; sleep 5; wc -l ~/motion_log.txt
-```
-
-It should climb by about **280 every 5 seconds** (7 chairs x 8 per second). If
-it does not climb, nothing downstream is real no matter how healthy it looks.
-
-**3. Start the controller**, from the repo root:
-
-```bash
-python3 controller.py
-```
-
-**4. Start the renderers** on the screen Macs.
-
----
-
-## Check it is working
-
-```bash
-python3 chair_state_monitor.py
-```
-
-Shows every chair's state, its temperature, and the vote fraction, which is the
-number the model actually uses to decide. Add `--plain` for a terminal version
-that needs nothing installed.
-
-To test the whole downstream half with no chairs at all:
-
-```bash
-python3 controller.py --source keyboard
-```
-
-Press 1-7 to fake chairs. It sends identical packets, so nothing downstream can
-tell the difference, and the monitor marks the source amber so a test is never
-mistaken for real chairs.
-
----
+The only thing that job cannot fix is a chair that is switched off or flat.
 
 ## The blue light on each chair
 
@@ -96,12 +53,10 @@ Look at the board through the enclosure window.
 That is the whole code, there is nothing to count.
 
 **If every chair blinks at once the problem is not the chairs.** None of them
-can reach the receiver: check it is plugged in and the Mac is awake.
+can reach the receiver: check it is plugged into the Mac and the Mac is awake.
 
 **If one chair blinks** it is still transmitting, it just knows something is
 off. Note which one and carry on. Not urgent unless it also stops responding.
-
----
 
 ## Charging
 
@@ -121,39 +76,6 @@ failure, not a fault.
 > handled and flexed, and opening seven boxes per charge reapplies exactly that
 > stress. Procedure in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
----
-
-## When something stops working
-
-Work down the list and stop at the first thing that explains it.
-
-**One chair is offline**
-
-1. Is its light doing anything? Nothing at all means charge it.
-2. Is the power switch on? A chair read as dead on 30 July purely because of
-   this.
-3. Was it just reflashed? Boards sometimes land in the bootloader after an
-   upload and look completely dead. Fix: `esptool --after hard-reset chip-id`.
-
-**Every chair is offline at once**
-
-Not the chairs. Either the receiver is unplugged or the serial capture died.
-Check the capture with the `wc -l` test above. **This is the most common
-failure and it is invisible: a stopped capture leaves every display frozen on
-its last values.**
-
-**A chair reads occupied with nobody in it**
-
-Brief flickers when someone knocks or brushes a chair are expected and clear
-within about 4 seconds. Permanently stuck occupied is not expected: report it.
-
-**Everything looks fine but the screens do not react**
-
-Run `python3 chair_state_monitor.py`. If it shows correct states then the
-controller is fine and the problem is in the renderers.
-
----
-
 ## Please do not
 
 - **Do not screw the sensor boards down.** This broke four chairs in July. The
@@ -163,6 +85,129 @@ controller is fine and the problem is in the renderers.
 - **Do not unplug the receiver** to charge something. Use another port.
 
 ---
+
+# When something breaks
+
+Work down the list and stop at the first thing that explains it.
+
+## One chair is missing
+
+1. **Is its light doing anything?** Nothing at all means charge it.
+2. **Is the power switch on?** It is on the underside. A chair read as dead on
+   30 July purely because of this.
+3. **Was it just reflashed?** Boards sometimes land in the bootloader after an
+   upload and look completely dead. Fix: `esptool --after hard-reset chip-id`.
+
+## Every chair is missing at once
+
+Not the chairs. Either the receiver is unplugged, or the serial capture stopped.
+
+**Wait two minutes first**: the timer job restarts the capture on its own. If it
+is still wrong after that, the receiver is probably unplugged. Plug it back in
+and wait another minute.
+
+To check by hand whether data is arriving at all:
+
+```bash
+wc -l ~/motion_log.txt; sleep 5; wc -l ~/motion_log.txt
+```
+
+It should climb by about **280 every 5 seconds** (7 chairs x 8 per second).
+**If it does not climb, nothing downstream is real** no matter how healthy any
+display looks. This is the most important single check in the system, because a
+stopped capture is invisible everywhere else: no error appears, every display
+simply freezes on its last values.
+
+To force the capture to restart rather than waiting:
+
+```bash
+chair-occupancy-sensor/tools/start_capture.sh
+```
+
+It is safe to run any time. It does nothing when the capture is healthy, and
+tells you what it found when it is not.
+
+## A chair reads occupied with nobody in it
+
+Brief flickers when someone knocks or brushes a chair are expected and clear
+within about 4 seconds. Permanently stuck occupied is not expected: report it.
+
+## Everything looks fine but the screens do not react
+
+Run `python3 chair_state_monitor.py`. If it shows correct chair states then the
+sensing side is fine and the problem is downstream in the renderers.
+
+---
+
+# Working on it
+
+Everything here is for a laptop, or for changing how the system behaves. None of
+it is needed to keep the exhibit running.
+
+## Starting the chain by hand
+
+On a machine without the timer job, the four pieces are started manually.
+
+**1. Switch the chairs on.** Power switch on the underside of each board.
+
+**2. Start the serial capture:**
+
+```bash
+chair-occupancy-sensor/tools/start_capture.sh
+```
+
+It finds the receiver's port itself, so the port name does not need to be known.
+If it reports `NO RECEIVER FOUND` it lists the ports it did see.
+
+<details>
+<summary>Doing it without the script</summary>
+
+```bash
+ls /dev/cu.*                       # find the wchusbserial* one
+exec 3<>/dev/cu.wchusbserial10
+stty -f /dev/fd/3 921600 raw
+cat <&3 > ~/motion_log.txt &
+disown
+```
+
+`stty` and `cat` must share one open of the port. Opening it twice resets the
+board and silently drops the baud rate to 9600.
+</details>
+
+**3. Start the controller**, from the repo root:
+
+```bash
+python3 controller.py
+```
+
+**4. Start the renderers** on the screen Macs.
+
+## Watching what it is doing
+
+```bash
+python3 chair_state_monitor.py
+```
+
+Per chair: its state, its temperature, and the **vote fraction**, which is the
+number the model actually thresholds. The two faint lines on each trace are the
+decision boundaries, so a chair that flips can be understood rather than just
+observed:
+
+- rises above **0.50** to become occupied
+- falls below **0.15** to become free
+
+Add `--plain` for a terminal version that needs nothing installed, which is what
+to use on a screen Mac without matplotlib.
+
+## Testing with no chairs
+
+```bash
+python3 controller.py --source keyboard
+```
+
+Press 1-7 to fake chairs. It emits identical packets, so nothing downstream can
+tell the difference. The monitor marks the source amber, so a test can never be
+mistaken for real chairs.
 
 ## Which chair is which
 
@@ -176,8 +221,8 @@ than unmounting boards. That last point matters because unmounting is what
 physically broke boards in July.
 
 Boards are labelled with the **last two octets** of their MAC, for example
-`B5:54` for chair 1. Two boards in this fleet differ only in the middle of
-their address, so labelling by the end is deliberate.
+`B5:54` for chair 1. Two boards in this fleet differ only in the middle of their
+address, so labelling by the end is deliberate.
 
 An unrecognised board announces itself: the receiver prints
 `Chair:?[88F155325F6C]`, and that address can be pasted straight into the table.
@@ -188,12 +233,39 @@ To read a board's MAC:
 tools/flash_chair.sh /dev/cu.YOUR_PORT
 ```
 
-**Slot 8 is not a chair.** It is the bench spare, for testing a sensor without
+**Slot 8 is not a chair.** It is the spare, for testing a sensor without
 unmounting an installed chair. The controller ignores it.
+
+## Reflashing a board
+
+```bash
+tools/flash_chair.sh /dev/cu.YOUR_PORT              # a chair
+tools/flash_chair.sh /dev/cu.YOUR_PORT receiver     # the receiver
+```
+
+It reads the MAC before writing anything and refuses to flash chair code onto
+the receiver, which otherwise succeeds silently and breaks the whole fleet.
+
+**Flash the receiver before the chairs** if both need updating. A new chair
+talking to an old receiver reads as `BAD PACKET` and looks exactly like a dead
+board.
+
+## Changing the model
+
+The occupancy model is inside `controller.py`, near the constants marked
+`occupancy model`. Change a constant there and the validation result no longer
+describes what runs, so re-score it:
+
+```bash
+venv/bin/python development/tools/score_model.py data/dataset_20260730_122544.csv
+```
+
+The development tools import the model **from** `controller.py`, so there is
+only ever one copy and the scorer always scores what actually runs.
 
 ---
 
-## Feeding the artwork
+# Feeding the artwork
 
 `controller.py` broadcasts JSON over **UDP port 5005, 60 times a second**, to
 `127.0.0.1` and the broadcast address.
@@ -251,15 +323,19 @@ Worth knowing:
   chair.
 - UDP drops packets. Another arrives in 17ms, so never block waiting.
 
-> **Not connected yet:** the renderers do not listen on UDP. That last hop is a
-> change to `flow_chevrons_live.py` using the snippet above.
+### Two things still open
 
-> **Unverified:** the chair-to-regime mapping in `controller.py` is inherited
-> from the original file and has never been checked against the physical chairs.
+> **The renderers do not listen on UDP yet.** The chairs drive `controller.py`,
+> but the last hop into the visuals is unconnected. It is a change to
+> `flow_chevrons_live.py`, using the snippet above.
+
+> **The chair-to-regime mapping is unverified.** `REGIMES` in `controller.py` is
+> inherited from the original file and has never been checked against what the
+> physical chairs represent.
 
 ---
 
-## Setting up a new machine
+# Setting up a new machine
 
 ```bash
 brew install arduino-cli
@@ -269,6 +345,9 @@ cd sacramento_model/chair-occupancy-sensor
 python3 -m venv venv && venv/bin/pip install -r requirements.txt
 ```
 
+`controller.py` itself needs **no packages at all**, only Python. The virtual
+environment is for the development tools.
+
 **USB-serial drivers.** The boards use two different chips. Most need Silicon
 Labs' CP210x driver; the receiver uses a CH340 and needs that vendor's driver.
 If a board never appears in `/dev/cu.*`, this is why.
@@ -277,29 +356,13 @@ If a board never appears in `/dev/cu.*`, this is why.
 `firmware/receiver_esp_now.ino`. Change one and the log fills with garbage
 rather than failing cleanly.
 
-**Automatic updates.** `tools/pull_and_refresh.sh` on a timer pulls new code and
-restarts the controller. The serial capture does **not** auto-start and must be
-started by hand after any reboot or replug.
+**To make it run unattended**, put `tools/pull_and_refresh.sh` on a timer. It
+pulls new code, keeps the capture alive, and keeps the controller alive. Full
+step-by-step in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 ---
 
-## Reflashing a board
-
-```bash
-tools/flash_chair.sh /dev/cu.YOUR_PORT              # a chair
-tools/flash_chair.sh /dev/cu.YOUR_PORT receiver     # the receiver
-```
-
-It reads the MAC before writing anything and refuses to flash chair code onto
-the receiver, which otherwise succeeds silently and breaks the whole fleet.
-
-**Flash the receiver before the chairs** if both need updating. A new chair
-talking to an old receiver reads as `BAD PACKET` and looks exactly like a dead
-board.
-
----
-
-## What is where
+# What is where
 
 ```
 controller.py             reads the chairs, broadcasts to the screens
@@ -310,19 +373,16 @@ chair-occupancy-sensor/
   firmware/               sender_summary.ino   -> all 7 chairs
                           receiver_esp_now.ino -> the USB receiver
                           i2c_*, mpu_read_test -> wiring diagnostics
-  tools/                  flash_chair.sh, pull_and_refresh.sh
+  tools/                  start_capture.sh     keeps the capture alive
+                          pull_and_refresh.sh  the unattended timer job
+                          flash_chair.sh       reflash a board safely
   data/                   recorded sessions
   development/            everything used to build and validate it, plus
                           ARCHIVE.md: the full history and reasoning
 ```
 
 The occupancy model lives inside `controller.py`, so the file that runs the
-installation depends on nothing else. The development tools import it from
-there, so there is only ever one copy of the model.
+installation depends on nothing else in this repository.
 
 **Validated 2026-07-30** on data the model had never seen: 9/9 sit-downs, 9/9
-stand-ups across all seven chairs, zero false positives. Reproduce it with:
-
-```bash
-venv/bin/python development/tools/score_model.py data/dataset_20260730_122544.csv
-```
+stand-ups across all seven chairs, zero false positives.
