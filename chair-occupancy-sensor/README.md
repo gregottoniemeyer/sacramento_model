@@ -66,8 +66,6 @@ is plugged into the Mac and that the Mac is awake.
 - **Mount the sensor toward the outer edge of the seat, not the middle.** It
   picks up more movement there when the chair turns.
 - **Do not power a second receiver** while one is running.
-- **Trust the blue light over the screen.** If the data feed stops, every
-  display freezes on its last values and still looks healthy.
 
 > **Still to do:** the cases need a notch cut so the charging port can be
 > reached without unscrewing every chair. Why it matters and how, in
