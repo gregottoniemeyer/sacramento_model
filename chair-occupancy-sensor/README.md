@@ -1,15 +1,15 @@
 # Chair occupancy sensors
 
 Seven chairs detect whether someone is sitting in them and drive the Sacramento
-River installation. Everything needed day to day is in this file; the history
-and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
+River installation. Everything needed to run and fix it is in this file; the
+history and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 **Jump to:**
-[minding the exhibit](#minding-the-exhibit) ·
+[day to day](#day-to-day) ·
+[learned the hard way](#learned-the-hard-way) ·
 [when something breaks](#when-something-breaks) ·
 [working on it](#working-on-it) ·
 [feeding the artwork](#feeding-the-artwork) ·
-[learned the hard way](#learned-the-hard-way) ·
 [a new machine](#setting-up-a-new-machine)
 
 ```
@@ -21,7 +21,7 @@ and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 ---
 
-# Minding the exhibit
+# Day to day
 
 ## It starts itself
 
