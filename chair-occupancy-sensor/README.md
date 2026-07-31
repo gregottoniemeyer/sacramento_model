@@ -25,16 +25,12 @@ history and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 ## Automatic startup
 
-Running on the Mac Mini since **2026-07-30**.
+**Nothing needs starting by hand.** A job runs every couple of minutes that
+pulls new code and restarts anything that has stopped, so a reboot, a knocked
+cable or a crash all recover on their own.
 
-**Nothing needs starting by hand there.** A job runs every couple of minutes
-that pulls any new code, starts the serial capture if it has stopped, and
-starts the controller if it has stopped.
-
-So if something goes wrong, **wait a minute before doing anything**. A reboot, a
-knocked USB cable or a crash all recover on their own.
-
-The only thing that job cannot fix is a chair that is switched off or flat.
+If something looks wrong, **wait a minute before doing anything**. The only
+thing this cannot fix is a chair that is switched off or flat.
 
 ## Status light
 
@@ -47,7 +43,7 @@ the plastic case. It tells you whether that chair is working.
 | **Blinking fast, without stopping** | Working, but something is wrong with it | See below |
 | **Completely dark** | Not running at all | Charge it |
 
-**A charge lasts about 20 hours** (measured 2026-07-30), so charging overnight
+**A charge lasts about 20 hours**, so charging overnight
 is plenty. A chair that goes dark or disappears has a flat battery: that is the
 expected way it fails, not a fault.
 
