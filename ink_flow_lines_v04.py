@@ -99,9 +99,9 @@ RANDOM_SEED = None
 BASE_FLOW_X = 2.0
 BASE_FLOW_Y = 0.0
 
-NOISE_STRENGTH = 0.20
-NOISE_SCALE = 0.55
-NOISE_SPEED = 0.35
+NOISE_STRENGTH = 0.6
+NOISE_SCALE = 1.5
+NOISE_SPEED = 0.75
 
 # Soft particle pressure prevents neighboring trails from collapsing onto the
 # same path after they pass an obstacle.
@@ -114,7 +114,7 @@ PARTICLE_SEPARATION_MAX_FORCE = 1.0
 LINE_WIDTH_MIN = 0.5
 LINE_WIDTH_MAX = 3.0
 
-PARTICLE_ALPHA = 0.75
+PARTICLE_ALPHA = 1.0
 
 BACKGROUND = "black"
 LINE_COLOR = "dodgerblue"
@@ -132,8 +132,9 @@ SCREENSHOT_DIR = Path("ink_flow_screenshots_v04")
 EXPORT_FPS = 30
 EXPORT_SECONDS = 12
 
-SPAWN_X_MIN = -6.0
-SPAWN_X_MAX = 0.0
+# All trails enter from one aligned inlet just outside the visible left edge.
+# This preserves the evenly spaced wind-tunnel appearance at x=0.
+SPAWN_X = -0.05
 
 COLORS = np.array([
     "#FFFFFF",  # white
@@ -194,14 +195,7 @@ OBSTACLES = [
 RECTANGLE_OBSTACLES = [
     # Coordinates specify the rectangle center. Rotation is counterclockwise.
     
-        RectangleObstacle(
-        6.0,
-        3.5,
-        width=0.1,
-        height=4.0,
-        angle_degrees=0.0,
-        strength=1.5,
-        bend=-0.8,
+        RectangleObstacle(6.0,3.5,width=2.0,height=2.0,angle_degrees=45.0,strength=0.25,bend=-0.8,
     ),
 ]
 
@@ -573,7 +567,7 @@ def spawn_positions(particle_indices: np.ndarray) -> np.ndarray:
     count = len(particle_indices)
     return np.column_stack(
         (
-            rng.uniform(SPAWN_X_MIN, SPAWN_X_MAX, count),
+            np.full(count, SPAWN_X),
             alternating_spawn_y(particle_indices),
         )
     )
@@ -648,47 +642,20 @@ for particle_index in range(MAX_PARTICLES):
         linewidth=line_widths[particle_index],
         alpha=PARTICLE_ALPHA,
         solid_capstyle="round",
+        dash_capstyle="round",
         solid_joinstyle="round",
+        marker="o",
+        markevery=[-1],
+        markersize=line_widths[particle_index],
+        markerfacecolor=line_colors[particle_index],
+        markeredgecolor=line_colors[particle_index],
+        markeredgewidth=0.0,
         antialiased=True,
         clip_on=True,
     )
     trail_lines.append(line)
 
-for obstacle in OBSTACLES:
-    ax.add_patch(
-        plt.Circle(
-            (obstacle.x, obstacle.y),
-            obstacle.radius,
-            facecolor=BACKGROUND,
-            edgecolor=BACKGROUND,
-            linewidth=1.0,
-            zorder=10
-        )
-    )
 
-for obstacle in RECTANGLE_OBSTACLES:
-    ax.add_patch(
-        plt.Polygon(
-            rectangle_vertices(obstacle),
-            closed=True,
-            facecolor=BACKGROUND,
-            edgecolor=BACKGROUND,
-            linewidth=1.0,
-            zorder=10,
-        )
-    )
-
-for obstacle in POLYGON_OBSTACLES:
-    ax.add_patch(
-        plt.Polygon(
-            obstacle.vertices,
-            closed=True,
-            facecolor=BACKGROUND,
-            edgecolor=BACKGROUND,
-            linewidth=1.0,
-            zorder=10,
-        )
-    )
 
 
 frame_counter = 0
@@ -758,7 +725,7 @@ def update(frame: int):
 
     # Only reset immediately for true escape/error cases.
     hard_reset = active & (
-        (positions[:NUM_PARTICLES, 0] < SPAWN_X_MIN - 0.5)
+        (positions[:NUM_PARTICLES, 0] < SPAWN_X - 0.5)
         | (positions[:NUM_PARTICLES, 1] < -0.5)
         | (positions[:NUM_PARTICLES, 1] > HEIGHT + 0.5)
     )
