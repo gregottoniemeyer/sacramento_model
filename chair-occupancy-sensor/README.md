@@ -5,12 +5,12 @@ River installation. Everything needed to run and fix it is in this file; the
 history and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 **Jump to:**
-[day to day](#day-to-day) ·
-[learned the hard way](#learned-the-hard-way) ·
-[when something breaks](#when-something-breaks) ·
-[working on it](#working-on-it) ·
-[feeding the artwork](#feeding-the-artwork) ·
-[a new machine](#setting-up-a-new-machine)
+[operating](#operating) ·
+[best practices](#best-practices) ·
+[troubleshooting](#troubleshooting) ·
+[development](#development) ·
+[integration](#integration) ·
+[installation](#installation)
 
 ```
 7 chairs  ──radio──▶  receiver on USB  ──▶  controller.py  ──UDP──▶  screens
@@ -21,9 +21,9 @@ history and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 ---
 
-# Day to day
+# Operating
 
-## It starts itself
+## Automatic startup
 
 Running on the Mac Mini since **2026-07-30**.
 
@@ -36,7 +36,7 @@ knocked USB cable or a crash all recover on their own.
 
 The only thing that job cannot fix is a chair that is switched off or flat.
 
-## The blue light on each chair
+## Status light
 
 Every chair has a small blue light on its board, visible through the window in
 the plastic case. It tells you whether that chair is working.
@@ -60,7 +60,7 @@ screen.
 problem. It means none of them can reach the receiver. Check that the receiver
 is plugged into the Mac and that the Mac is awake.
 
-## Learned the hard way
+## Best practices
 
 Every one of these came from something going wrong.
 
@@ -105,11 +105,11 @@ Every one of these came from something going wrong.
 
 ---
 
-# When something breaks
+# Troubleshooting
 
 Work down the list and stop at the first thing that explains it.
 
-## One chair is missing
+## A single chair is offline
 
 1. **Is its light doing anything?** Nothing at all means charge it.
 2. **Is the power switch on?** It is on the underside. A chair read as dead on
@@ -117,7 +117,7 @@ Work down the list and stop at the first thing that explains it.
 3. **Was it just reflashed?** Boards sometimes land in the bootloader after an
    upload and look completely dead. Fix: `esptool --after hard-reset chip-id`.
 
-## Every chair is missing at once
+## All chairs are offline
 
 Not the chairs. Either the receiver is unplugged, or the serial capture stopped.
 
@@ -146,7 +146,7 @@ chair-occupancy-sensor/tools/start_capture.sh
 It is safe to run any time. It does nothing when the capture is healthy, and
 tells you what it found when it is not.
 
-## A chair says someone is sitting in it, but nobody is
+## A chair reports occupied when empty
 
 The chair is being moved by something. In order:
 
@@ -159,19 +159,19 @@ The chair is being moved by something. In order:
 A few seconds of it while somebody brushes past is normal and clears on its own.
 Worry only if it stays that way with the room empty.
 
-## Everything looks fine but the screens do not react
+## The screens are not responding
 
 Run `python3 chair_state_monitor.py`. If it shows correct chair states then the
 sensing side is fine and the problem is downstream in the renderers.
 
 ---
 
-# Working on it
+# Development
 
 Everything here is for a laptop, or for changing how the system behaves. None of
 it is needed to keep the exhibit running.
 
-## Starting the chain by hand
+## Manual startup
 
 On a machine without the timer job, the four pieces are started manually.
 
@@ -209,7 +209,7 @@ python3 controller.py
 
 **4. Start the renderers** on the screen Macs.
 
-## Watching what it is doing
+## Monitoring
 
 ```bash
 python3 chair_state_monitor.py
@@ -226,7 +226,7 @@ observed:
 Add `--plain` for a terminal version that needs nothing installed, which is what
 to use on a screen Mac without matplotlib.
 
-## Testing with no chairs
+## Testing without hardware
 
 ```bash
 python3 controller.py --source keyboard
@@ -236,7 +236,7 @@ Press 1-7 to fake chairs. It emits identical packets, so nothing downstream can
 tell the difference. The monitor marks the source amber, so a test can never be
 mistaken for real chairs.
 
-## Which chair is which
+## Chair identification
 
 **Chair identity lives in the receiver, not in the chair firmware.** Every ESP32
 has a permanent factory MAC address, and `firmware/receiver_esp_now.ino` maps
@@ -263,7 +263,7 @@ tools/flash_chair.sh /dev/cu.YOUR_PORT
 **Slot 8 is not a chair.** It is the spare, for testing a sensor without
 unmounting an installed chair. The controller ignores it.
 
-## Reflashing a board
+## Reflashing firmware
 
 ```bash
 tools/flash_chair.sh /dev/cu.YOUR_PORT              # a chair
@@ -277,7 +277,7 @@ the receiver, which otherwise succeeds silently and breaks the whole fleet.
 talking to an old receiver reads as `BAD PACKET` and looks exactly like a dead
 board.
 
-## Changing the model
+## Modifying the model
 
 The occupancy model is inside `controller.py`, near the constants marked
 `occupancy model`. Change a constant there and the validation result no longer
@@ -292,7 +292,7 @@ only ever one copy and the scorer always scores what actually runs.
 
 ---
 
-# Feeding the artwork
+# Integration
 
 `controller.py` broadcasts JSON over **UDP port 5005, 60 times a second**, to
 `127.0.0.1` and the broadcast address.
@@ -350,7 +350,7 @@ Worth knowing:
   chair.
 - UDP drops packets. Another arrives in 17ms, so never block waiting.
 
-### Two things still open
+### Known gaps
 
 > **The renderers do not listen on UDP yet.** The chairs drive `controller.py`,
 > but the last hop into the visuals is unconnected. It is a change to
@@ -362,7 +362,7 @@ Worth knowing:
 
 ---
 
-# Setting up a new machine
+# Installation
 
 ```bash
 brew install arduino-cli
@@ -389,7 +389,7 @@ step-by-step in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 ---
 
-# What is where
+# Repository layout
 
 ```
 controller.py             reads the chairs, broadcasts to the screens
