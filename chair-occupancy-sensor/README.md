@@ -44,13 +44,13 @@ the plastic case. It tells you whether that chair is working.
 | **Completely dark** | Not running at all | Charge it |
 
 **A charge lasts about 20 hours**, so charging overnight
-is plenty. A chair that goes dark or disappears has a flat battery: that is the
+is sufficient. A chair that goes dark or disappears has a flat battery: that is the
 expected way it fails, not a fault.
 
 **If one chair is blinking fast**, it is still sending data and the exhibit
 still works. The chair has just noticed a problem with itself. Note which chair
-it is and carry on. It only becomes urgent if that chair also vanishes from the
-screen.
+it is and carry on. It only becomes urgent if that chair also disappears from
+the screen.
 
 **If every chair is blinking fast at the same time**, the chairs are not the
 problem. It means none of them can reach the receiver. Check that the receiver
@@ -58,42 +58,39 @@ is plugged into the Mac and that the Mac is awake.
 
 ## Best practices
 
-Every one of these came from something going wrong.
-
 **Handling the boards**
 
-- **Never screw a sensor board down.** This broke four chairs in July. The case
-  takes the screws, never the circuit board. If one comes loose, re-tape it.
+- **Be careful when screwing a sensor board down.** Several have broken this
+  way. Where possible let the case take the screws rather than the board.
 - **Be gentle with the USB port on the board.** Two have already broken. It is
   soldered to a thin board and takes the entire force of plugging a cable in, so
   push straight and slowly. A board with a broken port cannot be charged or
   reprogrammed in place.
-- **Leave the foam tape inside the case.** It stops the board touching the case
-  and stops it swinging loose. Both of those add noise and make detection worse.
+- **Leave the tape inside the case.** It stops the board touching the case and
+  stops it moving around. Both add noise and make detection less accurate.
 - **Do not power a second receiver** while one is running.
-- **Do not unplug the receiver** to charge something. Use another port.
 
 **Getting good readings**
 
 - **Mount the sensor toward the outer edge of the seat, not near the middle.**
-  It picks up far more movement out there when the chair turns.
-- **Keep the sensor flat.** Detection depends on rotation measured about the
+  It picks up more movement there when the chair turns.
+- **Keep the sensor flat.** Detection relies on rotation measured about the
   sensor's vertical axis, so a board mounted at a steep angle measures the wrong
-  axis and quietly stops noticing people. There is no error when this happens:
-  the chair simply never reads occupied. If a chair is ever re-taped, check it
-  still detects someone sitting down before walking away.
-- **A board tested on a desk looks worse than the same board in a chair.** Desks
-  carry building vibration. Chair 1 measured noisy on a bench and was completely
-  normal once mounted, so do not condemn a board on a bench reading.
+  axis and stops detecting anyone. No error is reported: the chair simply never
+  reads as occupied. After re-taping a chair, check it still detects someone
+  sitting down before leaving it.
+- **A board tested on a desk reads worse than the same board in a chair.** Desks
+  carry building vibration that chairs do not. One board measured noisy on a
+  bench and was normal once mounted, so do not replace a board on a bench
+  reading alone.
 
 **Working with the computer**
 
 - **Use a USB cable that carries data, not just power.** Many charging cables
-  have no data wires. A board looked completely dead to the Mac on 29 July
-  purely because of the cable.
-- **Trust the blue light over anything on screen.** If the data feed stops, every
-  display freezes on its last values and keeps looking perfectly healthy. The
-  light is wired to the chair itself and cannot lie about it.
+  have no data wires, and a board using one appears completely dead to the Mac.
+- **Trust the blue light over anything on screen.** If the data feed stops,
+  every display freezes on its last values and still looks healthy. The light is
+  driven by the chair itself, so it always reflects that chair's real state.
 
 > **Still to do:** the cases need a notch cut so the charging port can be
 > reached without unscrewing every chair. Why it matters and how, in
@@ -115,7 +112,8 @@ Work down the list and stop at the first thing that explains it.
 
 ## All chairs are offline
 
-Not the chairs. Either the receiver is unplugged, or the serial capture stopped.
+This is not a problem with the chairs. Either the receiver is unplugged or the
+serial capture has stopped.
 
 **Wait two minutes first**: the timer job restarts the capture on its own. If it
 is still wrong after that, the receiver is probably unplugged. Plug it back in
@@ -128,8 +126,8 @@ wc -l ~/motion_log.txt; sleep 5; wc -l ~/motion_log.txt
 ```
 
 It should climb by about **280 every 5 seconds** (7 chairs x 8 per second).
-**If it does not climb, nothing downstream is real** no matter how healthy any
-display looks. This is the most important single check in the system, because a
+**If it does not climb, no display is showing current data**, however healthy
+they look. This is the most important single check in the system, because a
 stopped capture is invisible everywhere else: no error appears, every display
 simply freezes on its last values.
 
@@ -140,7 +138,7 @@ chair-occupancy-sensor/tools/start_capture.sh
 ```
 
 It is safe to run any time. It does nothing when the capture is healthy, and
-tells you what it found when it is not.
+reports what it found when it is not.
 
 ## A chair reports occupied when empty
 
@@ -153,7 +151,7 @@ The chair is being moved by something. In order:
    vibration through the floor, that usually settles it.
 
 A few seconds of it while somebody brushes past is normal and clears on its own.
-Worry only if it stays that way with the room empty.
+It only matters if it stays that way with the room empty.
 
 ## The screens are not responding
 
@@ -212,15 +210,15 @@ python3 chair_state_monitor.py
 ```
 
 Per chair: its state, its temperature, and the **vote fraction**, which is the
-number the model actually thresholds. The two faint lines on each trace are the
-decision boundaries, so a chair that flips can be understood rather than just
-observed:
+number the model compares against a threshold. The two faint lines on each
+trace are those thresholds, so you can see why a chair changed state rather
+than only that it did:
 
 - rises above **0.50** to become occupied
 - falls below **0.15** to become free
 
-Add `--plain` for a terminal version that needs nothing installed, which is what
-to use on a screen Mac without matplotlib.
+Add `--plain` for a terminal version that requires no packages, for a machine
+without matplotlib.
 
 ## Testing without hardware
 
@@ -228,9 +226,9 @@ to use on a screen Mac without matplotlib.
 python3 controller.py --source keyboard
 ```
 
-Press 1-7 to fake chairs. It emits identical packets, so nothing downstream can
-tell the difference. The monitor marks the source amber, so a test can never be
-mistaken for real chairs.
+Press 1-7 to simulate chairs. The packets are identical to real ones, so
+nothing downstream behaves differently. The monitor marks the source amber so
+test input is never mistaken for real chairs.
 
 ## Chair identification
 
@@ -247,8 +245,8 @@ Boards are labelled with the **last two octets** of their MAC, for example
 `B5:54` for chair 1. Two boards in this fleet differ only in the middle of their
 address, so labelling by the end is deliberate.
 
-An unrecognised board announces itself: the receiver prints
-`Chair:?[88F155325F6C]`, and that address can be pasted straight into the table.
+An unrecognised board reports its own address: the receiver prints
+`Chair:?[88F155325F6C]`, which can be pasted directly into the table.
 
 To read a board's MAC:
 
@@ -276,8 +274,8 @@ board.
 ## Modifying the model
 
 The occupancy model is inside `controller.py`, near the constants marked
-`occupancy model`. Change a constant there and the validation result no longer
-describes what runs, so re-score it:
+`occupancy model`. Changing a constant there invalidates the recorded validation result, so
+re-score it:
 
 ```bash
 venv/bin/python development/tools/score_model.py data/dataset_20260730_122544.csv
@@ -335,16 +333,17 @@ while True:
     # drive the render from here
 ```
 
-Worth knowing:
+Notes for implementers:
 
-- Packets arrive at 60Hz whether or not anything changed. Treat each one as the
-  current truth, not as an event.
-- **A silent chair is reported empty, not held.** A flat battery would otherwise
-  latch its regime on forever, which looks identical to someone sitting there
-  for hours.
+- Packets arrive at 60Hz whether or not anything changed. Treat each one as the current
+  state rather than as an event.
+- **A silent chair is reported empty, not held.** A flat battery would otherwise hold its
+  regime active indefinitely, which is indistinguishable from a person sitting
+  there for hours.
 - `regime` is the **most recent** arrival, not the lowest-numbered occupied
   chair.
-- UDP drops packets. Another arrives in 17ms, so never block waiting.
+- UDP can drop packets. Another arrives within 17ms, so never block waiting for
+  one.
 
 ### Known gaps
 
@@ -373,11 +372,11 @@ environment is for the development tools.
 
 **USB-serial drivers.** The boards use two different chips. Most need Silicon
 Labs' CP210x driver; the receiver uses a CH340 and needs that vendor's driver.
-If a board never appears in `/dev/cu.*`, this is why.
+A board that never appears in `/dev/cu.*` is usually missing its driver.
 
 **The baud rate is 921600** and must match `Serial.begin()` in
-`firmware/receiver_esp_now.ino`. Change one and the log fills with garbage
-rather than failing cleanly.
+`firmware/receiver_esp_now.ino`. If the two differ, the log fills with unreadable
+characters rather than failing cleanly.
 
 **To make it run unattended**, put `tools/pull_and_refresh.sh` on a timer. It
 pulls new code, keeps the capture alive, and keeps the controller alive. Full
