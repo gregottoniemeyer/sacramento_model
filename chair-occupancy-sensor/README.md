@@ -67,10 +67,6 @@ is plugged into the Mac and that the Mac is awake.
   picks up more movement there when the chair turns.
 - **Do not power a second receiver** while one is running.
 
-> **Still to do:** the cases need a notch cut so the charging port can be
-> reached without unscrewing every chair. Why it matters and how, in
-> [`development/ARCHIVE.md`](development/ARCHIVE.md).
-
 ---
 
 # Troubleshooting
