@@ -146,10 +146,18 @@ chair-occupancy-sensor/tools/start_capture.sh
 It is safe to run any time. It does nothing when the capture is healthy, and
 tells you what it found when it is not.
 
-## A chair reads occupied with nobody in it
+## A chair says someone is sitting in it, but nobody is
 
-Brief flickers when someone knocks or brushes a chair are expected and clear
-within about 4 seconds. Permanently stuck occupied is not expected: report it.
+The chair is being moved by something. In order:
+
+1. **Is anything on the seat?** A bag or a coat shifting counts as movement.
+2. **Is anything shaking it?** A door swinging nearby, a fan, or people walking
+   heavily past on a wooden floor will all do it.
+3. **Nudge the chair a few centimetres** and leave it. If it was picking up
+   vibration through the floor, that usually settles it.
+
+A few seconds of it while somebody brushes past is normal and clears on its own.
+Worry only if it stays that way with the room empty.
 
 ## Everything looks fine but the screens do not react
 
