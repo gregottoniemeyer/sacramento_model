@@ -1,29 +1,22 @@
 # Chair occupancy sensors
 
 Seven chairs detect whether someone is sitting in them and drive the Sacramento
-River installation.
+River installation. Everything needed day to day is in this file; the history
+and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
-Each chair has a battery-powered ESP32 with a motion sensor. They report
-wirelessly, eight times a second, to a receiver plugged into the Mac by USB.
-`controller.py` turns that into occupancy and broadcasts it to the screens.
-
-```
-7 chairs  ──radio──▶  receiver on USB  ──▶  controller.py  ──UDP──▶  screens
-```
-
-**Live on the Mac Mini since 2026-07-30**, running an occupancy model validated
-against data it had never seen: 9/9 sit-downs, 9/9 stand-ups across all seven
-chairs, zero false positives.
-
-This file covers everything needed day to day. History, reasoning and every
-fault signature are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
-
-**Jump to what you need:**
+**Jump to:**
 [minding the exhibit](#minding-the-exhibit) ·
 [when something breaks](#when-something-breaks) ·
 [working on it](#working-on-it) ·
 [feeding the artwork](#feeding-the-artwork) ·
 [a new machine](#setting-up-a-new-machine)
+
+```
+7 chairs  ──radio──▶  receiver on USB  ──▶  controller.py  ──UDP──▶  screens
+ ESP32 +              plugged into           decides who        the visuals
+ motion sensor        the Mac                is sitting
+      8 times a second                    60 times a second
+```
 
 ---
 
@@ -31,9 +24,11 @@ fault signature are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 ## It starts itself
 
-**On the Mac Mini nothing needs starting by hand.** A job runs every couple of
-minutes that pulls any new code, starts the serial capture if it has stopped,
-and starts the controller if it has stopped.
+Running on the Mac Mini since **2026-07-30**.
+
+**Nothing needs starting by hand there.** A job runs every couple of minutes
+that pulls any new code, starts the serial capture if it has stopped, and
+starts the controller if it has stopped.
 
 So if something goes wrong, **wait a minute before doing anything**. A reboot, a
 knocked USB cable or a crash all recover on their own.
