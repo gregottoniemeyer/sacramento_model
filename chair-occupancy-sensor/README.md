@@ -37,39 +37,27 @@ The only thing that job cannot fix is a chair that is switched off or flat.
 
 ## The blue light on each chair
 
-Look at the board through the enclosure window.
+Every chair has a small blue light on its board, visible through the window in
+the plastic case. It tells you whether that chair is working.
 
-| The light | Means | Do |
+| The light | The chair is | What to do |
 |---|---|---|
-| **One brief flash every 3s** | Fine | Nothing |
-| **Blinking continuously** | Something is wrong on that chair | See below |
-| **Nothing at all** | Board is not running | Charge that chair |
+| **Blinks once, every 3 seconds** | Working normally | Nothing |
+| **Blinking fast, without stopping** | Working, but something is wrong with it | See below |
+| **Completely dark** | Not running at all | Charge it |
 
-That is the whole code, there is nothing to count.
+**A charge lasts about 20 hours** (measured 2026-07-30), so charging overnight
+is plenty. A chair that goes dark or disappears has a flat battery: that is the
+expected way it fails, not a fault.
 
-**If every chair blinks at once the problem is not the chairs.** None of them
-can reach the receiver: check it is plugged into the Mac and the Mac is awake.
+**If one chair is blinking fast**, it is still sending data and the exhibit
+still works. The chair has just noticed a problem with itself. Note which chair
+it is and carry on. It only becomes urgent if that chair also vanishes from the
+screen.
 
-**If one chair blinks** it is still transmitting, it just knows something is
-off. Note which one and carry on. Not urgent unless it also stops responding.
-
-## Charging
-
-Each chair charges over its own **micro-USB port with the battery left in
-place**. A red light near the chip comes on while charging.
-
-**A chair runs about 20 hours on a charge** (measured 2026-07-30). Charging
-overnight whenever the gallery is closed leaves several hours of margin. Two
-full days of running without a charge will not fit.
-
-A chair that goes dark or disappears has a flat battery. That is the expected
-failure, not a fault.
-
-> **The enclosures still need a charging notch cut.** Until then, reaching the
-> port means unscrewing every chair every time. That matters for reliability
-> rather than convenience: the boards that failed in July failed from being
-> handled and flexed, and opening seven boxes per charge reapplies exactly that
-> stress. Procedure in [`development/ARCHIVE.md`](development/ARCHIVE.md).
+**If every chair is blinking fast at the same time**, the chairs are not the
+problem. It means none of them can reach the receiver. Check that the receiver
+is plugged into the Mac and that the Mac is awake.
 
 ## Please do not
 
@@ -78,6 +66,10 @@ failure, not a fault.
   re-tape it.
 - **Do not power a second receiver** while one is running.
 - **Do not unplug the receiver** to charge something. Use another port.
+
+> **Still to do:** the cases need a notch cut so the charging port can be
+> reached without unscrewing every chair. Why it matters and how, in
+> [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 ---
 
