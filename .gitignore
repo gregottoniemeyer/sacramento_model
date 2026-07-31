@@ -6,3 +6,9 @@
 .DS_Store
 *.dmg
 *.pck
+
+# Retired flow-line versions and generated speed-check frames
+/ink_flow_lines.py
+/ink_flow_lines_v02.py
+/ink_flow_lines_v03.py
+/img_speed_check/
