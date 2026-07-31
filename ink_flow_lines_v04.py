@@ -12,7 +12,7 @@ Optional export:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 import math
@@ -20,6 +20,7 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.patches import Arc, Circle, Polygon as PolygonPatch
 
 
 # --------------------------------------------------
@@ -29,6 +30,8 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 MAX_PARTICLES = 300
 MAX_FLOW_SPEED = 10.0
 DEFAULT_FLOW_RATE = 0.5
+PARTICLE_FLOW_VARIATION = 0.1
+MIN_ACTIVE_PARTICLE_FLOW = 0.001
 
 
 def flow_rate_value(value: str) -> float:
@@ -128,6 +131,15 @@ OUTPUT_GIF = "ink_flow_lines_v04.gif"
 FRAME_DIR = Path("ink_flow_frames_v04")
 SCREENSHOT_KEY = "s"
 SCREENSHOT_DIR = Path("ink_flow_screenshots_v04")
+GATE_TOGGLE_KEY = "g"
+GATE_NARROW_KEY = "["
+GATE_WIDEN_KEY = "]"
+GATE_WIDTH_STEP = 0.05
+ACTIVE_RESERVOIR_INDEX = 0
+VISIBILITY_TOGGLE_KEY = "v"
+DEBUG_GEOMETRY_VISIBLE = True
+DEBUG_GEOMETRY_COLOR = "orange"
+DEBUG_GEOMETRY_LINE_WIDTH = 1.5
 
 EXPORT_FPS = 30
 EXPORT_SECONDS = 12
@@ -187,6 +199,31 @@ class PolygonObstacle:
     influence: float = 0.65
 
 
+@dataclass(frozen=True)
+class Reservoir:
+    """A circular pool with an open upstream face and downstream gate.
+
+    Flow is assumed to travel in the positive X direction.  The upstream
+    diameter (x <= center x) admits every line within the reservoir radius.
+    The downstream semicircle retains those lines except at the centered
+    gate when ``gate_open`` is true.
+    """
+
+    x: float
+    y: float
+    radius: float
+    outlet_width: float
+    gate_open: bool = True
+    circulation: float = 1.0
+    swirl_strength: float = 2.4
+    confinement_strength: float = 3.2
+    wall_strength: float = 8.0
+    outlet_strength: float = 4.0
+    wall_influence: float = 0.22
+    orbit_radius_fraction: float = 0.62
+    orbit_radius_spread: float = 0.52
+
+
 OBSTACLES = [
     #Obstacle(4.0, 3.7, 0.25, strength=1.5, bend=1.3),
     #Obstacle(6.8, 2.3, 0.25, strength=1.5, bend=-1.0),
@@ -204,12 +241,38 @@ POLYGON_OBSTACLES = [
     #PolygonObstacle(((8.65, 3.05),(9.25, 3.25),(8.85, 3.75),),strength=1.5,bend=0.9,),
 ]
 
+# Reservoirs face flow traveling from left to right.  Lines enter across the
+# complete upstream diameter, circulate inside, then leave through the centered
+# gap in the downstream semicircle.  Set gate_open=False to retain the water.
+RESERVOIRS = [
+    Reservoir(
+        9.0,
+        2.0,
+        radius=1.45,
+        outlet_width=0.1,
+        gate_open=True,
+        circulation=2.0,  # positive is counterclockwise; negative is clockwise
+    ),
+]
+
 
 # --------------------------------------------------
 # SIMULATION
 # --------------------------------------------------
 
 rng = np.random.default_rng(RANDOM_SEED)
+
+# Give each line one stable offset around the core flow value.  A
+# low-discrepancy sequence fills the complete variation range evenly without
+# making line speeds jump when the user changes the core flow at runtime.
+particle_flow_offsets = (
+    np.mod(
+        (np.arange(MAX_PARTICLES) + 1) * 0.6180339887498949,
+        1.0,
+    )
+    * (PARTICLE_FLOW_VARIATION * 2.0)
+    - PARTICLE_FLOW_VARIATION
+)
 
 def shore_force(points: np.ndarray) -> np.ndarray:
     """
@@ -444,6 +507,133 @@ def particle_separation_force(points: np.ndarray) -> np.ndarray:
     return force
 
 
+def reservoir_force(
+    points: np.ndarray,
+    reservoir: Reservoir,
+    particle_indices: np.ndarray | None = None,
+) -> np.ndarray:
+    """Pool lines and pass only the gate-width share through the outlet."""
+    if particle_indices is None:
+        particle_indices = np.arange(len(points), dtype=np.intp)
+    else:
+        particle_indices = np.asarray(particle_indices, dtype=np.intp)
+        if len(particle_indices) != len(points):
+            raise ValueError(
+                "particle_indices must contain one index per point"
+            )
+
+    center = np.array((reservoir.x, reservoir.y))
+    local = points - center
+    radial, distance = safe_normalize(local, minimum=1e-8)
+    force = np.zeros_like(points)
+
+    inside = distance < reservoir.radius
+    downstream_half = local[:, 0] >= 0.0
+    half_gate_width = np.clip(
+        reservoir.outlet_width * 0.5,
+        0.0,
+        reservoir.radius,
+    )
+    in_gate = (
+        downstream_half
+        & (np.abs(local[:, 1]) <= half_gate_width)
+    )
+
+    # Gate width controls throughput as a fraction of the full catchment
+    # diameter.  A low-discrepancy sequence assigns each trail a stable value,
+    # so repeated laps cannot eventually allow every trail to escape.
+    gate_fraction = np.clip(
+        reservoir.outlet_width / (2.0 * reservoir.radius),
+        0.0,
+        1.0,
+    )
+    gate_sample = np.mod(
+        particle_indices * 0.6180339887498949,
+        1.0,
+    )
+    selected_for_release = gate_sample < gate_fraction
+    usable_gate = in_gate & reservoir.gate_open & selected_for_release
+
+    release = inside & usable_gate
+    pooling = inside & ~release
+
+    if np.any(pooling):
+        # Remove the river's uniform downstream push while the water is held.
+        # Tangential motion creates the visible circular pooling pattern.
+        force[pooling, 0] -= BASE_FLOW_X
+        force[pooling, 1] -= BASE_FLOW_Y
+
+        tangent = np.column_stack((-radial[:, 1], radial[:, 0]))
+        force[pooling] += tangent[pooling] * (
+            reservoir.swirl_strength * reservoir.circulation
+        )
+
+        # Give every trail a stable orbit within a broad annulus.  Previously
+        # all trails converged on one target radius and visually piled up.
+        orbit_sample = np.mod(
+            (particle_indices + 1) * 0.7548776662466927,
+            1.0,
+        )
+        target_radius_fraction = np.clip(
+            reservoir.orbit_radius_fraction
+            + (orbit_sample - 0.5) * reservoir.orbit_radius_spread,
+            0.08,
+            0.94,
+        )
+        target_radius = (
+            reservoir.radius * target_radius_fraction[pooling]
+        )
+        radial_error = target_radius - distance[pooling]
+        force[pooling] += radial[pooling] * (
+            radial_error * reservoir.confinement_strength
+        )[:, None]
+
+    if np.any(release):
+        # Straighten circulating lines into the outlet and restore a decisive
+        # downstream movement through the opening.
+        gate_center = np.array(
+            (reservoir.x + reservoir.radius, reservoir.y)
+        )
+        toward_gate, _ = safe_normalize(
+            gate_center - points[release],
+            minimum=1e-8,
+        )
+        force[release] += toward_gate * reservoir.outlet_strength
+        force[release, 0] += BASE_FLOW_X
+        force[release, 1] -= local[release, 1] * (
+            reservoir.outlet_strength
+            / max(half_gate_width, 0.05)
+        )
+
+    # Only the downstream semicircle is a wall.  Its centered section is
+    # omitted for an open gate, and retained for a closed gate.
+    # A line not selected for release experiences the gate section as closed.
+    wall_has_gate = usable_gate
+    wall_distance = np.abs(distance - reservoir.radius)
+    near_wall = (
+        downstream_half
+        & ~wall_has_gate
+        & (wall_distance < reservoir.wall_influence)
+    )
+    if np.any(near_wall):
+        wall_weight = (
+            1.0
+            - wall_distance[near_wall] / reservoir.wall_influence
+        ) ** 2
+        # Points on either side are pushed away from the wall, preventing a
+        # numerical integration step from leaking through the solid arc.
+        wall_side = np.where(
+            distance[near_wall] < reservoir.radius,
+            -1.0,
+            1.0,
+        )
+        force[near_wall] += radial[near_wall] * (
+            reservoir.wall_strength * wall_weight * wall_side
+        )[:, None]
+
+    return force
+
+
 def curl_noise(points: np.ndarray, time_value: float) -> np.ndarray:
     """
     Lightweight divergence-like decorative motion.
@@ -471,7 +661,17 @@ def velocity_field(
     points: np.ndarray,
     time_value: float,
     separation_force: np.ndarray | None = None,
+    particle_indices: np.ndarray | None = None,
 ) -> np.ndarray:
+    if particle_indices is None:
+        particle_indices = np.arange(len(points), dtype=np.intp)
+    else:
+        particle_indices = np.asarray(particle_indices, dtype=np.intp)
+        if len(particle_indices) != len(points):
+            raise ValueError(
+                "particle_indices must contain one index per point"
+            )
+
     velocity = np.empty_like(points)
     velocity[:, 0] = BASE_FLOW_X
     velocity[:, 1] = BASE_FLOW_Y
@@ -526,16 +726,34 @@ def velocity_field(
             obstacle.influence,
         )
 
-    # Map normalized flow linearly to a visual speed from 0 to 10. Scaling the
-    # complete field preserves its stream shape and obstacle deflections.
-    velocity *= FLOW_SPEED / BASE_FLOW_X
+    for reservoir in RESERVOIRS:
+        velocity += reservoir_force(
+            points,
+            reservoir,
+            particle_indices,
+        )
+
+    # Map every line's varied normalized flow to its own visual speed.  The
+    # complete field is scaled, so the variation also applies naturally to
+    # reservoir circulation and obstacle deflections.
+    if FLOW_RATE == 0.0:
+        particle_flow_rates = np.zeros(len(points))
+    else:
+        particle_flow_rates = np.clip(
+            FLOW_RATE + particle_flow_offsets[particle_indices],
+            MIN_ACTIVE_PARTICLE_FLOW,
+            1.0,
+        )
+    particle_max_speeds = particle_flow_rates * MAX_FLOW_SPEED
+    velocity *= (particle_max_speeds / BASE_FLOW_X)[:, None]
 
     # Cap speed so particles do not jump through obstacles.
     speed = np.linalg.norm(velocity, axis=1)
-    max_speed = FLOW_SPEED
-    fast = speed > max_speed
+    fast = speed > particle_max_speeds
     if np.any(fast):
-        velocity[fast] *= (max_speed / speed[fast])[:, None]
+        velocity[fast] *= (
+            particle_max_speeds[fast] / speed[fast]
+        )[:, None]
 
     return velocity
 
@@ -617,6 +835,127 @@ ax.set_aspect("equal", adjustable="box")
 ax.margins(x=0.0, y=0.0)
 ax.axis("off")
 
+
+def create_obstacle_artists() -> list:
+    """Draw every solid obstacle for live geometry debugging."""
+    style = dict(
+        fill=False,
+        edgecolor=DEBUG_GEOMETRY_COLOR,
+        linewidth=DEBUG_GEOMETRY_LINE_WIDTH,
+        alpha=0.8,
+        zorder=5,
+    )
+    artists = []
+
+    for obstacle in OBSTACLES:
+        artist = Circle(
+            (obstacle.x, obstacle.y),
+            obstacle.radius,
+            **style,
+        )
+        ax.add_patch(artist)
+        artists.append(artist)
+
+    for obstacle in RECTANGLE_OBSTACLES:
+        artist = PolygonPatch(
+            rectangle_vertices(obstacle),
+            closed=True,
+            **style,
+        )
+        ax.add_patch(artist)
+        artists.append(artist)
+
+    for obstacle in POLYGON_OBSTACLES:
+        artist = PolygonPatch(
+            np.asarray(obstacle.vertices, dtype=float),
+            closed=True,
+            **style,
+        )
+        ax.add_patch(artist)
+        artists.append(artist)
+
+    return artists
+
+
+def reservoir_arc_ranges(
+    reservoir: Reservoir,
+) -> tuple[tuple[float, float], ...]:
+    """Return the visible downstream arc segments around the gate."""
+    if not reservoir.gate_open or reservoir.outlet_width <= 0.0:
+        return ((-90.0, 90.0),)
+
+    half_gate_angle = math.degrees(
+        math.asin(
+            min(
+                1.0,
+                reservoir.outlet_width / (reservoir.radius * 2.0),
+            )
+        )
+    )
+    return (
+        (-90.0, -half_gate_angle),
+        (half_gate_angle, 90.0),
+    )
+
+
+def create_reservoir_artists(
+    reservoir: Reservoir,
+) -> tuple[Arc, Arc]:
+    """Create two reusable arc artists so the gate can change at runtime."""
+    arc_style = dict(
+        edgecolor=DEBUG_GEOMETRY_COLOR,
+        linewidth=DEBUG_GEOMETRY_LINE_WIDTH,
+        alpha=0.8,
+        fill=False,
+        zorder=5,
+    )
+    diameter = reservoir.radius * 2.0
+    artists = []
+    for _ in range(2):
+        arc = Arc(
+            (reservoir.x, reservoir.y),
+            diameter,
+            diameter,
+            theta1=-90.0,
+            theta2=90.0,
+            **arc_style,
+        )
+        ax.add_patch(arc)
+        artists.append(arc)
+    return artists[0], artists[1]
+
+
+def update_reservoir_artists(reservoir_index: int) -> None:
+    """Update a reservoir wall after a live gate setting change."""
+    reservoir = RESERVOIRS[reservoir_index]
+    artists = reservoir_arc_artists[reservoir_index]
+    arc_ranges = reservoir_arc_ranges(reservoir)
+
+    for artist_index, artist in enumerate(artists):
+        if artist_index < len(arc_ranges):
+            theta1, theta2 = arc_ranges[artist_index]
+            artist.theta1 = theta1
+            artist.theta2 = theta2
+            artist.set_visible(DEBUG_GEOMETRY_VISIBLE)
+        else:
+            artist.set_visible(False)
+
+
+obstacle_artists = create_obstacle_artists()
+reservoir_arc_artists = [
+    create_reservoir_artists(reservoir)
+    for reservoir in RESERVOIRS
+]
+for reservoir_index in range(len(RESERVOIRS)):
+    update_reservoir_artists(reservoir_index)
+
+reservoir_artists = [
+    artist
+    for artist_pair in reservoir_arc_artists
+    for artist in artist_pair
+]
+debug_geometry_artists = obstacle_artists + reservoir_artists
+
 # Reserve S for the instant screenshot handler instead of Matplotlib's default
 # save-file dialog.
 plt.rcParams["keymap.save"] = [
@@ -691,10 +1030,12 @@ def update(frame: int):
         )
 
         if np.any(substep_active):
+            active_indices = np.flatnonzero(substep_active)
             velocity = velocity_field(
                 positions[:NUM_PARTICLES][substep_active],
                 time_value,
                 frame_separation_force[substep_active],
+                active_indices,
             )
             midpoint = (
                 positions[:NUM_PARTICLES][substep_active]
@@ -704,8 +1045,8 @@ def update(frame: int):
                 midpoint,
                 time_value + substep_dt * 0.5,
                 frame_separation_force[substep_active],
+                active_indices,
             )
-            active_indices = np.flatnonzero(substep_active)
             positions[active_indices] += midpoint_velocity * substep_dt
 
         new_trail_points[:, substep, :] = positions[:NUM_PARTICLES]
@@ -780,14 +1121,14 @@ def update(frame: int):
         )
 
     frame_counter += 1
-    return trail_lines[:NUM_PARTICLES]
+    return trail_lines[:NUM_PARTICLES] + debug_geometry_artists
 
 
 def init_animation():
     """Initialize artists without advancing the simulation."""
     for line in trail_lines:
         line.set_data([], [])
-    return trail_lines
+    return trail_lines + debug_geometry_artists
 
 
 def take_screenshot() -> Path:
@@ -839,6 +1180,64 @@ def set_flow_rate(flow_rate: float) -> None:
     )
 
 
+def report_gate_state(reservoir_index: int) -> None:
+    """Print the active gate geometry and resulting release allocation."""
+    reservoir = RESERVOIRS[reservoir_index]
+    release_fraction = np.clip(
+        reservoir.outlet_width / (reservoir.radius * 2.0),
+        0.0,
+        1.0,
+    )
+    effective_fraction = release_fraction if reservoir.gate_open else 0.0
+    state = "OPEN" if reservoir.gate_open else "CLOSED"
+    print(
+        f"Reservoir {reservoir_index + 1} gate: {state} | "
+        f"width: {reservoir.outlet_width:.2f} | "
+        f"release: {effective_fraction:.1%}"
+    )
+
+
+def set_gate_width(reservoir_index: int, outlet_width: float) -> None:
+    """Change gate width without resetting water already in the reservoir."""
+    reservoir = RESERVOIRS[reservoir_index]
+    clamped_width = float(np.clip(
+        outlet_width,
+        0.0,
+        reservoir.radius * 2.0,
+    ))
+    RESERVOIRS[reservoir_index] = replace(
+        reservoir,
+        outlet_width=clamped_width,
+    )
+    update_reservoir_artists(reservoir_index)
+    report_gate_state(reservoir_index)
+
+
+def toggle_gate(reservoir_index: int) -> None:
+    """Open or close a reservoir gate without resetting its water."""
+    reservoir = RESERVOIRS[reservoir_index]
+    RESERVOIRS[reservoir_index] = replace(
+        reservoir,
+        gate_open=not reservoir.gate_open,
+    )
+    update_reservoir_artists(reservoir_index)
+    report_gate_state(reservoir_index)
+
+
+def toggle_debug_geometry() -> None:
+    """Show or hide obstacle and reservoir geometry without affecting flow."""
+    global DEBUG_GEOMETRY_VISIBLE
+
+    DEBUG_GEOMETRY_VISIBLE = not DEBUG_GEOMETRY_VISIBLE
+    for artist in obstacle_artists:
+        artist.set_visible(DEBUG_GEOMETRY_VISIBLE)
+    for reservoir_index in range(len(RESERVOIRS)):
+        update_reservoir_artists(reservoir_index)
+
+    state = "VISIBLE" if DEBUG_GEOMETRY_VISIBLE else "HIDDEN"
+    print(f"Debug geometry: {state}")
+
+
 def on_key_press(event) -> None:
     if not event.key:
         return
@@ -846,6 +1245,22 @@ def on_key_press(event) -> None:
     key = event.key.lower()
     if key == SCREENSHOT_KEY:
         take_screenshot()
+    elif key == VISIBILITY_TOGGLE_KEY:
+        toggle_debug_geometry()
+    elif key == GATE_TOGGLE_KEY and RESERVOIRS:
+        toggle_gate(ACTIVE_RESERVOIR_INDEX)
+    elif key == GATE_NARROW_KEY and RESERVOIRS:
+        reservoir = RESERVOIRS[ACTIVE_RESERVOIR_INDEX]
+        set_gate_width(
+            ACTIVE_RESERVOIR_INDEX,
+            reservoir.outlet_width - GATE_WIDTH_STEP,
+        )
+    elif key == GATE_WIDEN_KEY and RESERVOIRS:
+        reservoir = RESERVOIRS[ACTIVE_RESERVOIR_INDEX]
+        set_gate_width(
+            ACTIVE_RESERVOIR_INDEX,
+            reservoir.outlet_width + GATE_WIDTH_STEP,
+        )
     elif len(key) == 1 and key.isdigit():
         digit = int(key)
         set_flow_rate(digit / 9.0)
