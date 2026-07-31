@@ -58,39 +58,16 @@ is plugged into the Mac and that the Mac is awake.
 
 ## Best practices
 
-**Handling the boards**
-
-- **Be careful when screwing a sensor board down.** Several have broken this
-  way. Where possible let the case take the screws rather than the board.
-- **Be gentle with the USB port on the board.** Two have already broken. It is
-  soldered to a thin board and takes the entire force of plugging a cable in, so
-  push straight and slowly. A board with a broken port cannot be charged or
-  reprogrammed in place.
-- **Leave the tape inside the case.** It stops the board touching the case and
-  stops it moving around. Both add noise and make detection less accurate.
+- **Be careful screwing a sensor board down.** Several have broken this way. Let
+  the case take the screws where possible.
+- **Be gentle with the USB ports.** Two have broken. Push straight in, slowly.
+- **Leave the tape inside the case.** It stops the board moving, which keeps
+  detection accurate.
+- **Mount the sensor toward the outer edge of the seat, not the middle.** It
+  picks up more movement there when the chair turns.
 - **Do not power a second receiver** while one is running.
-
-**Getting good readings**
-
-- **Mount the sensor toward the outer edge of the seat, not near the middle.**
-  It picks up more movement there when the chair turns.
-- **Keep the sensor flat.** Detection relies on rotation measured about the
-  sensor's vertical axis, so a board mounted at a steep angle measures the wrong
-  axis and stops detecting anyone. No error is reported: the chair simply never
-  reads as occupied. After re-taping a chair, check it still detects someone
-  sitting down before leaving it.
-- **A board tested on a desk reads worse than the same board in a chair.** Desks
-  carry building vibration that chairs do not. One board measured noisy on a
-  bench and was normal once mounted, so do not replace a board on a bench
-  reading alone.
-
-**Working with the computer**
-
-- **Use a USB cable that carries data, not just power.** Many charging cables
-  have no data wires, and a board using one appears completely dead to the Mac.
-- **Trust the blue light over anything on screen.** If the data feed stops,
-  every display freezes on its last values and still looks healthy. The light is
-  driven by the chair itself, so it always reflects that chair's real state.
+- **Trust the blue light over the screen.** If the data feed stops, every
+  display freezes on its last values and still looks healthy.
 
 > **Still to do:** the cases need a notch cut so the charging port can be
 > reached without unscrewing every chair. Why it matters and how, in
