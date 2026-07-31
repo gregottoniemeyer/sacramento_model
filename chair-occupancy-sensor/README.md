@@ -9,6 +9,7 @@ and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 [when something breaks](#when-something-breaks) ·
 [working on it](#working-on-it) ·
 [feeding the artwork](#feeding-the-artwork) ·
+[learned the hard way](#learned-the-hard-way) ·
 [a new machine](#setting-up-a-new-machine)
 
 ```
@@ -59,13 +60,44 @@ screen.
 problem. It means none of them can reach the receiver. Check that the receiver
 is plugged into the Mac and that the Mac is awake.
 
-## Please do not
+## Learned the hard way
 
-- **Do not screw the sensor boards down.** This broke four chairs in July. The
-  enclosure takes the screws, never the circuit board. If one comes loose,
-  re-tape it.
+Every one of these came from something going wrong.
+
+**Handling the boards**
+
+- **Never screw a sensor board down.** This broke four chairs in July. The case
+  takes the screws, never the circuit board. If one comes loose, re-tape it.
+- **Be gentle with the USB port on the board.** Two have already broken. It is
+  soldered to a thin board and takes the entire force of plugging a cable in, so
+  push straight and slowly. A board with a broken port cannot be charged or
+  reprogrammed in place.
+- **Leave the foam tape inside the case.** It stops the board touching the case
+  and stops it swinging loose. Both of those add noise and make detection worse.
 - **Do not power a second receiver** while one is running.
 - **Do not unplug the receiver** to charge something. Use another port.
+
+**Getting good readings**
+
+- **Mount the sensor toward the outer edge of the seat, not near the middle.**
+  It picks up far more movement out there when the chair turns.
+- **Keep the sensor flat.** Detection depends on rotation measured about the
+  sensor's vertical axis, so a board mounted at a steep angle measures the wrong
+  axis and quietly stops noticing people. There is no error when this happens:
+  the chair simply never reads occupied. If a chair is ever re-taped, check it
+  still detects someone sitting down before walking away.
+- **A board tested on a desk looks worse than the same board in a chair.** Desks
+  carry building vibration. Chair 1 measured noisy on a bench and was completely
+  normal once mounted, so do not condemn a board on a bench reading.
+
+**Working with the computer**
+
+- **Use a USB cable that carries data, not just power.** Many charging cables
+  have no data wires. A board looked completely dead to the Mac on 29 July
+  purely because of the cable.
+- **Trust the blue light over anything on screen.** If the data feed stops, every
+  display freezes on its last values and keeps looking perfectly healthy. The
+  light is wired to the chair itself and cannot lie about it.
 
 > **Still to do:** the cases need a notch cut so the charging port can be
 > reached without unscrewing every chair. Why it matters and how, in
