@@ -71,9 +71,8 @@ is plugged into the Mac and that the Mac is awake.
 
 ## A single chair is offline
 
-1. **Is its light doing anything?** Nothing at all means charge it.
-2. **Is the power switch on?** It is on the underside. A chair read as dead on
-   30 July purely because of this.
+1. **Light off** -> check the charge.
+2. **Is the power switch on?**
 3. **Was it just reflashed?** Boards sometimes land in the bootloader after an
    upload and look completely dead. Fix: `esptool --after hard-reset chip-id`.
 
