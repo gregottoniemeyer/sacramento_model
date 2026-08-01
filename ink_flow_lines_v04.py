@@ -2,7 +2,7 @@
 ink_flow_lines_v04.py
 
 Animated 2D graphic flow lines moving around circular, rectangular,
-and polygonal obstacles.
+and polygonal obstacles, absorbers, and reservoirs.
 
 Optional export:
     Set SAVE_MP4 = True and install ffmpeg.
@@ -20,6 +20,8 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.collections import LineCollection
+from matplotlib.colors import to_rgba_array
 from matplotlib.patches import Arc, Circle, Polygon as PolygonPatch
 
 
@@ -27,7 +29,27 @@ from matplotlib.patches import Arc, Circle, Polygon as PolygonPatch
 # SETTINGS
 # --------------------------------------------------
 
+# The simulation world is the final 16 x 9 patch layout.  One world unit is
+# one 120 px patch, so the axes map directly to the installation grid.
+GRID_COLUMNS = 16
+GRID_ROWS = 9
+PATCH_SIZE_PX = 120
+OUTPUT_WIDTH_PX = GRID_COLUMNS * PATCH_SIZE_PX
+OUTPUT_HEIGHT_PX = GRID_ROWS * PATCH_SIZE_PX
+OUTPUT_DPI = 120
+WIDTH = float(GRID_COLUMNS)
+HEIGHT = float(GRID_ROWS)
+
+# v04 was tuned in a seven-unit-high 16:9 world.  Spatial values are migrated
+# by this uniform factor so the 9 x 16 refactor does not change the image.
+LEGACY_WORLD_HEIGHT = 7.0
+WORLD_SCALE = HEIGHT / LEGACY_WORLD_HEIGHT
+
 MAX_PARTICLES = 300
+# Reservoir water has its own bounded set of drawable trails. Those slots do
+# not count against source trails, so a full reservoir cannot stop the inlet.
+RESERVOIR_RETENTION_CAPACITY = 100
+PARTICLE_POOL_SIZE = MAX_PARTICLES + RESERVOIR_RETENTION_CAPACITY
 MAX_FLOW_SPEED = 10.0
 DEFAULT_FLOW_RATE = 0.5
 PARTICLE_FLOW_VARIATION = 0.1
@@ -69,13 +91,6 @@ cli_args = (
 FLOW_RATE = cli_args.flow_rate
 FLOW_SPEED = FLOW_RATE * MAX_FLOW_SPEED
 
-OUTPUT_WIDTH_PX = 1920
-OUTPUT_HEIGHT_PX = 1080
-OUTPUT_DPI = 120
-
-HEIGHT = 7.0
-WIDTH = HEIGHT * OUTPUT_WIDTH_PX / OUTPUT_HEIGHT_PX
-
 def particle_count_for_flow(flow_rate: float) -> int:
     """Map zero to no trails and positive flow up to MAX_PARTICLES."""
     return (
@@ -99,19 +114,19 @@ SIMULATION_SUBSTEPS = 20
 PARTICLE_LAUNCH_DELAY_MS = 10
 RANDOM_SEED = None
 
-BASE_FLOW_X = 2.0
+BASE_FLOW_X = 2.0 * WORLD_SCALE
 BASE_FLOW_Y = 0.0
 
-NOISE_STRENGTH = 0.6
-NOISE_SCALE = 1.5
+NOISE_STRENGTH = 0.6 * WORLD_SCALE
+NOISE_SCALE = 1.5 / WORLD_SCALE
 NOISE_SPEED = 0.75
 
 # Soft particle pressure prevents neighboring trails from collapsing onto the
 # same path after they pass an obstacle.
-PARTICLE_SEPARATION_RADIUS = 0.075
-PARTICLE_SEPARATION_STRENGTH = 0.85
+PARTICLE_SEPARATION_RADIUS = 0.075 * WORLD_SCALE
+PARTICLE_SEPARATION_STRENGTH = 0.85 * WORLD_SCALE
 PARTICLE_SEPARATION_X_SCALE = 0.15
-PARTICLE_SEPARATION_MAX_FORCE = 1.0
+PARTICLE_SEPARATION_MAX_FORCE = 1.0 * WORLD_SCALE
 
 # Each trail receives one stable random width from this range.
 LINE_WIDTH_MIN = 0.5
@@ -129,12 +144,24 @@ EXPORT_FRAMES = False
 OUTPUT_MP4 = "ink_flow_lines_v04.mp4"
 OUTPUT_GIF = "ink_flow_lines_v04.gif"
 FRAME_DIR = Path("ink_flow_frames_v04")
-SCREENSHOT_KEY = "s"
+SCREENSHOT_KEY = "f12"
 SCREENSHOT_DIR = Path("ink_flow_screenshots_v04")
+SALMON_RELEASE_KEY = "s"
+SALMON_PER_RELEASE = 25
+MAX_SALMON = 300
+SALMON_LENGTH_PX = 50.0
+SALMON_LINE_WIDTH = 2.0
+SALMON_FADE_SECONDS = 0.5
+SALMON_HISTORY_POINTS = 160
+SALMON_MOTION_THRESHOLD_PX = 1.0
+SALMON_SPAWN_OFFSET = 0.05 * WORLD_SCALE
+SALMON_WATER_RADIUS_PX = 10.0
+SALMON_LOOKAHEAD_PX = 8.0
+WATER_GRID_CELL_PX = 4.0
 GATE_TOGGLE_KEY = "g"
 GATE_NARROW_KEY = "["
 GATE_WIDEN_KEY = "]"
-GATE_WIDTH_STEP = 0.05
+GATE_WIDTH_STEP = 0.05 * WORLD_SCALE
 ACTIVE_RESERVOIR_INDEX = 0
 VISIBILITY_TOGGLE_KEY = "v"
 DEBUG_GEOMETRY_VISIBLE = True
@@ -146,7 +173,7 @@ EXPORT_SECONDS = 12
 
 # All trails enter from one aligned inlet just outside the visible left edge.
 # This preserves the evenly spaced wind-tunnel appearance at x=0.
-SPAWN_X = -0.05
+SPAWN_X = -0.05 * WORLD_SCALE
 
 COLORS = np.array([
     "#FFFFFF",  # white
@@ -158,15 +185,24 @@ COLORS = np.array([
     "#1E90FF",  # dodger blue
 ])
 
-# Riverbank settings
-SHORE_INFLUENCE = 0.85
-SHORE_STRENGTH = 4.0
-SHORE_POWER = 2.0
-# The visual upper bank sits slightly above the data-height boundary. Without
-# this offset, its repulsion starts about half a unit too low in the frame.
-TOP_SHORE_Y_OFFSET = 0.5
+SALMON_COLORS = np.array([
+    "#FF5C8A",  # pink
+    "#FF7A72",
+    "#FF8C42",  # orange
+    "#FFAD33",
+    "#FFD23F",  # yellow
+])
 
-SPAWN_Y_MARGIN = 0.15
+# Riverbank settings
+SHORE_INFLUENCE = 0.85 * WORLD_SCALE
+SHORE_STRENGTH = 4.0 * WORLD_SCALE
+SHORE_POWER = 2.0
+# Keep both effective banks the same distance outside the visible frame so
+# their repulsion profiles are exact vertical mirrors.
+BOTTOM_SHORE_Y_OFFSET = 0.5 * WORLD_SCALE
+TOP_SHORE_Y_OFFSET = 0.5 * WORLD_SCALE
+
+SPAWN_Y_MARGIN = 0.15 * WORLD_SCALE
 
 
 
@@ -175,8 +211,8 @@ class Obstacle:
     x: float
     y: float
     radius: float
-    strength: float = 4.0
-    bend: float = 1.0
+    strength: float = 4.0 * WORLD_SCALE
+    bend: float = 1.0 * WORLD_SCALE
 
 
 @dataclass(frozen=True)
@@ -186,17 +222,29 @@ class RectangleObstacle:
     width: float
     height: float
     angle_degrees: float = 0.0
-    strength: float = 4.0
-    bend: float = 1.0
-    influence: float = 0.65
+    strength: float = 4.0 * WORLD_SCALE
+    bend: float = 1.0 * WORLD_SCALE
+    influence: float = 0.65 * WORLD_SCALE
 
 
 @dataclass(frozen=True)
 class PolygonObstacle:
     vertices: tuple[tuple[float, float], ...]
-    strength: float = 4.0
-    bend: float = 1.0
-    influence: float = 0.65
+    strength: float = 4.0 * WORLD_SCALE
+    bend: float = 1.0 * WORLD_SCALE
+    influence: float = 0.65 * WORLD_SCALE
+
+
+@dataclass(frozen=True)
+class Absorber:
+    """An axis-aligned area that permanently consumes some passing trails."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+    absorption_fraction: float = 1.0
+    stop_margin_fraction: float = 0.12
 
 
 @dataclass(frozen=True)
@@ -215,11 +263,11 @@ class Reservoir:
     outlet_width: float
     gate_open: bool = True
     circulation: float = 1.0
-    swirl_strength: float = 2.4
+    swirl_strength: float = 2.4 * WORLD_SCALE
     confinement_strength: float = 3.2
-    wall_strength: float = 8.0
-    outlet_strength: float = 4.0
-    wall_influence: float = 0.22
+    wall_strength: float = 8.0 * WORLD_SCALE
+    outlet_strength: float = 4.0 * WORLD_SCALE
+    wall_influence: float = 0.22 * WORLD_SCALE
     orbit_radius_fraction: float = 0.62
     orbit_radius_spread: float = 0.52
 
@@ -231,8 +279,14 @@ OBSTACLES = [
 
 RECTANGLE_OBSTACLES = [
     # Coordinates specify the rectangle center. Rotation is counterclockwise.
-    
-        RectangleObstacle(6.0,3.5,width=2.0,height=2.0,angle_degrees=45.0,strength=0.25,bend=-0.8,
+    RectangleObstacle(
+        7.7142857143,
+        4.5,
+        width=2.5714285714,
+        height=2.5714285714,
+        angle_degrees=45.0,
+        strength=0.3214285714,
+        bend=-1.0285714286,
     ),
 ]
 
@@ -241,20 +295,82 @@ POLYGON_OBSTACLES = [
     #PolygonObstacle(((8.65, 3.05),(9.25, 3.25),(8.85, 3.75),),strength=1.5,bend=0.9,),
 ]
 
+# Absorption is assigned stably per trail. A selected trail enters the absorber,
+# stops at a deterministic-random interior depth, and then erodes point by
+# point instead of vanishing all at once.
+ABSORBERS = [
+    Absorber(
+        3.5,
+        8.5,
+        width=0.5,
+        height=0.5,
+        absorption_fraction=1.0,
+    ),
+    Absorber(
+        3.5,
+        7.5,
+        width=0.5,
+        height=0.5,
+        absorption_fraction=1.0,
+    ),
+    Absorber(
+        3.5,
+        6.5,
+        width=0.5,
+        height=0.5,
+        absorption_fraction=1.0,
+    ),
+    Absorber(
+        3.5,
+        5.5,
+        width=0.5,
+        height=0.5,
+        absorption_fraction=1.0,
+    ),
+    Absorber(
+        3.5,
+        4.5,
+        width=0.5,
+        height=0.5,
+        absorption_fraction=1.0,
+    ),
+    Absorber(
+        3.5,
+        3.5,
+        width=0.5,
+        height=0.5,
+        absorption_fraction=1.0,
+    ),
+    Absorber(
+        3.5,
+        2.5,
+        width=0.5,
+        height=0.5,
+        absorption_fraction=1.0,
+    ),
+
+    Absorber(
+        3.5,
+        1.5,
+        width=0.5,
+        height=0.5,
+        absorption_fraction=1.0,
+    ),
+]
+
 # Reservoirs face flow traveling from left to right.  Lines enter across the
 # complete upstream diameter, circulate inside, then leave through the centered
 # gap in the downstream semicircle.  Set gate_open=False to retain the water.
 RESERVOIRS = [
     Reservoir(
-        9.0,
-        2.0,
-        radius=1.45,
-        outlet_width=0.1,
+        11.5714285714,
+        2.5714285714,
+        radius=1.8642857143,
+        outlet_width=0.1285714286,
         gate_open=True,
         circulation=2.0,  # positive is counterclockwise; negative is clockwise
     ),
 ]
-
 
 # --------------------------------------------------
 # SIMULATION
@@ -267,7 +383,7 @@ rng = np.random.default_rng(RANDOM_SEED)
 # making line speeds jump when the user changes the core flow at runtime.
 particle_flow_offsets = (
     np.mod(
-        (np.arange(MAX_PARTICLES) + 1) * 0.6180339887498949,
+        (np.arange(PARTICLE_POOL_SIZE) + 1) * 0.6180339887498949,
         1.0,
     )
     * (PARTICLE_FLOW_VARIATION * 2.0)
@@ -283,7 +399,7 @@ def shore_force(points: np.ndarray) -> np.ndarray:
     """
     y = points[:, 1]
 
-    distance_from_bottom = y
+    distance_from_bottom = y + BOTTOM_SHORE_Y_OFFSET
     distance_from_top = HEIGHT + TOP_SHORE_Y_OFFSET - y
 
     bottom_influence = np.clip(
@@ -315,7 +431,10 @@ def shore_force(points: np.ndarray) -> np.ndarray:
     return force
 
 
-def safe_normalize(vectors: np.ndarray, minimum: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
+def safe_normalize(
+    vectors: np.ndarray,
+    minimum: float = 0.05 * WORLD_SCALE,
+) -> tuple[np.ndarray, np.ndarray]:
     lengths = np.linalg.norm(vectors, axis=1)
     safe_lengths = np.maximum(lengths, minimum)
     normalized = vectors / safe_lengths[:, None]
@@ -602,7 +721,7 @@ def reservoir_force(
         force[release, 0] += BASE_FLOW_X
         force[release, 1] -= local[release, 1] * (
             reservoir.outlet_strength
-            / max(half_gate_width, 0.05)
+            / max(half_gate_width, 0.05 * WORLD_SCALE)
         )
 
     # Only the downstream semicircle is a wall.  Its centered section is
@@ -632,6 +751,43 @@ def reservoir_force(
         )[:, None]
 
     return force
+
+
+def reservoir_pooling_mask(
+    points: np.ndarray,
+    reservoir: Reservoir,
+    particle_indices: np.ndarray,
+) -> np.ndarray:
+    """Return source heads retained by this reservoir at these positions."""
+    particle_indices = np.asarray(particle_indices, dtype=np.intp)
+    local = points - np.array((reservoir.x, reservoir.y))
+    distance = np.linalg.norm(local, axis=1)
+    inside = distance < reservoir.radius
+    half_gate_width = np.clip(
+        reservoir.outlet_width * 0.5,
+        0.0,
+        reservoir.radius,
+    )
+    in_gate = (
+        (local[:, 0] >= 0.0)
+        & (np.abs(local[:, 1]) <= half_gate_width)
+    )
+    gate_fraction = np.clip(
+        reservoir.outlet_width / (2.0 * reservoir.radius),
+        0.0,
+        1.0,
+    )
+    gate_sample = np.mod(
+        particle_indices * 0.6180339887498949,
+        1.0,
+    )
+    released = (
+        inside
+        & in_gate
+        & reservoir.gate_open
+        & (gate_sample < gate_fraction)
+    )
+    return inside & ~released
 
 
 def curl_noise(points: np.ndarray, time_value: float) -> np.ndarray:
@@ -744,7 +900,11 @@ def velocity_field(
             MIN_ACTIVE_PARTICLE_FLOW,
             1.0,
         )
-    particle_max_speeds = particle_flow_rates * MAX_FLOW_SPEED
+    # MAX_FLOW_SPEED remains the user-facing 0..10 value. WORLD_SCALE converts
+    # it to the new 16 x 9 coordinate system without changing pixel velocity.
+    particle_max_speeds = (
+        particle_flow_rates * MAX_FLOW_SPEED * WORLD_SCALE
+    )
     velocity *= (particle_max_speeds / BASE_FLOW_X)[:, None]
 
     # Cap speed so particles do not jump through obstacles.
@@ -791,13 +951,48 @@ def spawn_positions(particle_indices: np.ndarray) -> np.ndarray:
     )
 
 
-positions = spawn_positions(np.arange(MAX_PARTICLES))
-trails = np.repeat(positions[:, None, :], TRAIL_LENGTH
-, axis=1)
-retiring = np.zeros(MAX_PARTICLES, dtype=bool)
-particle_launch_times_ms = np.full(MAX_PARTICLES, np.inf)
+positions = np.full((PARTICLE_POOL_SIZE, 2), np.nan)
+positions[:MAX_PARTICLES] = spawn_positions(np.arange(MAX_PARTICLES))
+trails = np.full((PARTICLE_POOL_SIZE, TRAIL_LENGTH, 2), np.nan)
+trails[:MAX_PARTICLES] = np.repeat(
+    positions[:MAX_PARTICLES, None, :],
+    TRAIL_LENGTH,
+    axis=1,
+)
+retiring = np.zeros(PARTICLE_POOL_SIZE, dtype=bool)
+absorber_indices = np.full(PARTICLE_POOL_SIZE, -1, dtype=np.intp)
+absorption_target_x = np.full(PARTICLE_POOL_SIZE, np.nan)
+absorbed = np.zeros(PARTICLE_POOL_SIZE, dtype=bool)
+particle_launch_times_ms = np.full(PARTICLE_POOL_SIZE, np.inf)
 particle_launch_times_ms[:NUM_PARTICLES] = (
     np.arange(NUM_PARTICLES) * PARTICLE_LAUNCH_DELAY_MS
+)
+retained = np.zeros(PARTICLE_POOL_SIZE, dtype=bool)
+retention_birth_ms = np.full(PARTICLE_POOL_SIZE, np.inf)
+
+DATA_UNITS_PER_PIXEL = WIDTH / OUTPUT_WIDTH_PX
+SALMON_LENGTH_DATA = SALMON_LENGTH_PX * DATA_UNITS_PER_PIXEL
+SALMON_WATER_RADIUS_DATA = (
+    SALMON_WATER_RADIUS_PX * DATA_UNITS_PER_PIXEL
+)
+SALMON_LOOKAHEAD_DATA = SALMON_LOOKAHEAD_PX * DATA_UNITS_PER_PIXEL
+SALMON_MOTION_THRESHOLD_DATA = (
+    SALMON_MOTION_THRESHOLD_PX * DATA_UNITS_PER_PIXEL
+)
+WATER_GRID_CELL_SIZE = WATER_GRID_CELL_PX * DATA_UNITS_PER_PIXEL
+
+salmon_positions = np.full((MAX_SALMON, 2), np.nan)
+salmon_trails = np.full(
+    (MAX_SALMON, SALMON_HISTORY_POINTS, 2),
+    np.nan,
+)
+salmon_active = np.zeros(MAX_SALMON, dtype=bool)
+salmon_fading = np.zeros(MAX_SALMON, dtype=bool)
+salmon_fade_started_ms = np.full(MAX_SALMON, np.nan)
+salmon_birth_ms = np.full(MAX_SALMON, -np.inf)
+salmon_source_indices = np.arange(MAX_SALMON) % MAX_PARTICLES
+salmon_rgba = to_rgba_array(
+    rng.choice(SALMON_COLORS, size=MAX_SALMON)
 )
 
 
@@ -811,6 +1006,402 @@ def reset_particles(indices: np.ndarray) -> None:
     positions[indices] = new_positions
     trails[indices, :, :] = new_positions[:, None, :]
     retiring[indices] = False
+    absorber_indices[indices] = -1
+    absorption_target_x[indices] = np.nan
+    absorbed[indices] = False
+
+
+def deactivate_retained_particles(indices: np.ndarray) -> None:
+    """Free retained-water slots without respawning them at the inlet."""
+    indices = np.asarray(indices, dtype=np.intp)
+    if len(indices) == 0:
+        return
+
+    positions[indices] = np.nan
+    trails[indices] = np.nan
+    retiring[indices] = False
+    absorber_indices[indices] = -1
+    absorption_target_x[indices] = np.nan
+    absorbed[indices] = False
+    particle_launch_times_ms[indices] = np.inf
+    retained[indices] = False
+    retention_birth_ms[indices] = np.inf
+    for particle_index in indices:
+        trail_lines[particle_index].set_data([], [])
+
+
+def claim_retention_slots(count: int, elapsed_ms: float) -> np.ndarray:
+    """Claim free reservoir slots, recycling the oldest retained water."""
+    if count <= 0:
+        return np.empty(0, dtype=np.intp)
+
+    retention_slots = np.arange(MAX_PARTICLES, PARTICLE_POOL_SIZE)
+    free = retention_slots[~retained[retention_slots]]
+    claimed = list(free[:count])
+    remaining = count - len(claimed)
+
+    if remaining > 0:
+        occupied = retention_slots[retained[retention_slots]]
+        oldest = occupied[
+            np.argsort(retention_birth_ms[occupied])[:remaining]
+        ]
+        deactivate_retained_particles(oldest)
+        claimed.extend(oldest.tolist())
+
+    claimed_array = np.asarray(claimed, dtype=np.intp)
+    retention_birth_ms[claimed_array] = elapsed_ms
+    return claimed_array
+
+
+def retain_source_particles(
+    source_indices: np.ndarray,
+    elapsed_ms: float,
+    new_trail_points: np.ndarray,
+    substep: int,
+    newly_retained_steps: np.ndarray,
+) -> None:
+    """Move source histories into reservoir storage, then reopen the sources."""
+    source_indices = np.asarray(source_indices, dtype=np.intp)
+    if len(source_indices) == 0:
+        return
+
+    retention_indices = claim_retention_slots(
+        len(source_indices),
+        elapsed_ms,
+    )
+    for source_index, retention_index in zip(
+        source_indices,
+        retention_indices,
+    ):
+        # Include samples already integrated in this frame so the copied line
+        # remains continuous all the way into the reservoir.
+        samples = new_trail_points[source_index, :substep + 1]
+        samples = samples[np.isfinite(samples[:, 0])]
+        source_history = trails[source_index]
+        source_history = source_history[np.isfinite(source_history[:, 0])]
+        combined = np.concatenate((source_history, samples), axis=0)
+        combined = combined[-TRAIL_LENGTH:]
+
+        trails[retention_index] = np.nan
+        trails[retention_index, -len(combined):] = combined
+        positions[retention_index] = positions[source_index]
+        particle_flow_offsets[retention_index] = particle_flow_offsets[
+            source_index
+        ]
+        particle_launch_times_ms[retention_index] = elapsed_ms
+        retained[retention_index] = True
+        retiring[retention_index] = False
+        absorbed[retention_index] = False
+        newly_retained_steps[retention_index] = substep
+
+        # Preserve the line's appearance when its history changes artists.
+        line_widths[retention_index] = line_widths[source_index]
+        line_colors[retention_index] = line_colors[source_index]
+        retained_line = trail_lines[retention_index]
+        retained_line.set_color(line_colors[source_index])
+        retained_line.set_linewidth(line_widths[source_index])
+        retained_line.set_markersize(line_widths[source_index])
+        retained_line.set_markerfacecolor(line_colors[source_index])
+        retained_line.set_markeredgecolor(line_colors[source_index])
+
+    # These fixed source slots are immediately available for new inlet water.
+    transferred_sources = source_indices[:len(retention_indices)]
+    reset_particles(transferred_sources)
+    particle_launch_times_ms[transferred_sources] = elapsed_ms
+    new_trail_points[transferred_sources, :substep + 1] = positions[
+        transferred_sources, None, :
+    ]
+
+
+def transfer_new_reservoir_water(
+    source_indices: np.ndarray,
+    elapsed_ms: float,
+    new_trail_points: np.ndarray,
+    substep: int,
+    newly_retained_steps: np.ndarray,
+) -> None:
+    """Detach newly pooled source lines from their reusable inlet slots."""
+    eligible = np.asarray(source_indices, dtype=np.intp)
+    for reservoir in RESERVOIRS:
+        if len(eligible) == 0:
+            return
+        pooling = reservoir_pooling_mask(
+            positions[eligible],
+            reservoir,
+            eligible,
+        )
+        captured = eligible[pooling]
+        retain_source_particles(
+            captured,
+            elapsed_ms,
+            new_trail_points,
+            substep,
+            newly_retained_steps,
+        )
+        eligible = eligible[~pooling]
+
+
+def absorber_bounds(
+    absorber: Absorber,
+) -> tuple[float, float, float, float]:
+    """Return left, right, bottom, and top edges for an absorber."""
+    return (
+        absorber.x - absorber.width * 0.5,
+        absorber.x + absorber.width * 0.5,
+        absorber.y - absorber.height * 0.5,
+        absorber.y + absorber.height * 0.5,
+    )
+
+
+def update_absorption_states(particle_indices: np.ndarray) -> None:
+    """Assign eligible trails and stop them inside absorbers."""
+    particle_indices = np.asarray(particle_indices, dtype=np.intp)
+    if len(particle_indices) == 0:
+        return
+
+    for absorber_index, absorber in enumerate(ABSORBERS):
+        left, right, bottom, top = absorber_bounds(absorber)
+        points = positions[particle_indices]
+        unassigned = absorber_indices[particle_indices] < 0
+        inside = (
+            (points[:, 0] >= left)
+            & (points[:, 0] <= right)
+            & (points[:, 1] >= bottom)
+            & (points[:, 1] <= top)
+        )
+
+        # Low-discrepancy samples make the percentage stable across frames and
+        # repeated particle lifecycles while still looking randomly selected.
+        selection_sample = np.mod(
+            (particle_indices + 1) * 0.6180339887498949
+            + (absorber_index + 1) * 0.4142135623730950,
+            1.0,
+        )
+        selected = selection_sample < np.clip(
+            absorber.absorption_fraction,
+            0.0,
+            1.0,
+        )
+        newly_assigned = unassigned & inside & selected
+
+        if np.any(newly_assigned):
+            assigned_indices = particle_indices[newly_assigned]
+            margin_fraction = float(np.clip(
+                absorber.stop_margin_fraction,
+                0.0,
+                0.49,
+            ))
+            stop_sample = np.mod(
+                (assigned_indices + 1) * 0.7548776662466927
+                + (absorber_index + 1) * 0.5698402909980532,
+                1.0,
+            )
+            absorber_indices[assigned_indices] = absorber_index
+            absorption_target_x[assigned_indices] = (
+                left
+                + absorber.width
+                * (
+                    margin_fraction
+                    + stop_sample * (1.0 - 2.0 * margin_fraction)
+                )
+            )
+
+        tracking = particle_indices[
+            (absorber_indices[particle_indices] == absorber_index)
+            & ~absorbed[particle_indices]
+        ]
+        if len(tracking) == 0:
+            continue
+
+        # Once selected, keep the trail inside the orchard until it reaches
+        # its stopping depth. This guarantees disappearance in the absorber.
+        interior_margin = min(absorber.width, absorber.height) * 0.005
+        positions[tracking, 1] = np.clip(
+            positions[tracking, 1],
+            bottom + interior_margin,
+            top - interior_margin,
+        )
+        reached_target = (
+            positions[tracking, 0]
+            >= absorption_target_x[tracking]
+        )
+        if np.any(reached_target):
+            stopped_indices = tracking[reached_target]
+            positions[stopped_indices, 0] = absorption_target_x[
+                stopped_indices
+            ]
+            absorbed[stopped_indices] = True
+
+
+def build_water_occupancy_grid() -> np.ndarray:
+    """Rasterize current water trails into a softly dilated lookup grid."""
+    grid_width = math.ceil(WIDTH / WATER_GRID_CELL_SIZE) + 1
+    grid_height = math.ceil(HEIGHT / WATER_GRID_CELL_SIZE) + 1
+    grid = np.zeros((grid_height, grid_width), dtype=bool)
+
+    active_water_slots = np.flatnonzero(
+        particle_launch_times_ms <= current_elapsed_ms
+    )
+    if len(active_water_slots) == 0:
+        return grid
+
+    water_points = trails[active_water_slots].reshape(-1, 2)
+    valid = (
+        np.isfinite(water_points[:, 0])
+        & np.isfinite(water_points[:, 1])
+        & (water_points[:, 0] >= 0.0)
+        & (water_points[:, 0] <= WIDTH)
+        & (water_points[:, 1] >= 0.0)
+        & (water_points[:, 1] <= HEIGHT)
+    )
+    water_points = water_points[valid]
+    if len(water_points) == 0:
+        return grid
+
+    grid_x = np.clip(
+        (water_points[:, 0] / WATER_GRID_CELL_SIZE).astype(np.intp),
+        0,
+        grid_width - 1,
+    )
+    grid_y = np.clip(
+        (water_points[:, 1] / WATER_GRID_CELL_SIZE).astype(np.intp),
+        0,
+        grid_height - 1,
+    )
+    grid[grid_y, grid_x] = True
+
+    radius_cells = max(
+        1,
+        math.ceil(SALMON_WATER_RADIUS_DATA / WATER_GRID_CELL_SIZE),
+    )
+    padded = np.pad(grid, radius_cells)
+    dilated = np.zeros_like(grid)
+    for offset_y in range(-radius_cells, radius_cells + 1):
+        for offset_x in range(-radius_cells, radius_cells + 1):
+            if offset_x ** 2 + offset_y ** 2 > radius_cells ** 2:
+                continue
+            y_start = radius_cells + offset_y
+            x_start = radius_cells + offset_x
+            dilated |= padded[
+                y_start:y_start + grid_height,
+                x_start:x_start + grid_width,
+            ]
+
+    return dilated
+
+
+def points_have_water(
+    points: np.ndarray,
+    water_grid: np.ndarray,
+) -> np.ndarray:
+    """Return whether each point lies in the current water corridor."""
+    result = np.zeros(len(points), dtype=bool)
+    inside = (
+        (points[:, 0] >= 0.0)
+        & (points[:, 0] <= WIDTH)
+        & (points[:, 1] >= 0.0)
+        & (points[:, 1] <= HEIGHT)
+    )
+    if not np.any(inside):
+        return result
+
+    inside_points = points[inside]
+    grid_x = np.clip(
+        (inside_points[:, 0] / WATER_GRID_CELL_SIZE).astype(np.intp),
+        0,
+        water_grid.shape[1] - 1,
+    )
+    grid_y = np.clip(
+        (inside_points[:, 1] / WATER_GRID_CELL_SIZE).astype(np.intp),
+        0,
+        water_grid.shape[0] - 1,
+    )
+    result[inside] = water_grid[grid_y, grid_x]
+    return result
+
+
+def water_exit_y_candidates() -> np.ndarray:
+    """Collect downstream-edge Y positions where salmon can enter water."""
+    candidates = []
+    edge_band = max(
+        SALMON_WATER_RADIUS_DATA * 2.0,
+        0.12 * WORLD_SCALE,
+    )
+    active_water_slots = np.flatnonzero(
+        particle_launch_times_ms <= current_elapsed_ms
+    )
+    for trail in trails[active_water_slots]:
+        valid = (
+            np.isfinite(trail[:, 0])
+            & np.isfinite(trail[:, 1])
+            & (trail[:, 0] >= WIDTH - edge_band)
+            & (trail[:, 0] <= WIDTH)
+            & (trail[:, 1] >= 0.0)
+            & (trail[:, 1] <= HEIGHT)
+        )
+        if np.any(valid):
+            edge_points = trail[valid]
+            candidates.append(edge_points[np.argmax(edge_points[:, 0]), 1])
+    return np.asarray(candidates)
+
+
+def release_salmon() -> None:
+    """Release exactly SALMON_PER_RELEASE short upstream-swimming lines."""
+    inactive_slots = np.flatnonzero(~salmon_active)
+    if len(inactive_slots) >= SALMON_PER_RELEASE:
+        slots = inactive_slots[:SALMON_PER_RELEASE]
+    else:
+        needed = SALMON_PER_RELEASE - len(inactive_slots)
+        active_slots = np.flatnonzero(salmon_active)
+        oldest = active_slots[
+            np.argsort(salmon_birth_ms[active_slots])[:needed]
+        ]
+        slots = np.concatenate((inactive_slots, oldest))
+
+    candidate_y = water_exit_y_candidates()
+    if len(candidate_y) > 0:
+        spawn_y = rng.choice(
+            candidate_y,
+            size=SALMON_PER_RELEASE,
+            replace=len(candidate_y) < SALMON_PER_RELEASE,
+        )
+    else:
+        spawn_y = rng.uniform(
+            SPAWN_Y_MARGIN,
+            HEIGHT - SPAWN_Y_MARGIN,
+            SALMON_PER_RELEASE,
+        )
+
+    salmon_positions[slots, 0] = WIDTH + SALMON_SPAWN_OFFSET
+    salmon_positions[slots, 1] = spawn_y
+    salmon_trails[slots] = np.nan
+    salmon_active[slots] = True
+    salmon_fading[slots] = False
+    salmon_fade_started_ms[slots] = np.nan
+    salmon_birth_ms[slots] = current_elapsed_ms
+    salmon_rgba[slots] = to_rgba_array(
+        rng.choice(SALMON_COLORS, size=SALMON_PER_RELEASE)
+    )
+    print(f"Released {SALMON_PER_RELEASE} salmon")
+
+
+def trim_salmon_trail(slot: int) -> None:
+    """Keep only the most recent approximately 50 pixels of one path."""
+    path = salmon_trails[slot]
+    valid = np.isfinite(path[:, 0]) & np.isfinite(path[:, 1])
+    points = path[valid]
+    if len(points) < 2:
+        return
+
+    segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    distance_to_head = np.concatenate(
+        (np.cumsum(segment_lengths[::-1])[::-1], np.array([0.0]))
+    )
+    kept = points[distance_to_head <= SALMON_LENGTH_DATA]
+    if len(kept) < 2:
+        kept = points[-2:]
+    salmon_trails[slot] = np.nan
+    salmon_trails[slot, -len(kept):] = kept
 
 
 # --------------------------------------------------
@@ -870,6 +1461,28 @@ def create_obstacle_artists() -> list:
             np.asarray(obstacle.vertices, dtype=float),
             closed=True,
             **style,
+        )
+        ax.add_patch(artist)
+        artists.append(artist)
+
+    for absorber in ABSORBERS:
+        left, right, bottom, top = absorber_bounds(absorber)
+        absorber_style = dict(style)
+        absorber_style.update(
+            edgecolor="yellowgreen",
+            linestyle="--",
+        )
+        artist = PolygonPatch(
+            np.array(
+                [
+                    (left, bottom),
+                    (right, bottom),
+                    (right, top),
+                    (left, top),
+                ]
+            ),
+            closed=True,
+            **absorber_style,
         )
         ax.add_patch(artist)
         artists.append(artist)
@@ -956,24 +1569,23 @@ reservoir_artists = [
 ]
 debug_geometry_artists = obstacle_artists + reservoir_artists
 
-# Reserve S for the instant screenshot handler instead of Matplotlib's default
-# save-file dialog.
+# Reserve the salmon-release key instead of opening Matplotlib's save dialog.
 plt.rcParams["keymap.save"] = [
     key
     for key in plt.rcParams["keymap.save"]
-    if key.lower() != SCREENSHOT_KEY
+    if key.lower() != SALMON_RELEASE_KEY
 ]
 
 line_widths = rng.uniform(
     LINE_WIDTH_MIN,
     LINE_WIDTH_MAX,
-    MAX_PARTICLES,
+    PARTICLE_POOL_SIZE,
 )
 
-line_colors = rng.choice(COLORS, size=MAX_PARTICLES)
+line_colors = rng.choice(COLORS, size=PARTICLE_POOL_SIZE)
 
 trail_lines = []
-for particle_index in range(MAX_PARTICLES):
+for particle_index in range(PARTICLE_POOL_SIZE):
     line, = ax.plot(
         [],
         [],
@@ -994,6 +1606,168 @@ for particle_index in range(MAX_PARTICLES):
     )
     trail_lines.append(line)
 
+initial_salmon_colors = salmon_rgba.copy()
+initial_salmon_colors[:, 3] = 0.0
+salmon_collection = LineCollection(
+    salmon_trails,
+    colors=initial_salmon_colors,
+    linewidths=SALMON_LINE_WIDTH,
+    capstyle="round",
+    joinstyle="round",
+    antialiased=True,
+    clip_on=True,
+    zorder=7,
+)
+ax.add_collection(salmon_collection)
+
+
+def update_salmon(frame: int, frame_end_ms: float) -> None:
+    """Move salmon upstream while water exists ahead, otherwise fade them."""
+    if not np.any(salmon_active):
+        return
+
+    water_grid = build_water_occupancy_grid()
+    substep_dt = DT / SIMULATION_SUBSTEPS
+    frame_start_positions = salmon_positions.copy()
+    frame_travel_distance = np.zeros(MAX_SALMON)
+    new_samples = np.full(
+        (MAX_SALMON, SIMULATION_SUBSTEPS, 2),
+        np.nan,
+    )
+
+    for substep in range(SIMULATION_SUBSTEPS):
+        moving_slots = np.flatnonzero(salmon_active & ~salmon_fading)
+        if len(moving_slots) == 0:
+            break
+
+        time_value = frame * DT + substep * substep_dt
+        elapsed_ms = (
+            frame * INTERVAL_MS
+            + substep * INTERVAL_MS / SIMULATION_SUBSTEPS
+        )
+        source_indices = salmon_source_indices[moving_slots]
+
+        # Negating the complete water field traces the same stream geometry in
+        # the upstream direction at the corresponding water speed.
+        upstream_velocity = -velocity_field(
+            salmon_positions[moving_slots],
+            time_value,
+            particle_indices=source_indices,
+        )
+        midpoint = (
+            salmon_positions[moving_slots]
+            + upstream_velocity * substep_dt * 0.5
+        )
+        midpoint_velocity = -velocity_field(
+            midpoint,
+            time_value + substep_dt * 0.5,
+            particle_indices=source_indices,
+        )
+        proposed = (
+            salmon_positions[moving_slots]
+            + midpoint_velocity * substep_dt
+        )
+        travel_direction, travel_speed = safe_normalize(
+            midpoint_velocity,
+            minimum=1e-8,
+        )
+        ahead = proposed + travel_direction * SALMON_LOOKAHEAD_DATA
+        has_water = points_have_water(ahead, water_grid)
+        has_water &= travel_speed > 1e-8
+
+        # Reaching the upstream edge is a successful exit, not a loss of
+        # water. Once the head is at the boundary, let the complete short body
+        # continue off-screen before recycling its slot.
+        leaving_upstream = (
+            salmon_positions[moving_slots, 0]
+            <= SALMON_WATER_RADIUS_DATA
+        ) & (midpoint_velocity[:, 0] < 0.0)
+        has_water |= leaving_upstream
+
+        stranded_slots = moving_slots[~has_water]
+        if len(stranded_slots) > 0:
+            salmon_fading[stranded_slots] = True
+            salmon_fade_started_ms[stranded_slots] = elapsed_ms
+
+        swimming_slots = moving_slots[has_water]
+        if len(swimming_slots) > 0:
+            frame_travel_distance[swimming_slots] += np.linalg.norm(
+                proposed[has_water] - salmon_positions[swimming_slots],
+                axis=1,
+            )
+            salmon_positions[swimming_slots] = proposed[has_water]
+            new_samples[swimming_slots, substep] = proposed[has_water]
+
+    # Water in a reservoir can leave a salmon at a near-equilibrium point.
+    # Treat motion of one pixel or less over the complete displayed frame as
+    # stalled. Preserve its existing body instead of replacing it with twenty
+    # nearly identical substep samples, then use the normal fade lifecycle.
+    motion_candidates = np.flatnonzero(salmon_active & ~salmon_fading)
+    stalled_slots = motion_candidates[
+        frame_travel_distance[motion_candidates]
+        <= SALMON_MOTION_THRESHOLD_DATA
+    ]
+    if len(stalled_slots) > 0:
+        salmon_positions[stalled_slots] = frame_start_positions[stalled_slots]
+        new_samples[stalled_slots] = np.nan
+        salmon_fading[stalled_slots] = True
+        salmon_fade_started_ms[stalled_slots] = frame_end_ms
+
+    sampled_slots = np.flatnonzero(
+        np.any(np.isfinite(new_samples[:, :, 0]), axis=1)
+    )
+    for slot in sampled_slots:
+        existing = salmon_trails[slot]
+        existing = existing[np.isfinite(existing[:, 0])]
+        samples = new_samples[slot]
+        samples = samples[np.isfinite(samples[:, 0])]
+        combined = np.concatenate((existing, samples), axis=0)
+        combined = combined[-SALMON_HISTORY_POINTS:]
+        salmon_trails[slot] = np.nan
+        salmon_trails[slot, -len(combined):] = combined
+        trim_salmon_trail(slot)
+
+    exited_slots = []
+    for slot in np.flatnonzero(salmon_active & ~salmon_fading):
+        path = salmon_trails[slot]
+        finite_x = path[np.isfinite(path[:, 0]), 0]
+        if len(finite_x) > 0 and np.max(finite_x) < 0.0:
+            exited_slots.append(slot)
+    if exited_slots:
+        exited_slots = np.asarray(exited_slots, dtype=np.intp)
+        salmon_active[exited_slots] = False
+        salmon_positions[exited_slots] = np.nan
+        salmon_trails[exited_slots] = np.nan
+
+    fading_slots = np.flatnonzero(salmon_active & salmon_fading)
+    if len(fading_slots) > 0:
+        fade_progress = (
+            frame_end_ms - salmon_fade_started_ms[fading_slots]
+        ) / (SALMON_FADE_SECONDS * 1000.0)
+        finished = fading_slots[fade_progress >= 1.0]
+        if len(finished) > 0:
+            salmon_active[finished] = False
+            salmon_fading[finished] = False
+            salmon_positions[finished] = np.nan
+            salmon_trails[finished] = np.nan
+            salmon_fade_started_ms[finished] = np.nan
+
+    display_colors = salmon_rgba.copy()
+    display_colors[~salmon_active, 3] = 0.0
+    fading_slots = np.flatnonzero(salmon_active & salmon_fading)
+    if len(fading_slots) > 0:
+        fade_alpha = 1.0 - np.clip(
+            (
+                frame_end_ms - salmon_fade_started_ms[fading_slots]
+            ) / (SALMON_FADE_SECONDS * 1000.0),
+            0.0,
+            1.0,
+        )
+        display_colors[fading_slots, 3] *= fade_alpha
+
+    salmon_collection.set_segments(salmon_trails)
+    salmon_collection.set_color(display_colors)
+
 
 
 
@@ -1005,14 +1779,24 @@ def update(frame: int):
     global positions, trails, frame_counter, retiring, current_elapsed_ms
 
     substep_dt = DT / SIMULATION_SUBSTEPS
-    new_trail_points = np.empty(
-        (NUM_PARTICLES, SIMULATION_SUBSTEPS, 2),
+    new_trail_points = np.full(
+        (PARTICLE_POOL_SIZE, SIMULATION_SUBSTEPS, 2),
+        np.nan,
     )
+    newly_retained_steps = np.full(PARTICLE_POOL_SIZE, -1, dtype=np.intp)
     # Neighbor relationships change much more slowly than the integration
     # timestep. Cache particle pressure once per displayed frame instead of
-    # rebuilding its O(n²) distance matrix forty times.
-    frame_separation_force = particle_separation_force(
-        positions[:NUM_PARTICLES]
+    # rebuilding its O(n²) distance matrix twenty times. Reservoir-retained
+    # lines use their stable orbit spread instead of joining this matrix.
+    frame_separation_force = np.zeros((PARTICLE_POOL_SIZE, 2))
+    frame_start_ms = frame * INTERVAL_MS
+    source_slots = np.arange(NUM_PARTICLES, dtype=np.intp)
+    separation_slots = source_slots[
+        (particle_launch_times_ms[source_slots] <= frame_start_ms)
+        & ~absorbed[source_slots]
+    ]
+    frame_separation_force[separation_slots] = particle_separation_force(
+        positions[separation_slots]
     )
 
     # Take several small midpoint-integration steps per displayed frame. This
@@ -1024,21 +1808,20 @@ def update(frame: int):
             frame * INTERVAL_MS
             + substep * INTERVAL_MS / SIMULATION_SUBSTEPS
         )
-        substep_active = (
-            elapsed_ms
-            >= particle_launch_times_ms[:NUM_PARTICLES]
-        )
+        launched = elapsed_ms >= particle_launch_times_ms
+        absorbed_before_substep = absorbed.copy()
+        substep_active = launched & ~absorbed_before_substep
 
         if np.any(substep_active):
             active_indices = np.flatnonzero(substep_active)
             velocity = velocity_field(
-                positions[:NUM_PARTICLES][substep_active],
+                positions[active_indices],
                 time_value,
-                frame_separation_force[substep_active],
+                frame_separation_force[active_indices],
                 active_indices,
             )
             midpoint = (
-                positions[:NUM_PARTICLES][substep_active]
+                positions[active_indices]
                 + velocity * substep_dt * 0.5
             )
             midpoint_velocity = velocity_field(
@@ -1049,59 +1832,98 @@ def update(frame: int):
             )
             positions[active_indices] += midpoint_velocity * substep_dt
 
-        new_trail_points[:, substep, :] = positions[:NUM_PARTICLES]
+        update_absorption_states(np.flatnonzero(launched))
+        new_trail_points[launched, substep, :] = positions[launched]
+        # An absorbed head contributes no new geometry. Rolling these NaNs
+        # through the history erases the trail progressively from tail to head.
+        new_trail_points[
+            absorbed_before_substep,
+            substep,
+            :,
+        ] = np.nan
+
+        source_candidates = np.flatnonzero(
+            substep_active
+            & ~absorbed
+            & (np.arange(PARTICLE_POOL_SIZE) < NUM_PARTICLES)
+        )
+        transfer_new_reservoir_water(
+            source_candidates,
+            elapsed_ms,
+            new_trail_points,
+            substep,
+            newly_retained_steps,
+        )
 
     frame_end_ms = (frame + 1) * INTERVAL_MS
     current_elapsed_ms = frame_end_ms
-    active = (
-        frame_end_ms
-        > particle_launch_times_ms[:NUM_PARTICLES]
-    )
+    active = frame_end_ms > particle_launch_times_ms
 
     # Once a head reaches the right edge, let the line retire naturally.
-    head_exited_right = active & (
-        positions[:NUM_PARTICLES, 0] >= WIDTH
-    )
-    retiring[:NUM_PARTICLES] |= head_exited_right
+    head_exited_right = active & (positions[:, 0] >= WIDTH)
+    retiring |= head_exited_right
 
     # Only reset immediately for true escape/error cases.
+    escape_margin = 0.5 * WORLD_SCALE
     hard_reset = active & (
-        (positions[:NUM_PARTICLES, 0] < SPAWN_X - 0.5)
-        | (positions[:NUM_PARTICLES, 1] < -0.5)
-        | (positions[:NUM_PARTICLES, 1] > HEIGHT + 0.5)
+        (positions[:, 0] < SPAWN_X - escape_margin)
+        | (positions[:, 1] < -escape_margin)
+        | (positions[:, 1] > HEIGHT + escape_margin)
     )
 
-    trails[:NUM_PARTICLES] = np.roll(
-        trails[:NUM_PARTICLES],
+    # Existing lines receive a complete frame of points. A line detached into
+    # reservoir storage already copied the source history at its capture step,
+    # so append only the subsequent samples for that newly retained slot.
+    existing_slots = np.flatnonzero(active & (newly_retained_steps < 0))
+    trails[existing_slots] = np.roll(
+        trails[existing_slots],
         -SIMULATION_SUBSTEPS,
         axis=1,
     )
-    trails[
-        :NUM_PARTICLES,
-        -SIMULATION_SUBSTEPS:,
-        :,
-    ] = new_trail_points
+    trails[existing_slots, -SIMULATION_SUBSTEPS:, :] = new_trail_points[
+        existing_slots
+    ]
+
+    for retention_index in np.flatnonzero(newly_retained_steps >= 0):
+        first_new_sample = newly_retained_steps[retention_index] + 1
+        samples = new_trail_points[retention_index, first_new_sample:]
+        samples = samples[np.isfinite(samples[:, 0])]
+        if len(samples) > 0:
+            trails[retention_index] = np.roll(
+                trails[retention_index],
+                -len(samples),
+                axis=0,
+            )
+            trails[retention_index, -len(samples):] = samples
 
     visible_mask = (
-        (trails[:NUM_PARTICLES, :, 0] >= 0.0)
-        & (trails[:NUM_PARTICLES, :, 0] <= WIDTH)
-        & (trails[:NUM_PARTICLES, :, 1] >= 0.0)
-        & (trails[:NUM_PARTICLES, :, 1] <= HEIGHT)
+        (trails[:, :, 0] >= 0.0)
+        & (trails[:, :, 0] <= WIDTH)
+        & (trails[:, :, 1] >= 0.0)
+        & (trails[:, :, 1] <= HEIGHT)
     )
 
     visible_counts = visible_mask.sum(axis=1)
     retired_and_gone = (
-        retiring[:NUM_PARTICLES]
+        (retiring | absorbed)
         & (visible_counts < 2)
     )
 
     reset_now = hard_reset | retired_and_gone
-    reset_particles(np.flatnonzero(reset_now))
+    source_reset = np.flatnonzero(
+        reset_now & (np.arange(PARTICLE_POOL_SIZE) < NUM_PARTICLES)
+    )
+    retention_reset = np.flatnonzero(reset_now & retained)
+    reset_particles(source_reset)
+    deactivate_retained_particles(retention_reset)
+
+    update_salmon(frame, frame_end_ms)
 
     # One continuous Line2D artist per particle keeps every trail smooth.
-    for particle_index in range(NUM_PARTICLES):
+    display_active = frame_end_ms > particle_launch_times_ms
+    for particle_index in range(PARTICLE_POOL_SIZE):
         line = trail_lines[particle_index]
-        if active[particle_index]:
+        if display_active[particle_index]:
             line.set_data(
                 trails[particle_index, :, 0],
                 trails[particle_index, :, 1],
@@ -1121,14 +1943,19 @@ def update(frame: int):
         )
 
     frame_counter += 1
-    return trail_lines[:NUM_PARTICLES] + debug_geometry_artists
+    return (
+        trail_lines
+        + [salmon_collection]
+        + debug_geometry_artists
+    )
 
 
 def init_animation():
     """Initialize artists without advancing the simulation."""
     for line in trail_lines:
         line.set_data([], [])
-    return trail_lines + debug_geometry_artists
+    salmon_collection.set_segments(salmon_trails)
+    return trail_lines + [salmon_collection] + debug_geometry_artists
 
 
 def take_screenshot() -> Path:
@@ -1225,7 +2052,7 @@ def toggle_gate(reservoir_index: int) -> None:
 
 
 def toggle_debug_geometry() -> None:
-    """Show or hide obstacle and reservoir geometry without affecting flow."""
+    """Show or hide obstacle, absorber, and reservoir debug geometry."""
     global DEBUG_GEOMETRY_VISIBLE
 
     DEBUG_GEOMETRY_VISIBLE = not DEBUG_GEOMETRY_VISIBLE
@@ -1245,6 +2072,8 @@ def on_key_press(event) -> None:
     key = event.key.lower()
     if key == SCREENSHOT_KEY:
         take_screenshot()
+    elif key == SALMON_RELEASE_KEY:
+        release_salmon()
     elif key == VISIBILITY_TOGGLE_KEY:
         toggle_debug_geometry()
     elif key == GATE_TOGGLE_KEY and RESERVOIRS:
