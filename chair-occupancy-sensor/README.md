@@ -1,7 +1,7 @@
 # Chair occupancy sensors
 
-Seven chairs detect whether someone is sitting in them and drive the Sacramento
-River installation. Everything needed to run and fix it is in this file; the
+Seven chairs detect whether someone is sitting in them and publish that state
+over the network. Everything needed to run and fix it is in this file; the
 history and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 **Jump to:**
@@ -13,9 +13,9 @@ history and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 [installation](#installation)
 
 ```
-7 chairs  ──radio──▶  receiver on USB  ──▶  controller.py  ──UDP──▶  screens
- ESP32 +              plugged into           decides who        the visuals
- motion sensor        the Mac                is sitting
+7 chairs  ──radio──▶  receiver on USB  ──▶  controller.py  ──UDP──▶  consumers
+ ESP32 +              plugged into           decides who        anything that
+ motion sensor        the Mac                is sitting         needs the state
       8 times a second                    60 times a second
 ```
 
@@ -43,14 +43,13 @@ the plastic case. It tells you whether that chair is working.
 | **Blinking fast, without stopping** | Working, but something is wrong with it | See below |
 | **Completely dark** | Not running at all | Charge it |
 
-**A charge lasts about 20 hours**, so charging overnight
-is sufficient. A chair that goes dark or disappears has a flat battery: that is the
-expected way it fails, not a fault.
+**A charge lasts about 20 hours**, so charging overnight is sufficient. A chair
+that goes dark or stops reporting has a flat battery: that is the expected way
+it fails, not a fault.
 
-**If one chair is blinking fast**, it is still sending data and the exhibit
-still works. The chair has just noticed a problem with itself. Note which chair
-it is and carry on. It only becomes urgent if that chair also disappears from
-the screen.
+**If one chair is blinking fast**, it is still sending data and the rest of the
+system is unaffected. That chair has detected a problem with itself. Note which
+one it is and carry on. It only becomes urgent if it also stops reporting.
 
 **If every chair is blinking fast at the same time**, the chairs are not the
 problem. It means none of them can reach the receiver. Check that the receiver
@@ -97,10 +96,10 @@ wc -l ~/motion_log.txt; sleep 5; wc -l ~/motion_log.txt
 ```
 
 It should climb by about **280 every 5 seconds** (7 chairs x 8 per second).
-**If it does not climb, no display is showing current data**, however healthy
-they look. This is the most important single check in the system, because a
-stopped capture is invisible everywhere else: no error appears, every display
-simply freezes on its last values.
+**If it does not climb, nothing downstream has current data.** This is the most
+important single check in the system, because a stopped capture is invisible
+everywhere else: no error is reported, and anything reading the feed simply
+holds its last values.
 
 To force the capture to restart rather than waiting:
 
@@ -124,17 +123,17 @@ The chair is being moved by something. In order:
 A few seconds of it while somebody brushes past is normal and clears on its own.
 It only matters if it stays that way with the room empty.
 
-## The screens are not responding
+## Nothing downstream is reacting
 
-Run `python3 chair_state_monitor.py`. If it shows correct chair states then the
-sensing side is fine and the problem is downstream in the renderers.
+Run `python3 chair_state_monitor.py`. If it shows the correct chair states then
+this system is working and the problem is in whatever consumes the UDP feed.
 
 ---
 
 # Development
 
 Everything here is for a laptop, or for changing how the system behaves. None of
-it is needed to keep the exhibit running.
+it is needed to keep the system running.
 
 ## Manual startup
 
@@ -172,7 +171,7 @@ board and silently drops the baud rate to 9600.
 python3 controller.py
 ```
 
-**4. Start the renderers** on the screen Macs.
+**4. Start whatever consumes the feed**, if anything is listening.
 
 ## Monitoring
 
@@ -281,10 +280,10 @@ only ever one copy and the scorer always scores what actually runs.
 |---|---|
 | `chairs` | 7 flags, **index 0 is chair 1**. 1 = occupied |
 | `n_occupied` | how many are occupied |
-| `speed` | 0-9, scales with `n_occupied`. Drives flow rate |
-| `ring_alpha` | 0.0-1.0, same scaling. Drives ring opacity |
-| `regime` | index of the **most recently occupied** chair, or -1 |
-| `regime_name` | that regime's name, or `"None"` |
+| `speed` | 0-9, derived from `n_occupied`. Consumer-defined meaning |
+| `ring_alpha` | 0.0-1.0, same derivation. Consumer-defined meaning |
+| `regime` | index of the **most recently occupied** chair, or -1 if none |
+| `regime_name` | the label for that index from `REGIMES`, or `"None"` |
 | `stale` | chairs silent over 3s: flat battery or switched off |
 | `source` | `"sensors"` or `"keyboard"`, so tests are never mistaken for real |
 | `temp_c` | per chair, degrees C. Diagnostic only |
@@ -299,9 +298,9 @@ s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("", 5005))
 while True:
     state = json.loads(s.recv(4096).decode())
-    speed = state["speed"]
-    alpha = state["ring_alpha"]
-    # drive the render from here
+    occupied = state["chairs"]        # [0,1,0,0,0,0,0]
+    count    = state["n_occupied"]
+    # use them from here
 ```
 
 Notes for implementers:
@@ -309,8 +308,8 @@ Notes for implementers:
 - Packets arrive at 60Hz whether or not anything changed. Treat each one as the current
   state rather than as an event.
 - **A silent chair is reported empty, not held.** A flat battery would otherwise hold its
-  regime active indefinitely, which is indistinguishable from a person sitting
-  there for hours.
+  regime index active indefinitely, which is indistinguishable from a person
+  sitting there for hours.
 - `regime` is the **most recent** arrival, not the lowest-numbered occupied
   chair.
 - UDP can drop packets. Another arrives within 17ms, so never block waiting for
@@ -318,13 +317,13 @@ Notes for implementers:
 
 ### Known gaps
 
-> **The renderers do not listen on UDP yet.** The chairs drive `controller.py`,
-> but the last hop into the visuals is unconnected. It is a change to
-> `flow_chevrons_live.py`, using the snippet above.
+> **Nothing consumes the UDP feed yet.** `controller.py` publishes it, but no
+> downstream program listens. Connecting one is a change on that side, using the
+> snippet above.
 
-> **The chair-to-regime mapping is unverified.** `REGIMES` in `controller.py` is
-> inherited from the original file and has never been checked against what the
-> physical chairs represent.
+> **The `REGIMES` list is unverified.** It is inherited from the original
+> `controller.py` and has never been checked against what the physical chairs are
+> meant to represent. Only the labels are affected, not the detection.
 
 ---
 
@@ -358,7 +357,7 @@ step-by-step in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 # Repository layout
 
 ```
-controller.py             reads the chairs, broadcasts to the screens
+controller.py             reads the chairs, publishes state over UDP
 chair_state_monitor.py    check the chain is working
 
 chair-occupancy-sensor/
@@ -374,8 +373,8 @@ chair-occupancy-sensor/
                           ARCHIVE.md: the full history and reasoning
 ```
 
-The occupancy model lives inside `controller.py`, so the file that runs the
-installation depends on nothing else in this repository.
+The occupancy model lives inside `controller.py`, so the file that runs in
+production depends on nothing else in this repository.
 
 **Validated 2026-07-30** on data the model had never seen: 9/9 sit-downs, 9/9
 stand-ups across all seven chairs, zero false positives.
