@@ -9,8 +9,7 @@ history and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 [best practices](#best-practices) ·
 [troubleshooting](#troubleshooting) ·
 [development](#development) ·
-[integration](#integration) ·
-[installation](#installation)
+[integration](#integration)
 
 ```
 7 chairs  ──radio──▶  receiver on USB  ──▶  controller.py  ──UDP──▶  consumers
@@ -155,21 +154,15 @@ than only that it did:
 Add `--plain` for a terminal version that requires no packages, for a machine
 without matplotlib.
 
-## Testing without hardware
-
-```bash
-python3 controller.py --source keyboard
-```
-
-Press 1-7 to simulate chairs. The packets are identical to real ones, so
-nothing downstream behaves differently. The monitor marks the source amber so
-test input is never mistaken for real chairs.
-
 ## Chair identification
 
 **Chair identity lives in the receiver, not in the chair firmware.** Every ESP32
-has a permanent factory MAC address, and `firmware/receiver_esp_now.ino` maps
-each one to a chair number.
+has a permanent factory MAC address, and the receiver maps each one to a chair
+number.
+
+**The table is `chairMacs` in `firmware/receiver_esp_now.ino`.** The same list
+is mirrored in `tools/flash_chair.sh`, so a new board goes in both. Changing
+either one means reflashing the receiver.
 
 Boards are labelled with the **last two octets** of their MAC, for example
 `B5:54` for chair 1. Two boards in this fleet differ only in the middle of their
@@ -201,18 +194,46 @@ the receiver, which otherwise succeeds silently and breaks the whole fleet.
 talking to an old receiver reads as `BAD PACKET` and looks exactly like a dead
 board.
 
-## Modifying the model
+## Setting up another machine
 
-The occupancy model is inside `controller.py`, near the constants marked
-`occupancy model`. Changing a constant there invalidates the recorded validation result, so
-re-score it:
+`controller.py` needs only Python, no packages. The development tools need the
+venv (`python3 -m venv venv && venv/bin/pip install -r requirements.txt`).
+
+Two things that are not obvious:
+
+- **USB-serial drivers.** The boards use two different chips. Most need Silicon
+  Labs' CP210x driver; the receiver uses a CH340 and needs that vendor's driver.
+  A board that never appears in `/dev/cu.*` is usually missing its driver.
+- **The baud rate is 921600** and must match `Serial.begin()` in
+  `firmware/receiver_esp_now.ino`. If the two differ the log fills with
+  unreadable characters rather than failing cleanly.
+
+To run unattended, put `tools/pull_and_refresh.sh` on a timer. Step-by-step in
+[`development/ARCHIVE.md`](development/ARCHIVE.md).
+
+## The model
+
+Each chair sends the standard deviation of its gyro readings eight times a
+second. The model counts a one-second window as a vote for "occupied" when
+rotation about the vertical axis dominates the other two axes, and the chair
+flips state when enough of the last few seconds are votes.
+
+It lives in `controller.py`, in the constants block marked `occupancy model`.
+
+| Change | To |
+|---|---|
+| `ENTER_FRAC` | make it easier or harder to become occupied |
+| `EXIT_FRAC` | hold a still person longer, or release faster |
+| `VOTE_WINDOW` | how many seconds of history the decision uses |
+| `Z_FLOOR_RAW`, `RATIO_THRESHOLD` | how much rotation counts as a person |
+| `PEAK_JUMP_RAW` | sensitivity to the sit-down jolt |
+| `STALE_S` | how long a silent chair waits before it reads offline |
+
+Changing any of these invalidates the recorded validation result, so re-score:
 
 ```bash
 venv/bin/python development/tools/score_model.py data/dataset_20260730_122544.csv
 ```
-
-The development tools import the model **from** `controller.py`, so there is
-only ever one copy and the scorer always scores what actually runs.
 
 ---
 
@@ -265,66 +286,12 @@ while True:
 
 Notes for implementers:
 
-- Packets arrive at 60Hz whether or not anything changed. Treat each one as the current
-  state rather than as an event.
-- **A silent chair is reported empty, not held.** A flat battery would otherwise hold its
-  regime index active indefinitely, which is indistinguishable from a person
-  sitting there for hours.
+- Packets arrive at 60Hz whether or not anything changed. Treat each one as the
+  current state rather than as an event.
+- **A silent chair is reported empty, not held.** A flat battery would otherwise
+  hold its regime index active indefinitely, which is indistinguishable from a
+  person sitting there for hours.
 - `regime` is the **most recent** arrival, not the lowest-numbered occupied
   chair.
 - UDP can drop packets. Another arrives within 17ms, so never block waiting for
   one.
-
----
-
-# Installation
-
-```bash
-brew install arduino-cli
-arduino-cli core install esp32:esp32
-git clone https://github.com/gregottoniemeyer/sacramento_model.git
-cd sacramento_model/chair-occupancy-sensor
-python3 -m venv venv && venv/bin/pip install -r requirements.txt
-```
-
-`controller.py` itself needs **no packages at all**, only Python. The virtual
-environment is for the development tools.
-
-**USB-serial drivers.** The boards use two different chips. Most need Silicon
-Labs' CP210x driver; the receiver uses a CH340 and needs that vendor's driver.
-A board that never appears in `/dev/cu.*` is usually missing its driver.
-
-**The baud rate is 921600** and must match `Serial.begin()` in
-`firmware/receiver_esp_now.ino`. If the two differ, the log fills with unreadable
-characters rather than failing cleanly.
-
-**To make it run unattended**, put `tools/pull_and_refresh.sh` on a timer. It
-pulls new code, keeps the capture alive, and keeps the controller alive. Full
-step-by-step in [`development/ARCHIVE.md`](development/ARCHIVE.md).
-
----
-
-# Repository layout
-
-```
-controller.py             reads the chairs, publishes state over UDP
-chair_state_monitor.py    check the chain is working
-
-chair-occupancy-sensor/
-  README.md               this file
-  firmware/               sender_summary.ino   -> all 7 chairs
-                          receiver_esp_now.ino -> the USB receiver
-                          i2c_*, mpu_read_test -> wiring diagnostics
-  tools/                  start_capture.sh     keeps the capture alive
-                          pull_and_refresh.sh  the unattended timer job
-                          flash_chair.sh       reflash a board safely
-  data/                   recorded sessions
-  development/            everything used to build and validate it, plus
-                          ARCHIVE.md: the full history and reasoning
-```
-
-The occupancy model lives inside `controller.py`, so the file that runs in
-production depends on nothing else in this repository.
-
-**Validated 2026-07-30** on data the model had never seen: 9/9 sit-downs, 9/9
-stand-ups across all seven chairs, zero false positives.
