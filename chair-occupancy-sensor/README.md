@@ -69,8 +69,6 @@ is plugged into the Mac and that the Mac is awake.
 
 # Troubleshooting
 
-Work down the list and stop at the first thing that explains it.
-
 ## A single chair is offline
 
 1. **Is its light doing anything?** Nothing at all means charge it.
