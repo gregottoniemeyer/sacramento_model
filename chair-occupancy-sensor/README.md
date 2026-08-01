@@ -60,11 +60,9 @@ is plugged into the Mac and that the Mac is awake.
 - **Be careful screwing a sensor board down.** Several have broken this way. Let
   the case take the screws where possible.
 - **Be gentle with the USB ports.** Two have broken. Push straight in, slowly.
-- **Leave the tape inside the case.** It stops the board moving, which keeps
-  detection accurate.
-- **Mount the sensor toward the outer edge of the seat, not the middle.** It
-  picks up more movement there when the chair turns.
-- **Do not power a second receiver** while one is running.
+- **Leave the tape inside the case.**
+- **Mount the sensor toward the outer edge of the seat, not the middle.**
+- **Do not power a second receiver while one is running.**
 
 ---
 
