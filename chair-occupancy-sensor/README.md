@@ -39,21 +39,13 @@ the plastic case. It tells you whether that chair is working.
 
 | The light | The chair is | What to do |
 |---|---|---|
-| **Blinks once, every 3 seconds** | Working normally | Nothing |
-| **Blinking fast, without stopping** | Working, but something is wrong with it | See below |
-| **Completely dark** | Not running at all | Charge it |
+| **Blinks once, every 3 seconds** | Working normally |  |
+| **Blinking fast, without stopping** | Reporting an error | See below |
+| **Completely dark** | Not running | Charge |
 
-**A charge lasts about 20 hours**, so charging overnight is sufficient. A chair
-that goes dark or stops reporting has a flat battery: that is the expected way
-it fails, not a fault.
+**A charge lasts about 20 hours**
 
-**If one chair is blinking fast**, it is still sending data and the rest of the
-system is unaffected. That chair has detected a problem with itself. Note which
-one it is and carry on. It only becomes urgent if it also stops reporting.
-
-**If every chair is blinking fast at the same time**, the chairs are not the
-problem. It means none of them can reach the receiver. Check that the receiver
-is plugged into the Mac and that the Mac is awake.
+**If every chair is blinking fast at once**, check the receiver.
 
 ## Best practices
 
@@ -78,8 +70,7 @@ is plugged into the Mac and that the Mac is awake.
 
 ## All chairs are offline
 
-This is not a problem with the chairs. Either the receiver is unplugged or the
-serial capture has stopped.
+Either the receiver is unplugged, or the serial capture has stopped.
 
 **Wait two minutes first**: the timer job restarts the capture on its own. If it
 is still wrong after that, the receiver is probably unplugged. Plug it back in
@@ -92,32 +83,13 @@ wc -l ~/motion_log.txt; sleep 5; wc -l ~/motion_log.txt
 ```
 
 It should climb by about **280 every 5 seconds** (7 chairs x 8 per second).
-**If it does not climb, nothing downstream has current data.** This is the most
-important single check in the system, because a stopped capture is invisible
-everywhere else: no error is reported, and anything reading the feed simply
-holds its last values.
+**If it does not climb, nothing downstream has current data.**
 
 To force the capture to restart rather than waiting:
 
 ```bash
 chair-occupancy-sensor/tools/start_capture.sh
 ```
-
-It is safe to run any time. It does nothing when the capture is healthy, and
-reports what it found when it is not.
-
-## A chair reports occupied when empty
-
-The chair is being moved by something. In order:
-
-1. **Is anything on the seat?** A bag or a coat shifting counts as movement.
-2. **Is anything shaking it?** A door swinging nearby, a fan, or people walking
-   heavily past on a wooden floor will all do it.
-3. **Nudge the chair a few centimetres** and leave it. If it was picking up
-   vibration through the floor, that usually settles it.
-
-A few seconds of it while somebody brushes past is normal and clears on its own.
-It only matters if it stays that way with the room empty.
 
 ## Nothing downstream is reacting
 
@@ -128,12 +100,9 @@ this system is working and the problem is in whatever consumes the UDP feed.
 
 # Development
 
-Everything here is for a laptop, or for changing how the system behaves. None of
-it is needed to keep the system running.
-
 ## Manual startup
 
-On a machine without the timer job, the four pieces are started manually.
+Only needed if you are not on the Mac Mini (the one with the NASA sticker).
 
 **1. Switch the chairs on.** Power switch on the underside of each board.
 
@@ -201,11 +170,6 @@ test input is never mistaken for real chairs.
 **Chair identity lives in the receiver, not in the chair firmware.** Every ESP32
 has a permanent factory MAC address, and `firmware/receiver_esp_now.ino` maps
 each one to a chair number.
-
-This means every chair runs **identical firmware**, a board cannot lose its
-identity by being reflashed, and renumbering chairs is a two-line edit rather
-than unmounting boards. That last point matters because unmounting is what
-physically broke boards in July.
 
 Boards are labelled with the **last two octets** of their MAC, for example
 `B5:54` for chair 1. Two boards in this fleet differ only in the middle of their
@@ -310,16 +274,6 @@ Notes for implementers:
   chair.
 - UDP can drop packets. Another arrives within 17ms, so never block waiting for
   one.
-
-### Known gaps
-
-> **Nothing consumes the UDP feed yet.** `controller.py` publishes it, but no
-> downstream program listens. Connecting one is a change on that side, using the
-> snippet above.
-
-> **The `REGIMES` list is unverified.** It is inherited from the original
-> `controller.py` and has never been checked against what the physical chairs are
-> meant to represent. Only the labels are affected, not the detection.
 
 ---
 

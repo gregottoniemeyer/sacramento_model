@@ -8,12 +8,13 @@ every failure and what it turned out to be, every decision that was made and
 then measured. It exists so the same problems are not solved twice, and so a
 claim in the README can be traced back to the evidence behind it.
 
-Four sections:
+Five sections:
 
 1. **Setting up an installation host from scratch** (the long form)
 2. **Cutting the charging notch** (the one-off enclosure job)
 3. **Why the occupancy model is not the algorithm originally specified**
 4. **Engineering notes**: parts, decisions, faults and fixes, in date order
+5. **Open items**: what is unfinished
 
 ---
 
@@ -1349,3 +1350,21 @@ battery-efficiency firmware (item 4 below).
      check on a mounted board: measure 3V3-to-GND at the module on
      battery.
 
+
+---
+
+# 5. Open items as of 2026-07-31
+
+**Nothing consumes the UDP feed yet.** `controller.py` publishes chair state on
+UDP 5005, but no downstream program listens for it. Connecting one is a change
+on the consumer side; the six-line receiver is in the README under Integration.
+
+**The `REGIMES` list is unverified.** It is inherited from the original
+`controller.py` and has never been checked against what the physical chairs are
+meant to represent. Only the labels are affected, not the detection.
+
+**The cases have no charging notch.** Reaching the micro-USB port means
+unscrewing each chair. See section 2 above.
+
+**One more 5-pack of micro-USB cables is needed.** The original order was a
+single 5-pack; charging all seven at once takes seven cables.
