@@ -154,6 +154,9 @@ SALMON_LINE_WIDTH = 2.0
 SALMON_FADE_SECONDS = 0.5
 SALMON_HISTORY_POINTS = 160
 SALMON_MOTION_THRESHOLD_PX = 1.0
+SALMON_RETURN_RATE = 0.75
+SALMON_DAM_APPROACH_PX = 14.0
+SALMON_DAM_PASSAGE_SPEED_PX = 180.0
 SALMON_SPAWN_OFFSET = 0.05 * WORLD_SCALE
 SALMON_WATER_RADIUS_PX = 10.0
 SALMON_LOOKAHEAD_PX = 8.0
@@ -162,6 +165,12 @@ GATE_TOGGLE_KEY = "g"
 GATE_NARROW_KEY = "["
 GATE_WIDEN_KEY = "]"
 GATE_WIDTH_STEP = 0.05 * WORLD_SCALE
+# At a fully open gate, retained lines accumulate this many release-progress
+# units per second. Aperture scales the rate linearly; every nonzero aperture
+# therefore releases all retained lines eventually.
+RESERVOIR_RELEASE_RATE = 2.0
+RESERVOIR_RELEASE_THRESHOLD_MIN = 0.5
+RESERVOIR_RELEASE_THRESHOLD_MAX = 1.5
 ACTIVE_RESERVOIR_INDEX = 0
 VISIBILITY_TOGGLE_KEY = "v"
 DEBUG_GEOMETRY_VISIBLE = True
@@ -304,49 +313,49 @@ ABSORBERS = [
         8.5,
         width=0.5,
         height=0.5,
-        absorption_fraction=1.0,
+        absorption_fraction=0.6,
     ),
     Absorber(
         3.5,
         7.5,
         width=0.5,
         height=0.5,
-        absorption_fraction=1.0,
+        absorption_fraction=0.6,
     ),
     Absorber(
         3.5,
         6.5,
         width=0.5,
         height=0.5,
-        absorption_fraction=1.0,
+        absorption_fraction=0.6,
     ),
     Absorber(
         3.5,
         5.5,
         width=0.5,
         height=0.5,
-        absorption_fraction=1.0,
+        absorption_fraction=0.6,
     ),
     Absorber(
         3.5,
         4.5,
         width=0.5,
         height=0.5,
-        absorption_fraction=1.0,
+        absorption_fraction=0.6,
     ),
     Absorber(
         3.5,
         3.5,
         width=0.5,
         height=0.5,
-        absorption_fraction=1.0,
+        absorption_fraction=0.6,
     ),
     Absorber(
         3.5,
         2.5,
         width=0.5,
         height=0.5,
-        absorption_fraction=1.0,
+        absorption_fraction=0.6,
     ),
 
     Absorber(
@@ -354,7 +363,14 @@ ABSORBERS = [
         1.5,
         width=0.5,
         height=0.5,
-        absorption_fraction=1.0,
+        absorption_fraction=0.6,
+    ),
+        Absorber(
+        3.5,
+        0.5,
+        width=0.5,
+        height=0.5,
+        absorption_fraction=0.6,
     ),
 ]
 
@@ -626,12 +642,22 @@ def particle_separation_force(points: np.ndarray) -> np.ndarray:
     return force
 
 
+def reservoir_gate_fraction(reservoir: Reservoir) -> float:
+    """Return normalized aperture from closed (0) to full diameter (1)."""
+    return float(np.clip(
+        reservoir.outlet_width / (2.0 * reservoir.radius),
+        0.0,
+        1.0,
+    ))
+
+
 def reservoir_force(
     points: np.ndarray,
     reservoir: Reservoir,
+    reservoir_index: int,
     particle_indices: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Pool lines and pass only the gate-width share through the outlet."""
+    """Pool lines until their aperture-controlled release becomes ready."""
     if particle_indices is None:
         particle_indices = np.arange(len(points), dtype=np.intp)
     else:
@@ -658,19 +684,12 @@ def reservoir_force(
         & (np.abs(local[:, 1]) <= half_gate_width)
     )
 
-    # Gate width controls throughput as a fraction of the full catchment
-    # diameter.  A low-discrepancy sequence assigns each trail a stable value,
-    # so repeated laps cannot eventually allow every trail to escape.
-    gate_fraction = np.clip(
-        reservoir.outlet_width / (2.0 * reservoir.radius),
-        0.0,
-        1.0,
+    # Readiness is latched: aperture controls how quickly it is reached, but a
+    # ready line stays eligible through subsequent laps until it finds the gap.
+    selected_for_release = (
+        reservoir_release_ready[particle_indices]
+        & (retained_reservoir_indices[particle_indices] == reservoir_index)
     )
-    gate_sample = np.mod(
-        particle_indices * 0.6180339887498949,
-        1.0,
-    )
-    selected_for_release = gate_sample < gate_fraction
     usable_gate = in_gate & reservoir.gate_open & selected_for_release
 
     release = inside & usable_gate
@@ -756,6 +775,7 @@ def reservoir_force(
 def reservoir_pooling_mask(
     points: np.ndarray,
     reservoir: Reservoir,
+    reservoir_index: int,
     particle_indices: np.ndarray,
 ) -> np.ndarray:
     """Return source heads retained by this reservoir at these positions."""
@@ -772,20 +792,15 @@ def reservoir_pooling_mask(
         (local[:, 0] >= 0.0)
         & (np.abs(local[:, 1]) <= half_gate_width)
     )
-    gate_fraction = np.clip(
-        reservoir.outlet_width / (2.0 * reservoir.radius),
-        0.0,
-        1.0,
-    )
-    gate_sample = np.mod(
-        particle_indices * 0.6180339887498949,
-        1.0,
+    selected_for_release = (
+        reservoir_release_ready[particle_indices]
+        & (retained_reservoir_indices[particle_indices] == reservoir_index)
     )
     released = (
         inside
         & in_gate
         & reservoir.gate_open
-        & (gate_sample < gate_fraction)
+        & selected_for_release
     )
     return inside & ~released
 
@@ -882,24 +897,31 @@ def velocity_field(
             obstacle.influence,
         )
 
-    for reservoir in RESERVOIRS:
+    for reservoir_index, reservoir in enumerate(RESERVOIRS):
         velocity += reservoir_force(
             points,
             reservoir,
+            reservoir_index,
             particle_indices,
         )
 
-    # Map every line's varied normalized flow to its own visual speed.  The
-    # complete field is scaled, so the variation also applies naturally to
-    # reservoir circulation and obstacle deflections.
-    if FLOW_RATE == 0.0:
-        particle_flow_rates = np.zeros(len(points))
-    else:
-        particle_flow_rates = np.clip(
-            FLOW_RATE + particle_flow_offsets[particle_indices],
-            MIN_ACTIVE_PARTICLE_FLOW,
-            1.0,
-        )
+    # Lines retired by a flow-rate reduction keep their previous speed until
+    # their complete tails leave the frame. All other lines use the live rate.
+    base_flow_rates = np.full(len(points), FLOW_RATE)
+    retirement_overrides = retirement_flow_rates[particle_indices]
+    has_retirement_override = np.isfinite(retirement_overrides)
+    base_flow_rates[has_retirement_override] = retirement_overrides[
+        has_retirement_override
+    ]
+
+    particle_flow_rates = np.zeros(len(points))
+    flowing = base_flow_rates > 0.0
+    particle_flow_rates[flowing] = np.clip(
+        base_flow_rates[flowing]
+        + particle_flow_offsets[particle_indices[flowing]],
+        MIN_ACTIVE_PARTICLE_FLOW,
+        1.0,
+    )
     # MAX_FLOW_SPEED remains the user-facing 0..10 value. WORLD_SCALE converts
     # it to the new 16 x 9 coordinate system without changing pixel velocity.
     particle_max_speeds = (
@@ -967,8 +989,19 @@ particle_launch_times_ms = np.full(PARTICLE_POOL_SIZE, np.inf)
 particle_launch_times_ms[:NUM_PARTICLES] = (
     np.arange(NUM_PARTICLES) * PARTICLE_LAUNCH_DELAY_MS
 )
+# A finite value preserves the speed a source had when it was retired by a
+# runtime flow reduction. NaN means that the slot follows the live FLOW_RATE.
+retirement_flow_rates = np.full(PARTICLE_POOL_SIZE, np.nan)
 retained = np.zeros(PARTICLE_POOL_SIZE, dtype=bool)
 retention_birth_ms = np.full(PARTICLE_POOL_SIZE, np.inf)
+retained_reservoir_indices = np.full(
+    PARTICLE_POOL_SIZE,
+    -1,
+    dtype=np.intp,
+)
+reservoir_release_progress = np.zeros(PARTICLE_POOL_SIZE)
+reservoir_release_thresholds = np.full(PARTICLE_POOL_SIZE, np.inf)
+reservoir_release_ready = np.zeros(PARTICLE_POOL_SIZE, dtype=bool)
 
 DATA_UNITS_PER_PIXEL = WIDTH / OUTPUT_WIDTH_PX
 SALMON_LENGTH_DATA = SALMON_LENGTH_PX * DATA_UNITS_PER_PIXEL
@@ -979,7 +1012,15 @@ SALMON_LOOKAHEAD_DATA = SALMON_LOOKAHEAD_PX * DATA_UNITS_PER_PIXEL
 SALMON_MOTION_THRESHOLD_DATA = (
     SALMON_MOTION_THRESHOLD_PX * DATA_UNITS_PER_PIXEL
 )
+SALMON_DAM_APPROACH_DATA = SALMON_DAM_APPROACH_PX * DATA_UNITS_PER_PIXEL
+SALMON_DAM_PASSAGE_SPEED_DATA = (
+    SALMON_DAM_PASSAGE_SPEED_PX * DATA_UNITS_PER_PIXEL
+)
 WATER_GRID_CELL_SIZE = WATER_GRID_CELL_PX * DATA_UNITS_PER_PIXEL
+
+SALMON_STATE_UPSTREAM = 0
+SALMON_STATE_ENTERING = 1
+SALMON_STATE_RETREATING = 2
 
 salmon_positions = np.full((MAX_SALMON, 2), np.nan)
 salmon_trails = np.full(
@@ -990,6 +1031,12 @@ salmon_active = np.zeros(MAX_SALMON, dtype=bool)
 salmon_fading = np.zeros(MAX_SALMON, dtype=bool)
 salmon_fade_started_ms = np.full(MAX_SALMON, np.nan)
 salmon_birth_ms = np.full(MAX_SALMON, -np.inf)
+salmon_states = np.full(MAX_SALMON, SALMON_STATE_UPSTREAM, dtype=np.int8)
+salmon_reservoir_indices = np.full(MAX_SALMON, -1, dtype=np.intp)
+salmon_passed_reservoir = np.zeros(
+    (MAX_SALMON, len(RESERVOIRS)),
+    dtype=bool,
+)
 salmon_source_indices = np.arange(MAX_SALMON) % MAX_PARTICLES
 salmon_rgba = to_rgba_array(
     rng.choice(SALMON_COLORS, size=MAX_SALMON)
@@ -1009,6 +1056,33 @@ def reset_particles(indices: np.ndarray) -> None:
     absorber_indices[indices] = -1
     absorption_target_x[indices] = np.nan
     absorbed[indices] = False
+    retirement_flow_rates[indices] = np.nan
+    retained_reservoir_indices[indices] = -1
+    reservoir_release_progress[indices] = 0.0
+    reservoir_release_thresholds[indices] = np.inf
+    reservoir_release_ready[indices] = False
+
+
+def deactivate_source_particles(indices: np.ndarray) -> None:
+    """Free completed source slots that are above the current spawn target."""
+    indices = np.asarray(indices, dtype=np.intp)
+    if len(indices) == 0:
+        return
+
+    positions[indices] = np.nan
+    trails[indices] = np.nan
+    retiring[indices] = False
+    absorber_indices[indices] = -1
+    absorption_target_x[indices] = np.nan
+    absorbed[indices] = False
+    particle_launch_times_ms[indices] = np.inf
+    retirement_flow_rates[indices] = np.nan
+    retained_reservoir_indices[indices] = -1
+    reservoir_release_progress[indices] = 0.0
+    reservoir_release_thresholds[indices] = np.inf
+    reservoir_release_ready[indices] = False
+    for particle_index in indices:
+        trail_lines[particle_index].set_data([], [])
 
 
 def deactivate_retained_particles(indices: np.ndarray) -> None:
@@ -1024,8 +1098,13 @@ def deactivate_retained_particles(indices: np.ndarray) -> None:
     absorption_target_x[indices] = np.nan
     absorbed[indices] = False
     particle_launch_times_ms[indices] = np.inf
+    retirement_flow_rates[indices] = np.nan
     retained[indices] = False
     retention_birth_ms[indices] = np.inf
+    retained_reservoir_indices[indices] = -1
+    reservoir_release_progress[indices] = 0.0
+    reservoir_release_thresholds[indices] = np.inf
+    reservoir_release_ready[indices] = False
     for particle_index in indices:
         trail_lines[particle_index].set_data([], [])
 
@@ -1055,6 +1134,7 @@ def claim_retention_slots(count: int, elapsed_ms: float) -> np.ndarray:
 
 def retain_source_particles(
     source_indices: np.ndarray,
+    reservoir_index: int,
     elapsed_ms: float,
     new_trail_points: np.ndarray,
     substep: int,
@@ -1088,8 +1168,18 @@ def retain_source_particles(
         particle_flow_offsets[retention_index] = particle_flow_offsets[
             source_index
         ]
+        retirement_flow_rates[retention_index] = retirement_flow_rates[
+            source_index
+        ]
         particle_launch_times_ms[retention_index] = elapsed_ms
         retained[retention_index] = True
+        retained_reservoir_indices[retention_index] = reservoir_index
+        reservoir_release_progress[retention_index] = 0.0
+        reservoir_release_thresholds[retention_index] = rng.uniform(
+            RESERVOIR_RELEASE_THRESHOLD_MIN,
+            RESERVOIR_RELEASE_THRESHOLD_MAX,
+        )
+        reservoir_release_ready[retention_index] = False
         retiring[retention_index] = False
         absorbed[retention_index] = False
         newly_retained_steps[retention_index] = substep
@@ -1104,13 +1194,23 @@ def retain_source_particles(
         retained_line.set_markerfacecolor(line_colors[source_index])
         retained_line.set_markeredgecolor(line_colors[source_index])
 
-    # These fixed source slots are immediately available for new inlet water.
+    # Reopen only source slots still included in the current flow target. A
+    # source retired by a rate reduction ends here while its copied history
+    # continues naturally as retained reservoir water.
     transferred_sources = source_indices[:len(retention_indices)]
-    reset_particles(transferred_sources)
-    particle_launch_times_ms[transferred_sources] = elapsed_ms
-    new_trail_points[transferred_sources, :substep + 1] = positions[
-        transferred_sources, None, :
+    continuing_sources = transferred_sources[
+        transferred_sources < NUM_PARTICLES
     ]
+    ending_sources = transferred_sources[
+        transferred_sources >= NUM_PARTICLES
+    ]
+    reset_particles(continuing_sources)
+    particle_launch_times_ms[continuing_sources] = elapsed_ms
+    new_trail_points[continuing_sources, :substep + 1] = positions[
+        continuing_sources, None, :
+    ]
+    deactivate_source_particles(ending_sources)
+    new_trail_points[ending_sources] = np.nan
 
 
 def transfer_new_reservoir_water(
@@ -1122,23 +1222,58 @@ def transfer_new_reservoir_water(
 ) -> None:
     """Detach newly pooled source lines from their reusable inlet slots."""
     eligible = np.asarray(source_indices, dtype=np.intp)
-    for reservoir in RESERVOIRS:
+    for reservoir_index, reservoir in enumerate(RESERVOIRS):
         if len(eligible) == 0:
             return
         pooling = reservoir_pooling_mask(
             positions[eligible],
             reservoir,
+            reservoir_index,
             eligible,
         )
         captured = eligible[pooling]
         retain_source_particles(
             captured,
+            reservoir_index,
             elapsed_ms,
             new_trail_points,
             substep,
             newly_retained_steps,
         )
         eligible = eligible[~pooling]
+
+
+def update_reservoir_release_progress(
+    particle_indices: np.ndarray,
+    timestep: float,
+) -> None:
+    """Advance retained lines toward release at the live aperture rate."""
+    particle_indices = np.asarray(particle_indices, dtype=np.intp)
+    retained_indices = particle_indices[retained[particle_indices]]
+    if len(retained_indices) == 0:
+        return
+
+    for reservoir_index, reservoir in enumerate(RESERVOIRS):
+        if not reservoir.gate_open:
+            continue
+        aperture = reservoir_gate_fraction(reservoir)
+        if aperture <= 0.0:
+            continue
+
+        waiting = retained_indices[
+            (retained_reservoir_indices[retained_indices] == reservoir_index)
+            & ~reservoir_release_ready[retained_indices]
+        ]
+        if len(waiting) == 0:
+            continue
+
+        reservoir_release_progress[waiting] += (
+            aperture * RESERVOIR_RELEASE_RATE * timestep
+        )
+        reservoir_release_ready[waiting] = (
+            reservoir_release_progress[waiting]
+            >= reservoir_release_thresholds[waiting]
+        )
 
 
 def absorber_bounds(
@@ -1379,6 +1514,9 @@ def release_salmon() -> None:
     salmon_fading[slots] = False
     salmon_fade_started_ms[slots] = np.nan
     salmon_birth_ms[slots] = current_elapsed_ms
+    salmon_states[slots] = SALMON_STATE_UPSTREAM
+    salmon_reservoir_indices[slots] = -1
+    salmon_passed_reservoir[slots] = False
     salmon_rgba[slots] = to_rgba_array(
         rng.choice(SALMON_COLORS, size=SALMON_PER_RELEASE)
     )
@@ -1621,8 +1759,96 @@ salmon_collection = LineCollection(
 ax.add_collection(salmon_collection)
 
 
+def resolve_salmon_reservoir_encounters(
+    candidate_slots: np.ndarray,
+) -> None:
+    """Immediately choose whether salmon return or enter at a dam wall."""
+    candidate_slots = np.asarray(candidate_slots, dtype=np.intp)
+    for reservoir_index, reservoir in enumerate(RESERVOIRS):
+        eligible = candidate_slots[
+            (salmon_states[candidate_slots] == SALMON_STATE_UPSTREAM)
+            & ~salmon_passed_reservoir[candidate_slots, reservoir_index]
+        ]
+        if len(eligible) == 0:
+            continue
+
+        local = salmon_positions[eligible] - np.array(
+            (reservoir.x, reservoir.y)
+        )
+        distance = np.linalg.norm(local, axis=1)
+        approaching_face = (
+            (local[:, 0] >= 0.0)
+            & (np.abs(distance - reservoir.radius) <= SALMON_DAM_APPROACH_DATA)
+        )
+        starting = eligible[approaching_face]
+        if len(starting) == 0:
+            continue
+
+        returning = rng.random(len(starting)) < np.clip(
+            SALMON_RETURN_RATE,
+            0.0,
+            1.0,
+        )
+        returning_slots = starting[returning]
+        entering_slots = starting[~returning]
+        salmon_states[returning_slots] = SALMON_STATE_RETREATING
+        salmon_states[entering_slots] = SALMON_STATE_ENTERING
+        salmon_reservoir_indices[entering_slots] = reservoir_index
+
+
+def update_entering_salmon(
+    timestep: float,
+    new_samples: np.ndarray,
+    substep: int,
+    frame_travel_distance: np.ndarray,
+    state_changed_this_frame: np.ndarray,
+) -> None:
+    """Carry non-returning salmon directly into the reservoir swirl."""
+    for reservoir_index, reservoir in enumerate(RESERVOIRS):
+        slots = np.flatnonzero(
+            salmon_active
+            & ~salmon_fading
+            & (salmon_states == SALMON_STATE_ENTERING)
+            & (salmon_reservoir_indices == reservoir_index)
+        )
+        if len(slots) == 0:
+            continue
+
+        center = np.array((reservoir.x, reservoir.y))
+        local = salmon_positions[slots] - center
+        radial, _ = safe_normalize(local, minimum=1e-8)
+        target = center + radial * (reservoir.radius * 0.65)
+        toward_target = target - salmon_positions[slots]
+        direction, remaining = safe_normalize(
+            toward_target,
+            minimum=1e-8,
+        )
+        step = np.minimum(
+            SALMON_DAM_PASSAGE_SPEED_DATA * timestep,
+            remaining,
+        )
+        proposed = salmon_positions[slots] + direction * step[:, None]
+
+        frame_travel_distance[slots] += np.linalg.norm(
+            proposed - salmon_positions[slots],
+            axis=1,
+        )
+        salmon_positions[slots] = proposed
+        new_samples[slots, substep] = proposed
+
+        entered = slots[
+            np.linalg.norm(salmon_positions[slots] - center, axis=1)
+            <= reservoir.radius * 0.72
+        ]
+        if len(entered) > 0:
+            salmon_passed_reservoir[entered, reservoir_index] = True
+            salmon_states[entered] = SALMON_STATE_UPSTREAM
+            salmon_reservoir_indices[entered] = -1
+            state_changed_this_frame[entered] = True
+
+
 def update_salmon(frame: int, frame_end_ms: float) -> None:
-    """Move salmon upstream while water exists ahead, otherwise fade them."""
+    """Move salmon upstream, into reservoirs, or back downstream."""
     if not np.any(salmon_active):
         return
 
@@ -1630,14 +1856,15 @@ def update_salmon(frame: int, frame_end_ms: float) -> None:
     substep_dt = DT / SIMULATION_SUBSTEPS
     frame_start_positions = salmon_positions.copy()
     frame_travel_distance = np.zeros(MAX_SALMON)
+    state_changed_this_frame = np.zeros(MAX_SALMON, dtype=bool)
     new_samples = np.full(
         (MAX_SALMON, SIMULATION_SUBSTEPS, 2),
         np.nan,
     )
 
     for substep in range(SIMULATION_SUBSTEPS):
-        moving_slots = np.flatnonzero(salmon_active & ~salmon_fading)
-        if len(moving_slots) == 0:
+        active_slots = np.flatnonzero(salmon_active & ~salmon_fading)
+        if len(active_slots) == 0:
             break
 
         time_value = frame * DT + substep * substep_dt
@@ -1645,26 +1872,58 @@ def update_salmon(frame: int, frame_end_ms: float) -> None:
             frame * INTERVAL_MS
             + substep * INTERVAL_MS / SIMULATION_SUBSTEPS
         )
-        source_indices = salmon_source_indices[moving_slots]
+        upstream_candidates = active_slots[
+            salmon_states[active_slots] == SALMON_STATE_UPSTREAM
+        ]
+        resolve_salmon_reservoir_encounters(
+            upstream_candidates,
+        )
+        update_entering_salmon(
+            substep_dt,
+            new_samples,
+            substep,
+            frame_travel_distance,
+            state_changed_this_frame,
+        )
 
-        # Negating the complete water field traces the same stream geometry in
-        # the upstream direction at the corresponding water speed.
-        upstream_velocity = -velocity_field(
-            salmon_positions[moving_slots],
+        field_slots = np.flatnonzero(
+            salmon_active
+            & ~salmon_fading
+            & ~state_changed_this_frame
+            & (
+                (salmon_states == SALMON_STATE_UPSTREAM)
+                | (salmon_states == SALMON_STATE_RETREATING)
+            )
+        )
+        if len(field_slots) == 0:
+            continue
+
+        source_indices = salmon_source_indices[field_slots]
+        direction_sign = np.where(
+            salmon_states[field_slots] == SALMON_STATE_RETREATING,
+            1.0,
+            -1.0,
+        )
+        field_velocity = velocity_field(
+            salmon_positions[field_slots],
             time_value,
             particle_indices=source_indices,
         )
+        travel_velocity = field_velocity * direction_sign[:, None]
         midpoint = (
-            salmon_positions[moving_slots]
-            + upstream_velocity * substep_dt * 0.5
+            salmon_positions[field_slots]
+            + travel_velocity * substep_dt * 0.5
         )
-        midpoint_velocity = -velocity_field(
+        midpoint_field_velocity = velocity_field(
             midpoint,
             time_value + substep_dt * 0.5,
             particle_indices=source_indices,
         )
+        midpoint_velocity = (
+            midpoint_field_velocity * direction_sign[:, None]
+        )
         proposed = (
-            salmon_positions[moving_slots]
+            salmon_positions[field_slots]
             + midpoint_velocity * substep_dt
         )
         travel_direction, travel_speed = safe_normalize(
@@ -1675,21 +1934,33 @@ def update_salmon(frame: int, frame_end_ms: float) -> None:
         has_water = points_have_water(ahead, water_grid)
         has_water &= travel_speed > 1e-8
 
-        # Reaching the upstream edge is a successful exit, not a loss of
-        # water. Once the head is at the boundary, let the complete short body
-        # continue off-screen before recycling its slot.
+        upstream = salmon_states[field_slots] == SALMON_STATE_UPSTREAM
+        retreating = (
+            salmon_states[field_slots] == SALMON_STATE_RETREATING
+        )
+        # Once an exiting head reaches either boundary, let the complete short
+        # body continue off-screen even though the occupancy grid ends there.
         leaving_upstream = (
-            salmon_positions[moving_slots, 0]
-            <= SALMON_WATER_RADIUS_DATA
-        ) & (midpoint_velocity[:, 0] < 0.0)
-        has_water |= leaving_upstream
+            upstream
+            & (salmon_positions[field_slots, 0] <= SALMON_WATER_RADIUS_DATA)
+            & (midpoint_velocity[:, 0] < 0.0)
+        )
+        leaving_downstream = (
+            retreating
+            & (
+                salmon_positions[field_slots, 0]
+                >= WIDTH - SALMON_WATER_RADIUS_DATA
+            )
+            & (midpoint_velocity[:, 0] > 0.0)
+        )
+        has_water |= leaving_upstream | leaving_downstream
 
-        stranded_slots = moving_slots[~has_water]
+        stranded_slots = field_slots[~has_water]
         if len(stranded_slots) > 0:
             salmon_fading[stranded_slots] = True
             salmon_fade_started_ms[stranded_slots] = elapsed_ms
 
-        swimming_slots = moving_slots[has_water]
+        swimming_slots = field_slots[has_water]
         if len(swimming_slots) > 0:
             frame_travel_distance[swimming_slots] += np.linalg.norm(
                 proposed[has_water] - salmon_positions[swimming_slots],
@@ -1702,7 +1973,15 @@ def update_salmon(frame: int, frame_end_ms: float) -> None:
     # Treat motion of one pixel or less over the complete displayed frame as
     # stalled. Preserve its existing body instead of replacing it with twenty
     # nearly identical substep samples, then use the normal fade lifecycle.
-    motion_candidates = np.flatnonzero(salmon_active & ~salmon_fading)
+    motion_candidates = np.flatnonzero(
+        salmon_active
+        & ~salmon_fading
+        & ~state_changed_this_frame
+        & (
+            (salmon_states == SALMON_STATE_UPSTREAM)
+            | (salmon_states == SALMON_STATE_RETREATING)
+        )
+    )
     stalled_slots = motion_candidates[
         frame_travel_distance[motion_candidates]
         <= SALMON_MOTION_THRESHOLD_DATA
@@ -1731,13 +2010,25 @@ def update_salmon(frame: int, frame_end_ms: float) -> None:
     for slot in np.flatnonzero(salmon_active & ~salmon_fading):
         path = salmon_trails[slot]
         finite_x = path[np.isfinite(path[:, 0]), 0]
-        if len(finite_x) > 0 and np.max(finite_x) < 0.0:
+        exited_upstream = (
+            salmon_states[slot] != SALMON_STATE_RETREATING
+            and len(finite_x) > 0
+            and np.max(finite_x) < 0.0
+        )
+        exited_downstream = (
+            salmon_states[slot] == SALMON_STATE_RETREATING
+            and len(finite_x) > 0
+            and np.min(finite_x) > WIDTH
+        )
+        if exited_upstream or exited_downstream:
             exited_slots.append(slot)
     if exited_slots:
         exited_slots = np.asarray(exited_slots, dtype=np.intp)
         salmon_active[exited_slots] = False
         salmon_positions[exited_slots] = np.nan
         salmon_trails[exited_slots] = np.nan
+        salmon_states[exited_slots] = SALMON_STATE_UPSTREAM
+        salmon_reservoir_indices[exited_slots] = -1
 
     fading_slots = np.flatnonzero(salmon_active & salmon_fading)
     if len(fading_slots) > 0:
@@ -1751,6 +2042,8 @@ def update_salmon(frame: int, frame_end_ms: float) -> None:
             salmon_positions[finished] = np.nan
             salmon_trails[finished] = np.nan
             salmon_fade_started_ms[finished] = np.nan
+            salmon_states[finished] = SALMON_STATE_UPSTREAM
+            salmon_reservoir_indices[finished] = -1
 
     display_colors = salmon_rgba.copy()
     display_colors[~salmon_active, 3] = 0.0
@@ -1790,7 +2083,7 @@ def update(frame: int):
     # lines use their stable orbit spread instead of joining this matrix.
     frame_separation_force = np.zeros((PARTICLE_POOL_SIZE, 2))
     frame_start_ms = frame * INTERVAL_MS
-    source_slots = np.arange(NUM_PARTICLES, dtype=np.intp)
+    source_slots = np.arange(MAX_PARTICLES, dtype=np.intp)
     separation_slots = source_slots[
         (particle_launch_times_ms[source_slots] <= frame_start_ms)
         & ~absorbed[source_slots]
@@ -1814,6 +2107,10 @@ def update(frame: int):
 
         if np.any(substep_active):
             active_indices = np.flatnonzero(substep_active)
+            update_reservoir_release_progress(
+                active_indices,
+                substep_dt,
+            )
             velocity = velocity_field(
                 positions[active_indices],
                 time_value,
@@ -1845,7 +2142,7 @@ def update(frame: int):
         source_candidates = np.flatnonzero(
             substep_active
             & ~absorbed
-            & (np.arange(PARTICLE_POOL_SIZE) < NUM_PARTICLES)
+            & (np.arange(PARTICLE_POOL_SIZE) < MAX_PARTICLES)
         )
         transfer_new_reservoir_water(
             source_candidates,
@@ -1910,11 +2207,14 @@ def update(frame: int):
     )
 
     reset_now = hard_reset | retired_and_gone
-    source_reset = np.flatnonzero(
-        reset_now & (np.arange(PARTICLE_POOL_SIZE) < NUM_PARTICLES)
+    completed_sources = np.flatnonzero(
+        reset_now & (np.arange(PARTICLE_POOL_SIZE) < MAX_PARTICLES)
     )
+    source_reset = completed_sources[completed_sources < NUM_PARTICLES]
+    source_end = completed_sources[completed_sources >= NUM_PARTICLES]
     retention_reset = np.flatnonzero(reset_now & retained)
     reset_particles(source_reset)
+    deactivate_source_particles(source_end)
     deactivate_retained_particles(retention_reset)
 
     update_salmon(frame, frame_end_ms)
@@ -1976,9 +2276,10 @@ def take_screenshot() -> Path:
 
 
 def set_flow_rate(flow_rate: float) -> None:
-    """Change speed and active trail count while the animation is running."""
+    """Change new-source flow while allowing excess lines to finish."""
     global FLOW_RATE, FLOW_SPEED, NUM_PARTICLES
 
+    old_flow_rate = FLOW_RATE
     old_count = NUM_PARTICLES
     new_count = particle_count_for_flow(flow_rate)
 
@@ -1988,39 +2289,61 @@ def set_flow_rate(flow_rate: float) -> None:
 
     if new_count > old_count:
         added_indices = np.arange(old_count, new_count)
-        reset_particles(added_indices)
-        particle_launch_times_ms[added_indices] = (
+        already_flowing = added_indices[
+            np.isfinite(particle_launch_times_ms[added_indices])
+        ]
+        inactive = added_indices[
+            ~np.isfinite(particle_launch_times_ms[added_indices])
+        ]
+
+        # A line that was still retiring simply rejoins the active source set.
+        retiring[already_flowing] = False
+        retirement_flow_rates[already_flowing] = np.nan
+
+        reset_particles(inactive)
+        particle_launch_times_ms[inactive] = (
             current_elapsed_ms
-            + np.arange(len(added_indices)) * PARTICLE_LAUNCH_DELAY_MS
+            + np.arange(len(inactive)) * PARTICLE_LAUNCH_DELAY_MS
         )
     elif new_count < old_count:
         removed_indices = np.arange(new_count, old_count)
-        for particle_index in removed_indices:
-            trail_lines[particle_index].set_data([], [])
-        particle_launch_times_ms[removed_indices] = np.inf
-        retiring[removed_indices] = False
+        existing = removed_indices[
+            particle_launch_times_ms[removed_indices] <= current_elapsed_ms
+        ]
+        not_yet_launched = removed_indices[
+            particle_launch_times_ms[removed_indices] > current_elapsed_ms
+        ]
+
+        # Existing excess lines keep their pre-change speed and stop respawning
+        # only after their complete visible trails have naturally left.
+        retiring[existing] = True
+        retirement_flow_rates[existing] = old_flow_rate
+        deactivate_source_particles(not_yet_launched)
+
+    active_source_count = np.count_nonzero(
+        particle_launch_times_ms[:MAX_PARTICLES] <= current_elapsed_ms
+    )
 
     print(
         f"Flow rate: {FLOW_RATE:.3f} | "
         f"speed: {FLOW_SPEED:.2f} | "
-        f"trails: {NUM_PARTICLES}"
+        f"source target: {NUM_PARTICLES} | "
+        f"currently visible/retiring: {active_source_count}"
     )
 
 
 def report_gate_state(reservoir_index: int) -> None:
-    """Print the active gate geometry and resulting release allocation."""
+    """Print active gate geometry and its accumulated release rate."""
     reservoir = RESERVOIRS[reservoir_index]
-    release_fraction = np.clip(
-        reservoir.outlet_width / (reservoir.radius * 2.0),
-        0.0,
-        1.0,
-    )
-    effective_fraction = release_fraction if reservoir.gate_open else 0.0
+    aperture = reservoir_gate_fraction(reservoir)
+    effective_aperture = aperture if reservoir.gate_open else 0.0
+    progress_rate = effective_aperture * RESERVOIR_RELEASE_RATE
     state = "OPEN" if reservoir.gate_open else "CLOSED"
     print(
         f"Reservoir {reservoir_index + 1} gate: {state} | "
         f"width: {reservoir.outlet_width:.2f} | "
-        f"release: {effective_fraction:.1%}"
+        f"aperture: {effective_aperture:.1%} | "
+        f"release rate: {progress_rate:.2f}/s"
     )
 
 
