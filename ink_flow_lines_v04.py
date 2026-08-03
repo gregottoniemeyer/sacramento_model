@@ -2,7 +2,11 @@
 ink_flow_lines_v04.py
 
 Animated 2D graphic flow lines moving around circular, rectangular,
-and polygonal obstacles, absorbers, and reservoirs.
+and polygonal obstacles, shoreline polygons, absorbers, and reservoirs.
+
+Interactive releases:
+    S releases 25 upstream-swimming salmon.
+    L queues 25 rigid vesica-piscis leaves from each shoreline side.
 
 Optional export:
     Set SAVE_MP4 = True and install ffmpeg.
@@ -161,6 +165,31 @@ SALMON_SPAWN_OFFSET = 0.05 * WORLD_SCALE
 SALMON_WATER_RADIUS_PX = 10.0
 SALMON_LOOKAHEAD_PX = 8.0
 WATER_GRID_CELL_PX = 4.0
+LEAF_RELEASE_KEY = "l"
+LEAVES_PER_SIDE = 25
+MAX_LEAVES = 300
+LEAF_RELEASE_INTERVAL_MS = 50.0
+LEAF_ARC_POINT_COUNT = 7
+LEAF_POINT_COUNT = LEAF_ARC_POINT_COUNT * 2 - 1
+LEAF_LENGTH_MIN_PX = 18.0
+LEAF_LENGTH_MAX_PX = 30.0
+LEAF_LINE_WIDTH = 2.0
+# User-facing tuning value in pixels. It is converted to world units below.
+LEAF_COLLISION_RADIUS = 12.0
+LEAF_FALL_SPEED_PX = 120.0
+LEAF_SWAY_AMPLITUDE_MIN_PX = 6.0
+LEAF_SWAY_AMPLITUDE_MAX_PX = 18.0
+LEAF_SWAY_PERIOD_MIN_SECONDS = 1.2
+LEAF_SWAY_PERIOD_MAX_SECONDS = 2.8
+# Include both outline length and maximum sway so angled trajectories clear
+# the opposite frame edge completely before their slots are reclaimed.
+LEAF_EXIT_MARGIN_PX = (
+    LEAF_LENGTH_MAX_PX + LEAF_SWAY_AMPLITUDE_MAX_PX
+)
+LEAF_ROTATION_MIN_DEGREES_PER_FRAME = 0.1
+LEAF_ROTATION_MAX_DEGREES_PER_FRAME = 1.0
+LEAF_WATER_SAMPLE_STRIDE = 6
+LEAF_ATTACHMENT_CHECK_INTERVAL = 2
 GATE_TOGGLE_KEY = "g"
 GATE_NARROW_KEY = "["
 GATE_WIDEN_KEY = "]"
@@ -202,6 +231,18 @@ SALMON_COLORS = np.array([
     "#FFD23F",  # yellow
 ])
 
+# Muted foliage colors stay visually separate from the bright salmon and the
+# pale blue/green water palette.
+LEAF_COLORS = np.array([
+    "#8C3F0A",  # dark orange
+    "#A95412",
+    "#C47A12",
+    "#C29A18",  # ochre yellow
+    "#8A8F2A",
+    "#4F772D",  # leaf green
+    "#365F32",
+])
+
 # Riverbank settings
 SHORE_INFLUENCE = 0.85 * WORLD_SCALE
 SHORE_STRENGTH = 4.0 * WORLD_SCALE
@@ -210,6 +251,7 @@ SHORE_POWER = 2.0
 # their repulsion profiles are exact vertical mirrors.
 BOTTOM_SHORE_Y_OFFSET = 0.5 * WORLD_SCALE
 TOP_SHORE_Y_OFFSET = 0.5 * WORLD_SCALE
+SHORE_POLYGON_MARGIN = SHORE_INFLUENCE * 2.0
 
 SPAWN_Y_MARGIN = 0.15 * WORLD_SCALE
 
@@ -242,6 +284,24 @@ class PolygonObstacle:
     strength: float = 4.0 * WORLD_SCALE
     bend: float = 1.0 * WORLD_SCALE
     influence: float = 0.65 * WORLD_SCALE
+
+
+@dataclass(frozen=True)
+class ShorelinePolygon:
+    """Solid land polygon with an explicit water-facing boundary chain.
+
+    ``vertices`` define the closed land polygon. ``water_edge_indices`` name
+    consecutive vertices along the shoreline where leaves should fall. World
+    coordinates use x=0..16, y=0..9 with the origin at bottom left.
+    """
+
+    vertices: tuple[tuple[float, float], ...]
+    water_edge_indices: tuple[int, ...]
+    side: str
+    strength: float = SHORE_STRENGTH
+    influence: float = SHORE_INFLUENCE
+    power: float = SHORE_POWER
+    force_offset: float = 0.5 * WORLD_SCALE
 
 
 @dataclass(frozen=True)
@@ -302,6 +362,38 @@ RECTANGLE_OBSTACLES = [
 POLYGON_OBSTACLES = [
     # Vertices can define any non-self-intersecting polygon.
     #PolygonObstacle(((8.65, 3.05),(9.25, 3.25),(8.85, 3.75),),strength=1.5,bend=0.9,),
+]
+
+# These two default land polygons reproduce the previous straight top and
+# bottom banks. Edit the water-facing vertices (indices listed alongside each
+# polygon) to make either shoreline bend through the frame. Keep the outer
+# closure edges beyond the visible canvas so they do not steer the river.
+SHORELINE_POLYGONS = [
+    ShorelinePolygon(
+        vertices=(
+            (-SHORE_POLYGON_MARGIN, -SHORE_POLYGON_MARGIN),
+            (WIDTH + SHORE_POLYGON_MARGIN, -SHORE_POLYGON_MARGIN),
+            (WIDTH + SHORE_POLYGON_MARGIN, 0.0),
+            (-SHORE_POLYGON_MARGIN, 0.0),
+        ),
+        water_edge_indices=(2, 3),
+        side="bottom",
+        force_offset=BOTTOM_SHORE_Y_OFFSET,
+    ),
+    ShorelinePolygon(
+        vertices=(
+            (-SHORE_POLYGON_MARGIN, HEIGHT),
+            (WIDTH + SHORE_POLYGON_MARGIN, HEIGHT),
+            (
+                WIDTH + SHORE_POLYGON_MARGIN,
+                HEIGHT + SHORE_POLYGON_MARGIN,
+            ),
+            (-SHORE_POLYGON_MARGIN, HEIGHT + SHORE_POLYGON_MARGIN),
+        ),
+        water_edge_indices=(0, 1),
+        side="top",
+        force_offset=TOP_SHORE_Y_OFFSET,
+    ),
 ]
 
 # Absorption is assigned stably per trail. A selected trail enters the absorber,
@@ -408,41 +500,23 @@ particle_flow_offsets = (
 
 def shore_force(points: np.ndarray) -> np.ndarray:
     """
-    Push particles away from the top and bottom riverbanks.
+    Push particles out of the configured solid shoreline polygons.
 
     The force starts gently at SHORE_INFLUENCE distance and becomes
-    stronger as a particle approaches or crosses a shore.
+    stronger as a particle approaches or enters land.
     """
-    y = points[:, 1]
-
-    distance_from_bottom = y + BOTTOM_SHORE_Y_OFFSET
-    distance_from_top = HEIGHT + TOP_SHORE_Y_OFFSET - y
-
-    bottom_influence = np.clip(
-        (SHORE_INFLUENCE - distance_from_bottom) / SHORE_INFLUENCE,
-        0.0,
-        1.5,
-    )
-
-    top_influence = np.clip(
-        (SHORE_INFLUENCE - distance_from_top) / SHORE_INFLUENCE,
-        0.0,
-        1.5,
-    )
-
     force = np.zeros_like(points)
 
-    # Bottom shore pushes upward.
-    force[:, 1] += (
-        SHORE_STRENGTH
-        * bottom_influence ** SHORE_POWER
-    )
-
-    # Top shore pushes downward.
-    force[:, 1] -= (
-        SHORE_STRENGTH
-        * top_influence ** SHORE_POWER
-    )
+    for shoreline in SHORELINE_POLYGONS:
+        force += polygon_obstacle_force(
+            points,
+            np.asarray(shoreline.vertices, dtype=float),
+            shoreline.strength,
+            bend=0.0,
+            influence_distance=shoreline.influence,
+            influence_power=shoreline.power,
+            distance_offset=shoreline.force_offset,
+        )
 
     return force
 
@@ -513,6 +587,8 @@ def polygon_obstacle_force(
     strength: float,
     bend: float,
     influence_distance: float,
+    influence_power: float = 1.0,
+    distance_offset: float = 0.0,
 ) -> np.ndarray:
     """Push and steer particles around a rectangle or polygon boundary."""
     edge_starts = vertices
@@ -548,6 +624,9 @@ def polygon_obstacle_force(
     outward, distance = safe_normalize(nearest_offset, minimum=1e-8)
 
     inside = points_inside_polygon(points, vertices)
+    # Treat exact boundary samples as boundary rather than penetrations. This
+    # avoids applying the emergency inside push to water touching a shoreline.
+    inside &= distance >= 1e-8
     outward[inside] *= -1.0
 
     # Supply a stable normal for a point exactly on an edge.
@@ -571,11 +650,13 @@ def polygon_obstacle_force(
             minimum=1e-8,
         )
 
+    effective_distance = distance + distance_offset
     influence = np.clip(
-        (influence_distance - distance) / influence_distance,
+        (influence_distance - effective_distance) / influence_distance,
         0.0,
         1.0,
     )
+    influence = influence ** influence_power
     influence[inside] = 1.0
 
     force = outward * (influence * strength)[:, None]
@@ -940,6 +1021,44 @@ def velocity_field(
     return velocity
 
 
+def shoreline_spawn_channel() -> tuple[float, float]:
+    """Return the open-water y bounds where trails enter at the left edge."""
+    sample_x = float(np.clip(SPAWN_X, 0.0, WIDTH))
+    bottom_edge = 0.0
+    top_edge = HEIGHT
+
+    for shoreline in SHORELINE_POLYGONS:
+        vertices = np.asarray(shoreline.vertices, dtype=float)
+        intersections = []
+        for start, end in zip(vertices, np.roll(vertices, -1, axis=0)):
+            delta_x = end[0] - start[0]
+            if abs(delta_x) < 1e-12:
+                if abs(sample_x - start[0]) < 1e-12:
+                    intersections.extend((start[1], end[1]))
+                continue
+
+            fraction = (sample_x - start[0]) / delta_x
+            if 0.0 <= fraction <= 1.0:
+                intersections.append(
+                    start[1] + fraction * (end[1] - start[1])
+                )
+
+        if not intersections:
+            continue
+        if shoreline.side.lower() == "bottom":
+            bottom_edge = max(bottom_edge, max(intersections))
+        elif shoreline.side.lower() == "top":
+            top_edge = min(top_edge, min(intersections))
+
+    lower = max(0.0, bottom_edge) + SPAWN_Y_MARGIN
+    upper = min(HEIGHT, top_edge) - SPAWN_Y_MARGIN
+    if lower >= upper:
+        raise ValueError(
+            "Shoreline polygons leave no open spawn channel at the left edge."
+        )
+    return lower, upper
+
+
 def alternating_spawn_y(particle_indices: np.ndarray) -> np.ndarray:
     """
     Place trail slots center, above, below, above, below, and so on.
@@ -948,8 +1067,9 @@ def alternating_spawn_y(particle_indices: np.ndarray) -> np.ndarray:
     without moving the trails that were already present at lower flow rates.
     """
     particle_indices = np.asarray(particle_indices, dtype=np.intp)
-    center = HEIGHT * 0.5
-    half_span = center - SPAWN_Y_MARGIN
+    lower, upper = shoreline_spawn_channel()
+    center = (lower + upper) * 0.5
+    half_span = (upper - lower) * 0.5
     levels_per_side = math.ceil((MAX_PARTICLES - 1) / 2)
     level_spacing = half_span / max(1, levels_per_side)
 
@@ -1017,6 +1137,19 @@ SALMON_DAM_PASSAGE_SPEED_DATA = (
     SALMON_DAM_PASSAGE_SPEED_PX * DATA_UNITS_PER_PIXEL
 )
 WATER_GRID_CELL_SIZE = WATER_GRID_CELL_PX * DATA_UNITS_PER_PIXEL
+LEAF_COLLISION_RADIUS_DATA = (
+    LEAF_COLLISION_RADIUS * DATA_UNITS_PER_PIXEL
+)
+LEAF_LENGTH_MIN_DATA = LEAF_LENGTH_MIN_PX * DATA_UNITS_PER_PIXEL
+LEAF_LENGTH_MAX_DATA = LEAF_LENGTH_MAX_PX * DATA_UNITS_PER_PIXEL
+LEAF_EXIT_MARGIN_DATA = LEAF_EXIT_MARGIN_PX * DATA_UNITS_PER_PIXEL
+LEAF_FALL_SPEED_DATA = LEAF_FALL_SPEED_PX * DATA_UNITS_PER_PIXEL
+LEAF_SWAY_AMPLITUDE_MIN_DATA = (
+    LEAF_SWAY_AMPLITUDE_MIN_PX * DATA_UNITS_PER_PIXEL
+)
+LEAF_SWAY_AMPLITUDE_MAX_DATA = (
+    LEAF_SWAY_AMPLITUDE_MAX_PX * DATA_UNITS_PER_PIXEL
+)
 
 SALMON_STATE_UPSTREAM = 0
 SALMON_STATE_ENTERING = 1
@@ -1042,6 +1175,111 @@ salmon_rgba = to_rgba_array(
     rng.choice(SALMON_COLORS, size=MAX_SALMON)
 )
 
+LEAF_STATE_INACTIVE = 0
+LEAF_STATE_FALLING = 1
+LEAF_STATE_WAITING = 2
+LEAF_STATE_ATTACHED = 3
+LEAF_STATE_SCHEDULED = 4
+
+leaf_positions = np.full((MAX_LEAVES, 2), np.nan)
+leaf_transit_positions = np.full((MAX_LEAVES, 2), np.nan)
+leaf_targets = np.full((MAX_LEAVES, 2), np.nan)
+leaf_local_shapes = np.full(
+    (MAX_LEAVES, LEAF_POINT_COUNT, 2),
+    np.nan,
+)
+leaf_segments = np.full_like(leaf_local_shapes, np.nan)
+leaf_states = np.full(MAX_LEAVES, LEAF_STATE_INACTIVE, dtype=np.int8)
+leaf_angles = np.zeros(MAX_LEAVES)
+leaf_spin_rates = np.zeros(MAX_LEAVES)
+leaf_sway_amplitudes = np.zeros(MAX_LEAVES)
+leaf_sway_angular_frequencies = np.zeros(MAX_LEAVES)
+leaf_sway_phases = np.zeros(MAX_LEAVES)
+leaf_sway_offsets = np.zeros(MAX_LEAVES)
+leaf_water_slots = np.full(MAX_LEAVES, -1, dtype=np.intp)
+leaf_water_sample_indices = np.full(MAX_LEAVES, -1, dtype=np.intp)
+leaf_last_water_anchors = np.full((MAX_LEAVES, 2), np.nan)
+leaf_birth_ms = np.full(MAX_LEAVES, -np.inf)
+leaf_release_times_ms = np.full(MAX_LEAVES, np.inf)
+next_leaf_release_ms = 0.0
+leaf_rgba = to_rgba_array(
+    rng.choice(LEAF_COLORS, size=MAX_LEAVES)
+)
+
+
+def deactivate_leaves(indices: np.ndarray) -> None:
+    """Return leaf slots to the inactive pool without changing other leaves."""
+    indices = np.asarray(indices, dtype=np.intp)
+    if len(indices) == 0:
+        return
+
+    leaf_states[indices] = LEAF_STATE_INACTIVE
+    leaf_positions[indices] = np.nan
+    leaf_transit_positions[indices] = np.nan
+    leaf_targets[indices] = np.nan
+    leaf_local_shapes[indices] = np.nan
+    leaf_segments[indices] = np.nan
+    leaf_water_slots[indices] = -1
+    leaf_water_sample_indices[indices] = -1
+    leaf_last_water_anchors[indices] = np.nan
+    leaf_birth_ms[indices] = -np.inf
+    leaf_release_times_ms[indices] = np.inf
+    leaf_angles[indices] = 0.0
+    leaf_spin_rates[indices] = 0.0
+    leaf_sway_amplitudes[indices] = 0.0
+    leaf_sway_angular_frequencies[indices] = 0.0
+    leaf_sway_phases[indices] = 0.0
+    leaf_sway_offsets[indices] = 0.0
+
+
+def detach_leaves_from_water_slots(water_slots: np.ndarray) -> None:
+    """Remove leaves when the water trail carrying them is deleted."""
+    water_slots = np.asarray(water_slots, dtype=np.intp)
+    if len(water_slots) == 0:
+        return
+
+    attached = np.flatnonzero(
+        (leaf_states == LEAF_STATE_ATTACHED)
+        & np.isin(leaf_water_slots, water_slots)
+    )
+    if len(attached) == 0:
+        return
+
+    deactivate_leaves(attached)
+
+
+def migrate_leaf_attachments(
+    source_slot: int,
+    retention_slot: int,
+) -> None:
+    """Move leaf bindings when source water becomes reservoir water."""
+    attached = np.flatnonzero(
+        (leaf_states == LEAF_STATE_ATTACHED)
+        & (leaf_water_slots == source_slot)
+    )
+    if len(attached) == 0:
+        return
+
+    path = trails[retention_slot]
+    valid_indices = np.flatnonzero(
+        np.isfinite(path[:, 0]) & np.isfinite(path[:, 1])
+    )
+    if len(valid_indices) == 0:
+        detach_leaves_from_water_slots(np.array([source_slot]))
+        return
+
+    valid_points = path[valid_indices]
+    for leaf_index in attached:
+        distance_sq = np.sum(
+            (valid_points - leaf_positions[leaf_index]) ** 2,
+            axis=1,
+        )
+        nearest = int(np.argmin(distance_sq))
+        sample_index = valid_indices[nearest]
+        leaf_water_slots[leaf_index] = retention_slot
+        leaf_water_sample_indices[leaf_index] = sample_index
+        leaf_last_water_anchors[leaf_index] = path[sample_index]
+
 
 def reset_particles(indices: np.ndarray) -> None:
     global retiring
@@ -1049,6 +1287,7 @@ def reset_particles(indices: np.ndarray) -> None:
     if len(indices) == 0:
         return
 
+    detach_leaves_from_water_slots(indices)
     new_positions = spawn_positions(indices)
     positions[indices] = new_positions
     trails[indices, :, :] = new_positions[:, None, :]
@@ -1069,6 +1308,7 @@ def deactivate_source_particles(indices: np.ndarray) -> None:
     if len(indices) == 0:
         return
 
+    detach_leaves_from_water_slots(indices)
     positions[indices] = np.nan
     trails[indices] = np.nan
     retiring[indices] = False
@@ -1091,6 +1331,7 @@ def deactivate_retained_particles(indices: np.ndarray) -> None:
     if len(indices) == 0:
         return
 
+    detach_leaves_from_water_slots(indices)
     positions[indices] = np.nan
     trails[indices] = np.nan
     retiring[indices] = False
@@ -1193,6 +1434,8 @@ def retain_source_particles(
         retained_line.set_markersize(line_widths[source_index])
         retained_line.set_markerfacecolor(line_colors[source_index])
         retained_line.set_markeredgecolor(line_colors[source_index])
+
+        migrate_leaf_attachments(source_index, retention_index)
 
     # Reopen only source slots still included in the current flow target. A
     # source retired by a rate reduction ends here while its copied history
@@ -1542,6 +1785,611 @@ def trim_salmon_trail(slot: int) -> None:
     salmon_trails[slot, -len(kept):] = kept
 
 
+def shoreline_water_edge_geometry(
+    shoreline: ShorelinePolygon,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return starts, vectors, lengths, and waterward normals for one shore."""
+    vertices = np.asarray(shoreline.vertices, dtype=float)
+    indices = np.asarray(shoreline.water_edge_indices, dtype=np.intp)
+    if (
+        vertices.ndim != 2
+        or vertices.shape[1] != 2
+        or len(vertices) < 3
+        or len(indices) < 2
+        or np.any(indices < 0)
+        or np.any(indices >= len(vertices))
+    ):
+        raise ValueError(
+            "A shoreline needs at least three vertices and a valid "
+            "water_edge_indices chain."
+        )
+
+    adjacency = (indices[1:] - indices[:-1]) % len(vertices)
+    if np.any(adjacency != 1):
+        raise ValueError(
+            "water_edge_indices must follow adjacent polygon vertices in "
+            "the same forward order as vertices."
+        )
+
+    water_edge = vertices[indices]
+    starts = water_edge[:-1]
+    vectors = water_edge[1:] - water_edge[:-1]
+    lengths = np.linalg.norm(vectors, axis=1)
+    valid = lengths > 1e-9
+    starts = starts[valid]
+    vectors = vectors[valid]
+    lengths = lengths[valid]
+    if len(lengths) == 0:
+        raise ValueError("A shoreline water edge must contain a nonzero segment.")
+
+    signed_area = 0.5 * np.sum(
+        vertices[:, 0] * np.roll(vertices[:, 1], -1)
+        - np.roll(vertices[:, 0], -1) * vertices[:, 1]
+    )
+    if signed_area >= 0.0:
+        normals = np.column_stack((vectors[:, 1], -vectors[:, 0]))
+    else:
+        normals = np.column_stack((-vectors[:, 1], vectors[:, 0]))
+    normals /= lengths[:, None]
+    return starts, vectors, lengths, normals
+
+
+def clip_segment_to_viewport(
+    start: np.ndarray,
+    vector: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Clip one finite segment to the visible 16 by 9 simulation area."""
+    first_fraction = 0.0
+    last_fraction = 1.0
+
+    for coordinate, delta, lower, upper in (
+        (start[0], vector[0], 0.0, WIDTH),
+        (start[1], vector[1], 0.0, HEIGHT),
+    ):
+        if abs(delta) < 1e-12:
+            if coordinate < lower or coordinate > upper:
+                return None
+            continue
+
+        entry = (lower - coordinate) / delta
+        exit_ = (upper - coordinate) / delta
+        if entry > exit_:
+            entry, exit_ = exit_, entry
+        first_fraction = max(first_fraction, entry)
+        last_fraction = min(last_fraction, exit_)
+        if first_fraction > last_fraction:
+            return None
+
+    clipped_start = start + first_fraction * vector
+    clipped_vector = (last_fraction - first_fraction) * vector
+    return clipped_start, clipped_vector
+
+
+def sample_shoreline_release_points(
+    side: str,
+    count: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample leaf targets and waterward normals from one shoreline side."""
+    point_groups = []
+    normal_groups = []
+    sample_spacing = max(
+        LEAF_COLLISION_RADIUS_DATA * 0.5,
+        DATA_UNITS_PER_PIXEL,
+    )
+
+    for shoreline in SHORELINE_POLYGONS:
+        if shoreline.side.lower() != side.lower():
+            continue
+        starts, vectors, lengths, normals = shoreline_water_edge_geometry(
+            shoreline
+        )
+        for start, vector, length, normal in zip(
+            starts,
+            vectors,
+            lengths,
+            normals,
+        ):
+            clipped = clip_segment_to_viewport(start, vector)
+            if clipped is None:
+                continue
+            clipped_start, clipped_vector = clipped
+            clipped_length = np.linalg.norm(clipped_vector)
+            if clipped_length < 1e-9:
+                continue
+
+            sample_count = max(
+                2,
+                math.ceil(clipped_length / sample_spacing),
+            )
+            fractions = np.linspace(
+                0.0,
+                1.0,
+                sample_count,
+                endpoint=False,
+            )
+            samples = (
+                clipped_start
+                + fractions[:, None] * clipped_vector
+            )
+            point_groups.append(samples)
+            normal_groups.append(
+                np.repeat(normal[None, :], len(samples), axis=0)
+            )
+
+    if point_groups:
+        candidates = np.concatenate(point_groups, axis=0)
+        candidate_normals = np.concatenate(normal_groups, axis=0)
+        # Stratified selection distributes each release across the full shore
+        # while preserving a small random offset from release to release.
+        strata = (np.arange(count) + rng.random(count)) / count
+        selected = np.minimum(
+            (strata * len(candidates)).astype(np.intp),
+            len(candidates) - 1,
+        )
+        return candidates[selected], candidate_normals[selected]
+
+    # A malformed or temporarily removed side should not make the key fail.
+    x = (np.arange(count) + rng.random(count)) / count * WIDTH
+    if side.lower() == "top":
+        y = np.full(count, HEIGHT)
+        normals = np.repeat(np.array([[0.0, -1.0]]), count, axis=0)
+    else:
+        y = np.zeros(count)
+        normals = np.repeat(np.array([[0.0, 1.0]]), count, axis=0)
+    return np.column_stack((x, y)), normals
+
+
+def claim_leaf_slots(count: int) -> np.ndarray:
+    """Claim inactive leaves, recycling the oldest only when the pool is full."""
+    inactive = np.flatnonzero(leaf_states == LEAF_STATE_INACTIVE)
+    if len(inactive) >= count:
+        return inactive[:count]
+
+    needed = count - len(inactive)
+    active = np.flatnonzero(leaf_states != LEAF_STATE_INACTIVE)
+    oldest = active[np.argsort(leaf_birth_ms[active])[:needed]]
+    deactivate_leaves(oldest)
+    return np.concatenate((inactive, oldest))
+
+
+def refresh_leaf_collection() -> None:
+    """Transform every immutable local curve into its current world pose."""
+    leaf_segments[:] = np.nan
+    visible_mask = (
+        (leaf_states != LEAF_STATE_INACTIVE)
+        & (leaf_states != LEAF_STATE_SCHEDULED)
+    )
+    visible = np.flatnonzero(visible_mask)
+    if len(visible) > 0:
+        local = leaf_local_shapes[visible]
+        cos_angle = np.cos(leaf_angles[visible])[:, None]
+        sin_angle = np.sin(leaf_angles[visible])[:, None]
+        leaf_segments[visible, :, 0] = (
+            leaf_positions[visible, 0, None]
+            + local[:, :, 0] * cos_angle
+            - local[:, :, 1] * sin_angle
+        )
+        leaf_segments[visible, :, 1] = (
+            leaf_positions[visible, 1, None]
+            + local[:, :, 0] * sin_angle
+            + local[:, :, 1] * cos_angle
+        )
+
+    display_colors = leaf_rgba.copy()
+    display_colors[~visible_mask, 3] = 0.0
+    leaf_collection.set_segments(leaf_segments)
+    leaf_collection.set_color(display_colors)
+
+
+def vesica_piscis_leaf_shapes(lengths: np.ndarray) -> np.ndarray:
+    """Build rigid two-arc lenses from equal intersecting circles."""
+    # Unit-length vesica piscis: the circle radius is 1/sqrt(3), so the two
+    # circle-intersection tips lie exactly at x=-0.5 and x=0.5. The circle
+    # centers are one radius apart, placing each center on the other circle.
+    radius = 1.0 / math.sqrt(3.0)
+    upper_angles = np.linspace(
+        5.0 * math.pi / 6.0,
+        math.pi / 6.0,
+        LEAF_ARC_POINT_COUNT,
+    )
+    lower_angles = np.linspace(
+        11.0 * math.pi / 6.0,
+        7.0 * math.pi / 6.0,
+        LEAF_ARC_POINT_COUNT,
+    )
+    upper_arc = np.column_stack(
+        (
+            radius * np.cos(upper_angles),
+            -radius * 0.5 + radius * np.sin(upper_angles),
+        )
+    )
+    lower_arc = np.column_stack(
+        (
+            radius * np.cos(lower_angles),
+            radius * 0.5 + radius * np.sin(lower_angles),
+        )
+    )
+    # The lower arc starts at the same right-hand tip where the upper arc
+    # ends. Its final point repeats the left tip, closing the outline.
+    unit_outline = np.concatenate((upper_arc, lower_arc[1:]), axis=0)
+    return lengths[:, None, None] * unit_outline[None, :, :]
+
+
+def leaf_exit_targets(
+    shore_points: np.ndarray,
+    waterward_normals: np.ndarray,
+) -> np.ndarray:
+    """Project leaves through water and beyond the opposite frame boundary."""
+    exit_distances = np.full(len(shore_points), np.inf)
+
+    for axis, upper_bound in ((0, WIDTH), (1, HEIGHT)):
+        coordinates = shore_points[:, axis]
+        directions = waterward_normals[:, axis]
+
+        positive = directions > 1e-12
+        positive_distance = np.full(len(shore_points), np.inf)
+        positive_distance[positive] = (
+            upper_bound - coordinates[positive]
+        ) / directions[positive]
+
+        negative = directions < -1e-12
+        negative_distance = np.full(len(shore_points), np.inf)
+        negative_distance[negative] = (
+            -coordinates[negative] / directions[negative]
+        )
+
+        axis_distance = np.minimum(
+            positive_distance,
+            negative_distance,
+        )
+        valid = axis_distance >= 0.0
+        exit_distances[valid] = np.minimum(
+            exit_distances[valid],
+            axis_distance[valid],
+        )
+
+    if np.any(~np.isfinite(exit_distances)):
+        raise ValueError("A shoreline waterward normal cannot be zero.")
+
+    return shore_points + waterward_normals * (
+        exit_distances + LEAF_EXIT_MARGIN_DATA
+    )[:, None]
+
+
+def release_leaves() -> None:
+    """Queue 25 rigid vesica-piscis leaves from each shoreline side."""
+    global next_leaf_release_ms
+
+    total = LEAVES_PER_SIDE * 2
+    slots = claim_leaf_slots(total)
+
+    target_groups = []
+    normal_groups = []
+    for side in ("bottom", "top"):
+        shore_points, normals = sample_shoreline_release_points(
+            side,
+            LEAVES_PER_SIDE,
+        )
+        target_groups.append(shore_points)
+        normal_groups.append(normals)
+    shore_points = np.concatenate(target_groups, axis=0)
+    waterward_normals = np.concatenate(normal_groups, axis=0)
+
+    targets = leaf_exit_targets(
+        shore_points,
+        waterward_normals,
+    )
+
+    leaf_targets[slots] = targets
+    leaf_positions[slots] = shore_points
+    leaf_transit_positions[slots] = shore_points
+    leaf_states[slots] = LEAF_STATE_SCHEDULED
+    leaf_water_slots[slots] = -1
+    leaf_water_sample_indices[slots] = -1
+    leaf_last_water_anchors[slots] = np.nan
+
+    # There is one global release slot at each configured interval. Shuffling
+    # the slots before assigning them to the bottom-then-top arrays interleaves
+    # both cohorts without releasing either side as a visible batch.
+    release_offsets_ms = (
+        np.arange(total, dtype=float) * LEAF_RELEASE_INTERVAL_MS
+    )
+    rng.shuffle(release_offsets_ms)
+    release_start_ms = max(current_elapsed_ms, next_leaf_release_ms)
+    leaf_release_times_ms[slots] = release_start_ms + release_offsets_ms
+    leaf_birth_ms[slots] = leaf_release_times_ms[slots]
+    next_leaf_release_ms = (
+        release_start_ms + total * LEAF_RELEASE_INTERVAL_MS
+    )
+
+    tangent = np.column_stack(
+        (-waterward_normals[:, 1], waterward_normals[:, 0])
+    )
+    leaf_angles[slots] = (
+        np.arctan2(tangent[:, 1], tangent[:, 0])
+        + rng.uniform(-0.65, 0.65, total)
+    )
+    rotation_degrees_per_frame = rng.uniform(
+        LEAF_ROTATION_MIN_DEGREES_PER_FRAME,
+        LEAF_ROTATION_MAX_DEGREES_PER_FRAME,
+        total,
+    ) * rng.choice(np.array([-1.0, 1.0]), size=total)
+    leaf_spin_rates[slots] = (
+        np.deg2rad(rotation_degrees_per_frame) * TARGET_FPS
+    )
+    leaf_sway_amplitudes[slots] = rng.uniform(
+        LEAF_SWAY_AMPLITUDE_MIN_DATA,
+        LEAF_SWAY_AMPLITUDE_MAX_DATA,
+        total,
+    )
+    sway_periods = rng.uniform(
+        LEAF_SWAY_PERIOD_MIN_SECONDS,
+        LEAF_SWAY_PERIOD_MAX_SECONDS,
+        total,
+    )
+    leaf_sway_angular_frequencies[slots] = 2.0 * math.pi / sway_periods
+    leaf_sway_phases[slots] = rng.uniform(0.0, 2.0 * math.pi, total)
+    leaf_sway_offsets[slots] = 0.0
+
+    lengths = rng.uniform(
+        LEAF_LENGTH_MIN_DATA,
+        LEAF_LENGTH_MAX_DATA,
+        total,
+    )
+    leaf_local_shapes[slots] = vesica_piscis_leaf_shapes(lengths)
+    leaf_rgba[slots] = to_rgba_array(
+        rng.choice(LEAF_COLORS, size=total)
+    )
+
+    refresh_leaf_collection()
+    print(
+        f"Queued {LEAVES_PER_SIDE} leaves from each shore "
+        f"({total} total, {LEAF_RELEASE_INTERVAL_MS:g} ms spacing)"
+    )
+
+
+def build_water_attachment_lookup():
+    """Index visible water samples by spatial cell for exact leaf binding."""
+    if LEAF_COLLISION_RADIUS_DATA <= 0.0:
+        return None
+
+    active_water_slots = np.flatnonzero(
+        particle_launch_times_ms <= current_elapsed_ms
+    )
+    if len(active_water_slots) == 0:
+        return None
+
+    sample_indices = np.arange(
+        0,
+        TRAIL_LENGTH,
+        LEAF_WATER_SAMPLE_STRIDE,
+        dtype=np.intp,
+    )
+    if sample_indices[-1] != TRAIL_LENGTH - 1:
+        sample_indices = np.append(sample_indices, TRAIL_LENGTH - 1)
+
+    sampled = trails[active_water_slots][:, sample_indices, :]
+    points = sampled.reshape(-1, 2)
+    water_slots = np.repeat(active_water_slots, len(sample_indices))
+    history_indices = np.tile(sample_indices, len(active_water_slots))
+    valid = (
+        np.isfinite(points[:, 0])
+        & np.isfinite(points[:, 1])
+        & (points[:, 0] >= 0.0)
+        & (points[:, 0] <= WIDTH)
+        & (points[:, 1] >= 0.0)
+        & (points[:, 1] <= HEIGHT)
+    )
+    if not np.any(valid):
+        return None
+
+    points = points[valid]
+    water_slots = water_slots[valid]
+    history_indices = history_indices[valid]
+    cell_size = LEAF_COLLISION_RADIUS_DATA
+    grid_width = math.ceil(WIDTH / cell_size) + 1
+    grid_height = math.ceil(HEIGHT / cell_size) + 1
+    cell_x = np.clip(
+        (points[:, 0] / cell_size).astype(np.intp),
+        0,
+        grid_width - 1,
+    )
+    cell_y = np.clip(
+        (points[:, 1] / cell_size).astype(np.intp),
+        0,
+        grid_height - 1,
+    )
+    cell_ids = cell_y * grid_width + cell_x
+    order = np.argsort(cell_ids, kind="stable")
+    return (
+        points[order],
+        water_slots[order],
+        history_indices[order],
+        cell_ids[order],
+        grid_width,
+        grid_height,
+        cell_size,
+    )
+
+
+def attach_waiting_leaves(indices: np.ndarray) -> None:
+    """Bind waiting/falling leaves to the nearest water sample in radius."""
+    indices = np.asarray(indices, dtype=np.intp)
+    if len(indices) == 0:
+        return
+    lookup = build_water_attachment_lookup()
+    if lookup is None:
+        return
+
+    (
+        points,
+        water_slots,
+        history_indices,
+        cell_ids,
+        grid_width,
+        grid_height,
+        cell_size,
+    ) = lookup
+    radius_sq = LEAF_COLLISION_RADIUS_DATA ** 2
+
+    for leaf_index in indices:
+        position = leaf_positions[leaf_index]
+        if not np.all(np.isfinite(position)):
+            continue
+        center_x = int(math.floor(position[0] / cell_size))
+        center_y = int(math.floor(position[1] / cell_size))
+        best_distance_sq = radius_sq
+        best_sample = -1
+
+        for offset_y in (-1, 0, 1):
+            grid_y = center_y + offset_y
+            if grid_y < 0 or grid_y >= grid_height:
+                continue
+            for offset_x in (-1, 0, 1):
+                grid_x = center_x + offset_x
+                if grid_x < 0 or grid_x >= grid_width:
+                    continue
+                cell_id = grid_y * grid_width + grid_x
+                first = np.searchsorted(cell_ids, cell_id, side="left")
+                last = np.searchsorted(cell_ids, cell_id, side="right")
+                if first == last:
+                    continue
+                candidate_points = points[first:last]
+                distances_sq = np.sum(
+                    (candidate_points - position) ** 2,
+                    axis=1,
+                )
+                nearest = int(np.argmin(distances_sq))
+                if distances_sq[nearest] <= best_distance_sq:
+                    best_distance_sq = float(distances_sq[nearest])
+                    best_sample = first + nearest
+
+        if best_sample < 0:
+            continue
+
+        water_slot = int(water_slots[best_sample])
+        history_index = int(history_indices[best_sample])
+        anchor = points[best_sample]
+        leaf_states[leaf_index] = LEAF_STATE_ATTACHED
+        leaf_positions[leaf_index] = anchor
+        leaf_transit_positions[leaf_index] = anchor
+        leaf_sway_offsets[leaf_index] = 0.0
+        leaf_targets[leaf_index] = anchor
+        leaf_water_slots[leaf_index] = water_slot
+        leaf_water_sample_indices[leaf_index] = history_index
+        leaf_last_water_anchors[leaf_index] = anchor
+
+
+def update_leaves(frame: int) -> None:
+    """Send leaves across the frame, binding nearby ones to moving water."""
+    active = np.flatnonzero(leaf_states != LEAF_STATE_INACTIVE)
+    if len(active) == 0:
+        return
+
+    scheduled = np.flatnonzero(leaf_states == LEAF_STATE_SCHEDULED)
+    newly_released = scheduled[
+        leaf_release_times_ms[scheduled] <= current_elapsed_ms
+    ]
+    if len(newly_released) > 0:
+        leaf_states[newly_released] = LEAF_STATE_FALLING
+
+    waiting = np.flatnonzero(leaf_states == LEAF_STATE_WAITING)
+    if len(waiting) > 0:
+        leaf_angles[waiting] += leaf_spin_rates[waiting] * DT
+
+    attached = np.flatnonzero(leaf_states == LEAF_STATE_ATTACHED)
+    if len(attached) > 0:
+        # Rotation is an intrinsic property of each leaf. Water translates the
+        # rigid outline without resetting or steering its rotational phase.
+        leaf_angles[attached] += leaf_spin_rates[attached] * DT
+        water_slots = leaf_water_slots[attached]
+        sample_indices = leaf_water_sample_indices[attached]
+        anchors = trails[water_slots, sample_indices]
+        valid = np.isfinite(anchors[:, 0]) & np.isfinite(anchors[:, 1])
+
+        moving = attached[valid]
+        if len(moving) > 0:
+            new_anchors = anchors[valid]
+            deltas = new_anchors - leaf_last_water_anchors[moving]
+            leaf_positions[moving] += deltas
+            leaf_targets[moving] = leaf_positions[moving]
+            leaf_last_water_anchors[moving] = new_anchors
+
+        lost = attached[~valid]
+        if len(lost) > 0:
+            leaf_states[lost] = LEAF_STATE_WAITING
+            leaf_targets[lost] = leaf_positions[lost]
+            leaf_water_slots[lost] = -1
+            leaf_water_sample_indices[lost] = -1
+            leaf_last_water_anchors[lost] = np.nan
+
+    falling = np.flatnonzero(leaf_states == LEAF_STATE_FALLING)
+    if len(falling) > 0:
+        toward_target = (
+            leaf_targets[falling] - leaf_transit_positions[falling]
+        )
+        direction, remaining = safe_normalize(
+            toward_target,
+            minimum=1e-9,
+        )
+        fall_seconds = np.full(len(falling), DT)
+        if len(newly_released) > 0:
+            released_positions = np.searchsorted(
+                falling,
+                newly_released,
+            )
+            fall_seconds[released_positions] = np.clip(
+                (
+                    current_elapsed_ms
+                    - leaf_release_times_ms[newly_released]
+                ) / 1000.0,
+                0.0,
+                DT,
+            )
+        max_step = LEAF_FALL_SPEED_DATA * fall_seconds
+        step = np.minimum(max_step, remaining)
+        leaf_transit_positions[falling] += direction * step[:, None]
+
+        fall_age_seconds = np.maximum(
+            (current_elapsed_ms - leaf_birth_ms[falling]) / 1000.0,
+            0.0,
+        )
+        # Subtracting the phase origin prevents a release-time jump. The 0.5
+        # keeps the resulting difference within the configured amplitude.
+        sway_offsets = 0.5 * leaf_sway_amplitudes[falling] * (
+            np.sin(
+                leaf_sway_phases[falling]
+                + leaf_sway_angular_frequencies[falling]
+                * fall_age_seconds
+            )
+            - np.sin(leaf_sway_phases[falling])
+        )
+        leaf_sway_offsets[falling] = sway_offsets
+        leaf_positions[falling] = leaf_transit_positions[falling]
+        leaf_positions[falling, 0] += sway_offsets
+        leaf_angles[falling] += leaf_spin_rates[falling] * fall_seconds
+        arrived = falling[remaining <= max_step + 1e-9]
+        if len(arrived) > 0:
+            # The target is beyond the opposite frame boundary, so an
+            # unattached leaf has now cleared the screen completely.
+            deactivate_leaves(arrived)
+        leaf_release_times_ms[newly_released] = np.inf
+
+    pending = np.flatnonzero(
+        (leaf_states == LEAF_STATE_FALLING)
+        | (leaf_states == LEAF_STATE_WAITING)
+    )
+    if frame % LEAF_ATTACHMENT_CHECK_INTERVAL == 0:
+        attach_waiting_leaves(pending)
+
+    refresh_leaf_collection()
+    attached = np.flatnonzero(leaf_states == LEAF_STATE_ATTACHED)
+    reached_right = attached[leaf_positions[attached, 0] >= WIDTH]
+    if len(reached_right) > 0:
+        deactivate_leaves(reached_right)
+        refresh_leaf_collection()
+
+
 # --------------------------------------------------
 # DRAWING
 # --------------------------------------------------
@@ -1599,6 +2447,20 @@ def create_obstacle_artists() -> list:
             np.asarray(obstacle.vertices, dtype=float),
             closed=True,
             **style,
+        )
+        ax.add_patch(artist)
+        artists.append(artist)
+
+    for shoreline in SHORELINE_POLYGONS:
+        shoreline_style = dict(style)
+        shoreline_style.update(
+            edgecolor="sandybrown",
+            linestyle=":",
+        )
+        artist = PolygonPatch(
+            np.asarray(shoreline.vertices, dtype=float),
+            closed=True,
+            **shoreline_style,
         )
         ax.add_patch(artist)
         artists.append(artist)
@@ -1707,12 +2569,17 @@ reservoir_artists = [
 ]
 debug_geometry_artists = obstacle_artists + reservoir_artists
 
-# Reserve the salmon-release key instead of opening Matplotlib's save dialog.
-plt.rcParams["keymap.save"] = [
-    key
-    for key in plt.rcParams["keymap.save"]
-    if key.lower() != SALMON_RELEASE_KEY
-]
+# Reserve custom release keys from every built-in Matplotlib shortcut. In
+# particular, L otherwise toggles logarithmic axis scaling on some backends.
+reserved_release_keys = {SALMON_RELEASE_KEY, LEAF_RELEASE_KEY}
+for keymap_name in (
+    name for name in plt.rcParams if name.startswith("keymap.")
+):
+    plt.rcParams[keymap_name] = [
+        key
+        for key in plt.rcParams[keymap_name]
+        if key.lower() not in reserved_release_keys
+    ]
 
 line_widths = rng.uniform(
     LINE_WIDTH_MIN,
@@ -1757,6 +2624,20 @@ salmon_collection = LineCollection(
     zorder=7,
 )
 ax.add_collection(salmon_collection)
+
+initial_leaf_colors = leaf_rgba.copy()
+initial_leaf_colors[:, 3] = 0.0
+leaf_collection = LineCollection(
+    leaf_segments,
+    colors=initial_leaf_colors,
+    linewidths=LEAF_LINE_WIDTH,
+    capstyle="round",
+    joinstyle="round",
+    antialiased=True,
+    clip_on=True,
+    zorder=8,
+)
+ax.add_collection(leaf_collection)
 
 
 def resolve_salmon_reservoir_encounters(
@@ -2193,6 +3074,10 @@ def update(frame: int):
             )
             trails[retention_index, -len(samples):] = samples
 
+    # Leaf bindings read the newly advanced trail histories before completed
+    # water slots are reset or recycled below.
+    update_leaves(frame)
+
     visible_mask = (
         (trails[:, :, 0] >= 0.0)
         & (trails[:, :, 0] <= WIDTH)
@@ -2245,7 +3130,7 @@ def update(frame: int):
     frame_counter += 1
     return (
         trail_lines
-        + [salmon_collection]
+        + [salmon_collection, leaf_collection]
         + debug_geometry_artists
     )
 
@@ -2255,7 +3140,12 @@ def init_animation():
     for line in trail_lines:
         line.set_data([], [])
     salmon_collection.set_segments(salmon_trails)
-    return trail_lines + [salmon_collection] + debug_geometry_artists
+    refresh_leaf_collection()
+    return (
+        trail_lines
+        + [salmon_collection, leaf_collection]
+        + debug_geometry_artists
+    )
 
 
 def take_screenshot() -> Path:
@@ -2375,7 +3265,7 @@ def toggle_gate(reservoir_index: int) -> None:
 
 
 def toggle_debug_geometry() -> None:
-    """Show or hide obstacle, absorber, and reservoir debug geometry."""
+    """Show or hide shore, obstacle, absorber, and reservoir geometry."""
     global DEBUG_GEOMETRY_VISIBLE
 
     DEBUG_GEOMETRY_VISIBLE = not DEBUG_GEOMETRY_VISIBLE
@@ -2397,6 +3287,8 @@ def on_key_press(event) -> None:
         take_screenshot()
     elif key == SALMON_RELEASE_KEY:
         release_salmon()
+    elif key == LEAF_RELEASE_KEY:
+        release_leaves()
     elif key == VISIBILITY_TOGGLE_KEY:
         toggle_debug_geometry()
     elif key == GATE_TOGGLE_KEY and RESERVOIRS:
