@@ -22,6 +22,27 @@ history and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 
 # Operating
 
+## Seeing which chairs are occupied
+
+```bash
+python3 chair_state_monitor.py
+```
+
+Shows all seven chairs live: whether each one reads occupied, its temperature,
+and how confident the model is.
+
+**Nothing needs starting first.** Occupancy is computed and published
+continuously, whether or not anything is watching. This just displays it.
+
+The confidence figure is the **vote fraction**, the number the model compares
+against a threshold. The two faint lines on each trace are those thresholds, so
+you can see why a chair changed state rather than only that it did:
+
+- rises above **0.50** to become occupied
+- falls below **0.15** to become free
+
+Add `--plain` for a terminal version that needs no packages.
+
 ## Automatic startup
 
 **Nothing needs starting by hand.** A job runs every couple of minutes that
@@ -137,23 +158,6 @@ python3 controller.py
 
 **4. Start whatever consumes the feed**, if anything is listening.
 
-## Monitoring
-
-```bash
-python3 chair_state_monitor.py
-```
-
-Per chair: its state, its temperature, and the **vote fraction**, which is the
-number the model compares against a threshold. The two faint lines on each
-trace are those thresholds, so you can see why a chair changed state rather
-than only that it did:
-
-- rises above **0.50** to become occupied
-- falls below **0.15** to become free
-
-Add `--plain` for a terminal version that requires no packages, for a machine
-without matplotlib.
-
 ## Chair identification
 
 **Chair identity lives in the receiver, not in the chair firmware.** Every ESP32
@@ -239,8 +243,13 @@ venv/bin/python development/tools/score_model.py data/dataset_20260730_122544.cs
 
 # Integration
 
-`controller.py` broadcasts JSON over **UDP port 5005, 60 times a second**, to
-`127.0.0.1` and the broadcast address.
+**This is already running.** `controller.py` broadcasts the occupancy state as
+JSON over **UDP port 5005, 60 times a second**, to `127.0.0.1` and the broadcast
+address, whether or not anything is listening. Consuming it needs no change on
+this side.
+
+The field that matters is `chairs`: seven flags, index 0 is chair 1, 1 means
+occupied.
 
 ```json
 {
