@@ -1,0 +1,1414 @@
+# Godot Flow Runtime
+
+> **Production GPU update:** The seven selectable `scene_N.tscn` wrappers now
+> instance `res://flow/gpu_stage/gpu_flow_stage_2d.tscn` directly. Production
+> water, reservoirs, interactions, source polygons, and salmon are GPU systems.
+> See `res://flow/gpu_stage/README.md` for their deployed rendering details,
+> controls, supported controller fields, tests, and bounded schemas. The CPU
+> `FlowModel2D` described in much of this document is retained only as a
+> reference/fallback; it is not the production renderer.
+
+This document describes the first Godot milestone that replaces the seven
+chevron/ring scenes with independent ports of the water-line simulation in
+`ink_flow_lines_v04.py`.
+
+The production GPU milestone includes immutable water trails, coherent noise,
+addressable absorb/repel polygons, reservoirs, live gates, addressable water
+sources, GPU salmon, GPU leaves, a screen-fixed model grid and calendar, runtime
+geometry replacement, UDP control, and debug drawing. The GPU stage implements
+both `release_salmon` and `release_leaves`.
+
+## Architecture
+
+### Deployed GPU renderer
+
+`res://flow/gpu_stage/gpu_flow_stage_2d.tscn` is the shared production scene.
+Its original seven-layer GPU water renderer runs once inside a transparent,
+native 1920 x 1080 `WaterOnlyViewport`. The stage composites that viewport back
+to the root with premultiplied alpha. The black background, model grid, cyan
+reservoir guide, gold interaction polygons, violet source polygons, stage title,
+model date, salmon, and leaves are kept outside that viewport, so the water
+texture contains only water and no visual feedback.
+
+The presentation stack uses absolute canvas Z values: `Background` is `-100`,
+the stage-owned `BackgroundGrid` `Node2D` is `-75`, and `StageTitleLayer` is
+`-50`; water, salmon, and leaves are `0` or higher. `StageTitleLayer` owns both
+the river title and model date. Neither it nor the grid is part of the debug
+overlay, so `V` does not hide them.
+
+Salmon and leaves sample this water texture's alpha directly in their
+particle-process shaders. No frame is copied to an `Image`, no CPU occupancy
+mask is generated, and no GPU particle state is read back. Salmon use a fixed
+240 x 24 native-pixel contact field for both contact and full 2D upstream
+steering. Free leaves use a 120-pixel 2D vicinity search before their
+12-pixel-radius latch test; a bounded miss freezes and fades. Latched leaves use
+periodically resampled, cached-local-heading probes with multi-radius
+center/flank support. Leaves render as head-only antialiased disks and have no
+segment pool or motion trail.
+
+Water source definitions and absorb/repel definitions are configuration data
+packed into separate fixed 128 x 1 `RGBAF` textures. The GPU water-head process
+shader reads them and owns all live positions; the CanvasItem shaders only draw
+immutable completed segments.
+
+### Retained CPU reference
+
+`res://flow/flow_model_2d.tscn` is the shared scene used by all seven display
+scenes in the retained CPU reference implementation. It contains one
+`FlowModel2D` and the shared
+`res://flow/default_flow_profile.tres` preset. At startup, each model deeply
+duplicates the profile and every nested geometry resource. Runtime changes in
+one screen therefore do not mutate the preset or any other screen.
+
+The seven `scene_N.tscn` files are thin `Node2D` wrappers. Each retains
+`stage_scene.gd` for Escape-to-selector behavior and contains one independent
+instance of the shared flow scene. The former chevron shaders, disk rings,
+`Governator`, `SpeedSynth`, and speed-controlled `ColorRect` nodes are not in
+these seven scenes anymore.
+
+`FlowModel2D` runs from `_physics_process`, but it uses a custom flow solver
+rather than rigid-body collision responses. The soft influence fields,
+reservoir circulation, absorption, and trail lifecycles need deterministic
+simulation rules that do not map cleanly to `RigidBody2D` contacts. Water is
+rendered with pooled `Line2D` trails.
+
+The default numerical schedule is:
+
+- 30 fixed simulation frames per second (`target_fps = 30`)
+- 20 midpoint RK2 substeps per simulation frame
+  (`simulation_substeps = 20`)
+- nominally 600 RK2 substeps per simulated second
+- a maximum of eight accumulated simulation frames processed in one Godot
+  physics callback, enough for the 240 Hz parameter ceiling on the project's
+  60 Hz physics clock while preventing an unbounded catch-up loop
+
+Both timing values are live parameters. The values above are the default
+profile and the intended parity baseline with the Python version.
+
+The model scene also has four inspector-level exports that are not
+`FlowProfile` runtime parameters: `screen_id`, `preset`, `auto_start`, and
+`accept_keyboard_input`. Screen wrappers set `screen_id`; the shared scene sets
+`preset`; `pause`/`resume` control running state after startup; and keyboard
+input can be disabled per installation instance with `accept_keyboard_input`.
+
+`FlowControlBus` is an autoload-compatible `Node`. It listens for UDP JSON,
+normalizes messages, and routes a deep copy to each matching node in the
+`flow_models` group through:
+
+```gdscript
+func queue_control_message(message: Dictionary) -> void
+```
+
+Messages enter a model-owned queue and are applied on a fixed simulation-frame
+boundary, not in the middle of an RK2 substep.
+
+### Production GPU interaction path
+
+The deployed `GPUFlowStage2D` does not send its interaction geometry through a
+CanvasItem material. It validates and packs as many as eight
+`GPUFlowInteractionPolygon` resources, with at most 12 vertices each, into one
+shared 128 x 1 `RGBAF` texture. All seven palette layers give that same texture
+to the `gpu_flow_particle` process shader. The process shader alone changes head
+positions; the head and segment draw shaders remain rendering-only and never
+sample the geometry texture.
+
+This fixed-size representation makes geometry edits inexpensive and keeps the
+shader loop bounded. It is separate from the CPU profile's circle, rectangle,
+shoreline, polygon-obstacle, and rectangular-absorber collections.
+
+`GPUFlowSourcePolygon` uses an independent 128 x 1 `RGBAF` texture with the
+same maximum of eight polygons and 12 vertices per polygon. A source stores its
+enabled state, emission fraction, flow direction, optional deterministic seed,
+and edge-weight data. New/recycled water heads choose a source on the GPU and
+use a weighted downstream-edge sample for Y. In the production +X model, an
+independent deterministic sample spreads X across the polygon's bounding-box
+minimum and maximum, eliminating a hard vertical launch seam. Heads not
+selected by the active source fractions continue to use the ordinary left
+inlet.
+
+## Screen IDs and stage presentation
+
+Use these IDs in controller targets. They are installation-facing identifiers
+and should remain stable even if scene files or display labels are renamed.
+
+| Scene | Stage title | `screen_id` |
+|---|---|---|
+| `scene_1.tscn` | Mount Shasta | `mount_shasta` |
+| `scene_2.tscn` | McCloud-Pit Rivers | `mccloud_pit` |
+| `scene_3.tscn` | Cottonwood Creek | `cottonwood_creek` |
+| `scene_4.tscn` | Mill Creek | `mill_creek` |
+| `scene_5.tscn` | Feather River | `feather_river` |
+| `scene_6.tscn` | American River | `american_river` |
+| `scene_7.tscn` | Sacramento-San Joaquin Delta | `delta` |
+
+Every production wrapper sets its title explicitly on `GPUFlowStage2D`. The
+stage renders that text at native position `(40, 40)` in `#4AB0E1`, using the
+bundled `res://flow/assets/fonts/BarlowCondensed-Medium.ttf` at 40 pixels. The
+model date uses the same font, size, and color at `(40, 980)`. The font is part
+of the project rather than resolved from the host operating system.
+
+The background grid defaults to 1-native-pixel `#4AB0E1` lines at `0.75` alpha,
+spaced every 120 pixels. The spacing is also the production conversion from one
+world unit to native pixels, so the grid directly describes the 16 x 9 model
+coordinate system. The first and last boundary lines are omitted on both axes,
+so the grid does not form a frame around the screen. The explicit background is
+at absolute Z `-100`, the grid is
+at `-75`, the title and date are at `-50`, and water/ecology are at `0` or higher.
+Active features can therefore pass visibly over both the grid and text. The grid
+and text remain outside `WaterOnlyViewport`, so their alpha never counts as
+water, and outside `ReservoirAndStatusOverlay`, so the `V` debug toggle does not
+affect them.
+
+`ModelDate` displays a zero-padded `MM/DD-HH:MM` from a 365-day, non-leap
+calendar. Every production wrapper sets `model_start_day_index = 181`, so its
+cycle begins at `07/01-00:00`, runs through June 30, and wraps to July 1. The
+internal clock defaults to one model year in 720 running seconds, or 21,600
+rendered frames at the production 30 FPS cap. Time is derived from the continuous
+year fraction rather than accumulated integer frame counts. Pause freezes the
+calendar, data row, water, salmon, and leaves together.
+
+Each wrapper also loads one 720-row watershed file from
+`res://flow/data/water_pipeline/`. At the default year duration, each row spans
+one running second and a uniform 730 model minutes (12 hours 10 minutes). Since
+the text files contain no timestamps, the displayed `HH:MM` is synthetic uniform
+model time, not an observed timestamp. The water rate is a per-update linear
+interpolation between adjacent `norm` rows, including the last-to-first wrap.
+`norm` maps directly from `0.0…1.0` to `flow_rate` `0.0…1.0`, or 0…100 percent;
+neither the raw nor scaled data column multiplies that value.
+
+`set_model_date_time()`, the compatibility name `set_model_date_mm_dd()`,
+`calendar.date`, and `stage.date` accept canonical `MM/DD-HH:MM`, validate it,
+align the watershed timeline, and disable auto-advance. Date-only `MM/DD` input
+is retained and means midnight; output is always `MM/DD-HH:MM`. Invalid input
+does not change state. `calendar.auto_advance = true` resumes from the displayed
+time. None of these paths changes controller routing; continue to target the
+stable `screen_id`.
+
+The full `reset` action returns the timeline to `07/01-00:00` and restarts
+water and ecology while preserving pause/auto-advance modes.
+`reset_model_calendar()` resets only the calendar/data position. Direct
+`set_flow_rate()`, digit-key, `flow_rate`, or `active_ratio` input disables data
+driving as a deliberate manual override; set `watershed.drives_flow_rate` to
+`true` to resume at the current interpolated row.
+
+The production scene-to-data assignments are:
+
+| Scene | Display | Data file |
+|---|---|---|
+| `scene_1.tscn` | Mount Shasta | `shasta_720.txt` |
+| `scene_2.tscn` | McCloud-Pit Rivers | `mccloud_720.txt` |
+| `scene_3.tscn` | Cottonwood Creek | `cottonwood_720.txt` |
+| `scene_4.tscn` | Mill Creek | `mill_creek_720.txt` |
+| `scene_5.tscn` | Feather River | `feather_720.txt` |
+| `scene_6.tscn` | American River | `american_720.txt` |
+| `scene_7.tscn` | Sacramento-San Joaquin Delta | `delta_720.txt` |
+
+The combined McCloud-Pit display currently uses the McCloud series. The current
+Delta source is a short November 6, 2025–January 17, 2026 gauge-height window in
+feet, not full-year CFS. The pipeline has resampled it to 720 normalized rows and
+the stage stretches those rows across the display year, so its seasonality is
+provisional. Runtime APIs expose the pipeline's nominal `cfs` column under the
+unit-neutral name `raw_value`.
+
+## Coordinate system
+
+All simulation and controller geometry uses the Python-compatible, Y-up world:
+
+- default size: `16 × 9`
+- origin: lower-left
+- positive X: left to right, the required base-flow direction
+- positive Y: bottom to top
+- visible bounds: X `0…16`, Y `0…9`
+
+Godot canvas coordinates remain Y-down. `FlowModel2D.world_to_canvas()` flips Y
+only at the drawing boundary, and `canvas_to_world()` performs the inverse.
+Do not pre-flip geometry sent by a controller.
+
+The production GPU stage uses the same controller world and converts it to its
+native 1920 x 1080 canvas as `(x * 120, (9 - y) * 120)`. Send one Y-up geometry
+definition to either runtime; do not send native pixels to the GPU stage.
+
+Points in JSON are normally two-number arrays:
+
+```json
+[6.5, 2.25]
+```
+
+Vector parameters also accept `{"x": 6.5, "y": 2.25}` locally. For UDP JSON,
+the two-number array form is the clearest convention.
+
+Shorelines are closed land polygons. For the current Y-up winding convention,
+the visible water-facing chain normally runs right-to-left for a bottom shore
+and left-to-right for a top shore. `water_edge_indices` are zero-based and must
+be forward-adjacent in polygon order; wrapping from the last vertex to index 0
+is allowed.
+
+## Typed resources
+
+The runtime configuration uses typed Godot resources:
+
+| Class | File | Role |
+|---|---|---|
+| `FlowProfile` | `flow_profile.gd` | Scalar parameters and typed geometry collections |
+| `FlowCircleObstacle` | `flow_circle_obstacle.gd` | Circular deflection field |
+| `FlowRectangleObstacle` | `flow_rectangle_obstacle.gd` | Rotated rectangular deflection field |
+| `FlowPolygonObstacle` | `flow_polygon_obstacle.gd` | Irregular closed obstacle |
+| `FlowShoreline` | `flow_shoreline.gd` | Closed land polygon plus water-edge chain |
+| `FlowAbsorber` | `flow_absorber.gd` | Rectangular partial line absorber |
+| `FlowReservoir` | `flow_reservoir.gd` | Circular capture pool and downstream gate |
+| `GPUFlowInteractionPolygon` | `gpu_stage/gpu_flow_interaction_polygon.gd` | Unified bounded GPU absorb/repel polygon |
+| `GPUFlowSourcePolygon` | `gpu_stage/gpu_flow_source_polygon.gd` | Bounded GPU water-emission polygon |
+
+The default preset contains these stable geometry IDs:
+
+- rectangle: `rectangle_main`
+- shorelines: `shore_bottom`, `shore_top`
+- absorbers: `absorber_0_5` through `absorber_8_5`
+- reservoir: `reservoir_main`
+
+The default circle and polygon collections are empty.
+
+Separately, a production GPU stage whose `interaction_polygons` array is empty
+installs two examples when `install_default_interaction_examples` is enabled:
+
+- `absorber_test`: absorb mode, 50% absorption, `wave_strength = 0.18`, and
+  `influence = 0.35`
+- `repeller_test`: repel mode, `repellent_force = 0.70`, and
+  `influence = 0.80`
+
+Supplying any GPU interaction polygon suppresses both examples.
+
+A production GPU stage whose `source_polygons` array is empty installs
+`source_test` when `install_default_source_examples` is enabled. It is a
+violet-debugged rectangle from `[1.2, 3.6]` to `[2.0, 5.4]`, emits toward +X,
+has `emission_fraction = 0.18`, and uses seed `1701`. Supplying any valid source
+array suppresses that example.
+
+Every geometry element needs a nonempty stable ID. IDs must be unique within a
+geometry kind. Controllers should keep IDs stable and update the element under
+that ID. If an element is conceptually replaced, explicitly remove the old ID
+and add the new one so state transitions are unambiguous.
+
+## FlowProfile runtime parameters
+
+Canonical parameter names are listed below. Use these names as keys in the
+protocol's `changes` dictionary.
+
+### World, timing, and pool
+
+| Name | Type | Default | Notes |
+|---|---|---:|---|
+| `world_size` | Vector2 | `[16, 9]` | Both components must be positive. Rebuilds the pool. |
+| `legacy_world_height` | float | `7.0` | Python-to-Godot speed scale reference. |
+| `target_fps` | int | `30` | Valid range in the profile schema: 1–240. |
+| `simulation_substeps` | int | `20` | RK2 substeps per simulation frame; schema range 1–200. |
+| `max_particles` | int | `300` | Source-slot capacity. Rebuilds the pool. |
+| `retention_capacity` | int | `100` | Extra reservoir-retention slots. Rebuilds the pool; may be zero only when no reservoirs exist. |
+| `trail_length` | int | `1200` | Points retained per trail. Rebuilds the pool. |
+| `particle_launch_delay_ms` | float | `10.0` | Delay between newly activated source lines. |
+| `random_seed` | int | `-1` | `-1` randomizes; other values are deterministic. Rebuilds the pool. |
+
+For display safety, source plus retention capacity may not exceed 1,500 water
+slots, and `(max_particles + retention_capacity) × trail_length` may not
+exceed 2,000,000 stored points. A patch above either memory budget is rejected
+before the current model is changed.
+
+### Water flow
+
+| Name | Type | Default | Notes |
+|---|---|---:|---|
+| `flow_rate` | float | `0.5` | Normalized 0–1 line population and core speed. |
+| `max_flow_speed` | float | `10.0` | Maximum world-speed scale. |
+| `flow_variation` | float | `0.1` | Stable per-line variation; active values never fall below `min_active_flow`. |
+| `min_active_flow` | float | `0.001` | Positive lower bound that prevents backward flow. |
+| `base_flow` | Vector2 | `[2.5714285714, 0]` | X must remain positive in this X-axis model. |
+| `noise_strength` | float | `0.7714285715` | Coherent curl-noise amplitude. |
+| `noise_scale` | float | `1.1666666667` | Spatial noise scale; must be positive. |
+| `noise_speed` | float | `0.75` | Temporal noise rate; may be signed. |
+| `shore_exit_angle_jitter_degrees` | float | `16.0` | Stable per-line shoreline exit-angle range. |
+
+### Particle separation
+
+| Name | Type | Default |
+|---|---|---:|
+| `separation_radius` | float | `0.18` |
+| `separation_strength` | float | `1.6071428571` |
+| `separation_x_scale` | float | `0.15` |
+| `separation_max_force` | float | `1.9285714286` |
+
+`separation_x_scale` is normalized 0–1. The other separation values must be
+nonnegative.
+
+### Water rendering
+
+| Name | Type | Default/format |
+|---|---|---|
+| `line_width_min` | float | `0.5` reference points |
+| `line_width_max` | float | `3.0` reference points |
+| `particle_alpha` | float | `1.0`, normalized 0–1 |
+| `background_color` | Color | `#000000ff` |
+| `line_colors` | color array | nonempty array of HTML colors |
+
+`line_width_min` may not exceed `line_width_max`. Stroke values preserve the
+Matplotlib reference's 120-DPI point units and are multiplied by `120 / 72`
+when assigned to Godot canvas pixels. UDP colors should use HTML strings such
+as `"#4ab0e1ff"`.
+
+### Spawn, reservoir release, and gate controls
+
+| Name | Type | Default | Notes |
+|---|---|---:|---|
+| `spawn_x` | float | `-0.0642857143` | Source begins just left of the visible world. |
+| `spawn_y_margin` | float | `0.1928571429` | Margin inside the open inlet channel. |
+| `reservoir_release_rate` | float | `2.0` | Global readiness accumulation rate. |
+| `release_threshold_min` | float | `0.5` | Lower per-line release threshold. |
+| `release_threshold_max` | float | `1.5` | Upper per-line release threshold. |
+| `gate_width_step` | float | `0.0642857143` | Keyboard `[` / `]` adjustment step. |
+
+The release threshold minimum must not exceed the maximum. Reservoir aperture
+is `outlet_width / (2 × radius)`, so `outlet_width` is an absolute world width,
+not a percentage.
+
+### Debug drawing
+
+| Name | Type | Default |
+|---|---|---:|
+| `debug_geometry_visible` | bool | `true` |
+| `debug_geometry_color` | Color | `#ffa500ff` |
+| `debug_geometry_line_width` | float | `1.5` reference points |
+
+### Geometry collections
+
+`FlowProfile` also owns these typed arrays:
+
+- `circle_obstacles`
+- `rectangle_obstacles`
+- `polygon_obstacles`
+- `shorelines`
+- `absorbers`
+- `reservoirs`
+
+Do not replace these arrays through `changes`. Use `geometry_ops`, which parses
+JSON dictionaries into typed resources and validates the entire candidate
+configuration atomically.
+
+The production GPU stage instead owns `interaction_polygons` and
+`source_polygons`. Each collection has an independent budget of eight polygons,
+and each polygon may contain three through 12 vertices. Use the same
+`geometry_ops` envelope to manage those arrays; do not add them to the CPU
+`FlowProfile` collections.
+
+### Reset-required fields
+
+Changing any of these fields rebuilds the complete water pool immediately:
+
+- `world_size`
+- `max_particles`
+- `retention_capacity`
+- `trail_length`
+- `random_seed`
+
+A rebuild clears active lines, trails, absorber state, and retained reservoir
+water. The controller does not need to send a second `reset` action; the model
+performs the rebuild as part of committing that change. The explicit `reset`
+action rebuilds the pool under the current configuration and reseeds the RNG.
+
+All other scalar/profile changes are live. Lowering `flow_rate` lets excess
+source trails finish naturally instead of deleting them immediately.
+
+## UDP transport
+
+The control bus reads these project settings:
+
+- `flow_control/udp_port`, default `5005`
+- `flow_control/bind_address`, default `0.0.0.0`
+
+Binding to `0.0.0.0` permits localhost, broadcast, and explicit LAN targets.
+The modern protocol name is `ink-flow/1`.
+
+### Envelope
+
+```json
+{
+  "protocol": "ink-flow/1",
+  "revision": 1042,
+  "target": "mount_shasta",
+  "changes": {},
+  "geometry_ops": [],
+  "actions": [],
+  "metadata": {}
+}
+```
+
+- `revision` is optional. When omitted, `FlowControlBus` assigns a monotonically
+  increasing modern-protocol revision. A supplied revision must be a
+  nonnegative integer and should increase monotonically; a model ignores one
+  less than or equal to the last modern revision it accepted. Legacy chair
+  packets use a separate compatibility sequence and do not advance this
+  modern revision guard.
+- `target` is `"*"`, one string, or an array of strings. It defaults to `"*"`.
+- `changes` is a dictionary of parameter/property paths to values.
+- `geometry_ops` is an array of geometry operations.
+- `actions` is an array of action names or action dictionaries.
+- `metadata` is optional controller state retained in model snapshots.
+
+For the CPU `FlowModel2D`, one message is atomic for `changes` and
+`geometry_ops`: the model validates a duplicated candidate profile and rejects
+the whole configuration update if any field or geometry operation is invalid.
+Actions run after a valid update. The GPU stage instead validates and applies
+accepted fields and operations in message order. Use one GPU `replace`
+operation when a complete interaction set must change as one validated unit.
+
+### Target routing
+
+For installation control, use `"*"` or the stable screen IDs above:
+
+```json
+"target": "delta"
+```
+
+```json
+"target": ["mount_shasta", "delta"]
+```
+
+The bus routes `"*"` to every node in `flow_models`. A string can match a
+model's `screen_id`, node name/path, or an additional Godot group. Each
+recipient receives its own deep copy of the message.
+
+### Parameter and gate example
+
+```json
+{
+  "protocol": "ink-flow/1",
+  "revision": 1043,
+  "target": ["mount_shasta", "mccloud_pit"],
+  "changes": {
+    "flow_rate": 0.72,
+    "noise_strength": 0.95,
+    "line_width_max": 4.0,
+    "reservoir.reservoir_main.gate_open": true,
+    "reservoir.reservoir_main.outlet_width": 0.7
+  },
+  "geometry_ops": [],
+  "actions": []
+}
+```
+
+Any mutable geometry field may be addressed as `<kind>.<id>.<field>`, using
+canonical kinds `circle`, `rectangle`, `polygon`, `shoreline`, `absorber`, and
+`reservoir`. Gate-width changes made through this path are clamped to
+`0…2 × radius`. `element_id` itself is intentionally immutable; remove and
+upsert an element when its identity must change.
+
+On a production GPU target, `polygon.<id>.<field>` addresses a
+`GPUFlowInteractionPolygon`, not the CPU `FlowPolygonObstacle`. Its mutable
+fields are `mode`, `vertices`, `absorption_fraction`, `repellent_force`,
+`wave_strength`, `influence`, and `enabled`. The GPU stage also accepts
+`interaction`, `absorber`, `obstacle`, and `repeller` as geometry-kind aliases.
+`absorption`, `repel`/`strength`, and `perturbation` are accepted field aliases
+for `absorption_fraction`, `repellent_force`, and `wave_strength`, respectively.
+All GPU kind aliases address one interaction array, so IDs must be unique across
+absorb and repel modes. Canonical names are recommended for saved controller
+regimes.
+
+`source.<id>.<field>` addresses a `GPUFlowSourcePolygon`. Mutable fields are
+`vertices`, `enabled`, `emission_fraction`, `flow_direction`, and `seed`;
+`element_id` is immutable. `sources`, `source_polygon`, `source_polygons`,
+`water_source`, and `water_sources` are accepted kind aliases. Field aliases
+are `fraction`/`emission`/`rate` for `emission_fraction` and `direction` for
+`flow_direction`.
+
+Production GPU presentation, calendar, and watershed paths are:
+
+| Runtime path | Compatibility alias | Value/effect |
+|---|---|---|
+| `stage.title` | `stage_title` | River display text |
+| `stage.title_visible` | `stage_title_visible` | Title visibility |
+| `stage.grid_visible` | `stage_grid_visible` | Grid visibility |
+| `stage.grid_spacing_pixels` | `stage_grid_spacing_pixels` | Native spacing, clamped to `1…960` |
+| `stage.grid_line_width_pixels` | `stage_grid_line_width_pixels` | Native width, clamped to `0.1…8` |
+| `stage.grid_color` | `stage_grid_color` | Grid color including alpha |
+| `stage.date_visible` | `stage_date_visible` | `MM/DD-HH:MM` visibility |
+| `calendar.date` or `stage.date` | `model_date` | Validated `MM/DD-HH:MM` (or date-only `MM/DD`); disables auto-advance |
+| `calendar.day_index` | `model_day_index` | Zero-based day `0…364`; disables auto-advance |
+| `calendar.auto_advance` | `model_calendar_auto_advance` | Internal clock enabled/disabled |
+| `calendar.year_duration_seconds` | `model_year_duration_seconds` | Internal year duration, clamped to `1…86400` seconds |
+| `calendar.start_day_index` | `model_start_day_index` | Reset/start day `0…364`; setting it resets the calendar |
+| `watershed.data_path` | `watershed_data_path` | Load a pipeline text file and align it to the current timeline |
+| `watershed.drives_flow_rate` | `watershed_data_drives_flow_rate` | Enable/disable data control of water `flow_rate` |
+| `watershed.interpolate_flow_rate` | `watershed_interpolate_flow_rate` | Lerp adjacent `norm` rows or hold each current row |
+
+The public `set_model_date_time(model_date_time)` method provides the same
+validated external-time handoff as `calendar.date` and `stage.date`;
+`set_model_date_mm_dd()` remains as a compatibility name. Canonical input and
+output are zero-padded `MM/DD-HH:MM`; date-only `MM/DD` input means midnight.
+Invalid input returns `false` without changing state.
+`set_model_calendar_auto_advance(true)` resumes the internal clock from the
+displayed time. `reset_model_calendar()` resets calendar/data position only and
+does not reset water or ecology. `get_current_watershed_data_row()` returns the
+current raw row plus its interpolated flow and synthetic model date-time.
+
+Presentation/calendar paths do not alter `screen_id`, `model_id`, particle
+state, debug visibility, or the water-only occupancy texture. Watershed paths
+may change `flow_rate`, but do not rebuild particles or retune ecology. Date
+applications emit `model_date_changed(screen_id, date_mm_dd, day_of_year)`; the
+date signal intentionally remains date-only. Row changes emit
+`watershed_data_row_changed(screen_id, row_index, row_count, raw_value,
+normalized_flow, scaled_flow, high_variation, model_date_time)`.
+
+Salmon scalar paths on a production GPU target are `salmon.enabled`,
+`salmon.per_release`, `salmon.min_speed_pixels`, `salmon.water_alpha_threshold`,
+`salmon.contact_width_pixels`, `salmon.contact_height_pixels`,
+`salmon.water_steering_strength`, `salmon.trail_length_pixels`,
+`salmon.line_width_pixels`, `salmon.fade_seconds`, and `salmon.alpha`.
+`salmon.occupancy_flip_y` is a default-false platform/debug fallback for a
+vertically inverted viewport texture.
+
+Leaf scalar paths on a production GPU target are `leaves.enabled`,
+`leaves.per_side`, `leaves.release_stagger_interval_seconds`,
+`leaves.free_speed_pixels`, `leaves.flow_speed_pixels`,
+`leaves.speed_variation`, `leaves.velocity_response`,
+`leaves.sway_amplitude_min_pixels`, `leaves.sway_amplitude_max_pixels`,
+`leaves.sway_period_min_seconds`, `leaves.sway_period_max_seconds`,
+`leaves.water_alpha_threshold`, `leaves.contact_radius_pixels`,
+`leaves.free_water_search_radius_pixels`,
+`leaves.free_water_steering_strength`,
+`leaves.free_search_max_distance_pixels`, `leaves.stopped_fade_seconds`,
+`leaves.follow_probe_min_pixels`, `leaves.follow_probe_max_pixels`,
+`leaves.follow_turn_degrees`, `leaves.follow_resample_interval_seconds`,
+`leaves.occupancy_flip_y`, `leaves.disk_radius_pixels`,
+`leaves.radius_variation`, and `leaves.alpha`. `leaves.line_width_pixels`
+remains a compatibility diameter control and `leaves.line_width_variation`
+remains an alias for radius variation.
+
+Canonical names are preferred, but the model currently accepts these scalar
+aliases: `flow.rate`, `flow.max_speed`, `flow.variation`, `noise.strength`,
+`noise.scale`, `noise.speed`, `separation.radius`, `separation.strength`, and
+`debug.visible`.
+
+### Geometry operation examples
+
+Upsert one element. `add` and `update` are aliases of `upsert`:
+
+```json
+{
+  "op": "upsert",
+  "kind": "circle",
+  "id": "island_west",
+  "value": {
+    "x": 5.2,
+    "y": 4.0,
+    "radius": 0.65,
+    "strength": 5.0,
+    "bend": 1.1
+  }
+}
+```
+
+Remove one element. `delete` is an alias of `remove`:
+
+```json
+{
+  "op": "remove",
+  "kind": "circle",
+  "id": "island_west"
+}
+```
+
+Replace an entire kind. Every value needs `id` or `element_id`:
+
+```json
+{
+  "op": "replace",
+  "kind": "absorber",
+  "values": [
+    {
+      "id": "diversion_a",
+      "x": 6.0,
+      "y": 2.0,
+      "width": 0.5,
+      "height": 1.0,
+      "absorption_fraction": 0.4,
+      "stop_margin_fraction": 0.12
+    }
+  ]
+}
+```
+
+A complete message can combine operations:
+
+```json
+{
+  "protocol": "ink-flow/1",
+  "revision": 1044,
+  "target": "feather_river",
+  "changes": {},
+  "geometry_ops": [
+    {
+      "op": "upsert",
+      "kind": "rectangle",
+      "id": "weir_a",
+      "value": {
+        "x": 8.0,
+        "y": 4.5,
+        "width": 1.6,
+        "height": 0.4,
+        "angle_degrees": 12.0,
+        "strength": 4.0,
+        "bend": -0.8,
+        "influence": 0.7
+      }
+    },
+    {"op": "remove", "kind": "absorber", "id": "absorber_4_5"}
+  ],
+  "actions": []
+}
+```
+
+Accepted kind aliases include singular/plural names, `circle_obstacle`,
+`rectangle_obstacle`, `polygon_obstacle`, and `shore`.
+
+#### Production GPU interaction operations
+
+Use `polygon` as the canonical kind. An upsert can create an absorber or reshape
+an existing polygon under the same stable ID:
+
+```json
+{
+  "op": "upsert",
+  "kind": "polygon",
+  "id": "intake_west",
+  "value": {
+    "mode": "absorb",
+    "vertices": [[4.2, 7.35], [5.3, 7.55], [5.1, 8.45], [4.1, 8.25]],
+    "absorption_fraction": 0.5,
+    "repellent_force": 0.0,
+    "wave_strength": 0.18,
+    "influence": 0.35,
+    "enabled": true
+  }
+}
+```
+
+Remove one interaction with the same ID:
+
+```json
+{"op": "remove", "kind": "polygon", "id": "intake_west"}
+```
+
+Replace the complete GPU interaction set in one operation:
+
+```json
+{
+  "op": "replace",
+  "kind": "polygon",
+  "values": [
+    {
+      "id": "intake_west",
+      "mode": "absorb",
+      "vertices": [[4.2, 7.35], [5.3, 7.55], [5.1, 8.45], [4.1, 8.25]],
+      "absorption_fraction": 0.5,
+      "wave_strength": 0.18,
+      "influence": 0.35,
+      "enabled": true
+    },
+    {
+      "id": "weir_east",
+      "mode": "repel",
+      "vertices": [[7.4, 6.0], [8.4, 6.2], [8.2, 7.4], [7.3, 7.1]],
+      "repellent_force": 0.7,
+      "wave_strength": 0.0,
+      "influence": 0.8,
+      "enabled": true
+    }
+  ]
+}
+```
+
+`add` and `update` alias `upsert`; `delete` aliases `remove`. Kind and operation
+matching is case-insensitive, and plural interaction-kind aliases are accepted.
+If an absorber or repeller alias omits `mode`, the GPU stage infers `absorb` for
+`absorber` and `repel` for `obstacle`/`repeller`. Whole-set `replace` is accepted
+only with the neutral `polygon`/`interaction` kinds, so it cannot unexpectedly
+erase objects of the opposite mode. Every accepted change repacks the one
+shared texture used by all seven palette layers.
+
+#### Production GPU source operations
+
+Use `source` as the canonical kind. Source operations are independent of the
+unified interaction-polygon array:
+
+```json
+{
+  "op": "upsert",
+  "kind": "source",
+  "id": "tributary_west",
+  "value": {
+    "vertices": [[1.2, 3.6], [2.0, 3.6], [2.0, 5.4], [1.2, 5.4]],
+    "enabled": true,
+    "emission_fraction": 0.18,
+    "flow_direction": [1.0, 0.0],
+    "seed": 1701
+  }
+}
+```
+
+Remove it with:
+
+```json
+{"op": "remove", "kind": "source", "id": "tributary_west"}
+```
+
+Replace the complete source set atomically with `op: "replace"`,
+`kind: "source"`, and a `values` array whose entries each contain a unique
+`id` or `element_id`. `add`/`update` alias `upsert`; `delete` aliases `remove`.
+The stage accepts `source`, `sources`, `source_polygon`, `source_polygons`,
+`water_source`, and `water_sources` as case-insensitive kind aliases. Every
+accepted change repacks the source texture consumed by all seven water-head
+process materials.
+
+## Geometry dictionary schemas
+
+For `upsert`, the operation's `id` is authoritative; the `value` dictionary may
+omit `element_id`. For `replace`, include `id` or `element_id` in every value.
+All numeric fields must be finite.
+
+### Circle
+
+```json
+{
+  "element_id": "island_west",
+  "x": 5.2,
+  "y": 4.0,
+  "radius": 0.65,
+  "strength": 5.0,
+  "bend": 1.1
+}
+```
+
+`radius > 0`, `strength >= 0`; signed `bend` chooses steering direction.
+
+### Rectangle
+
+```json
+{
+  "element_id": "weir_a",
+  "x": 8.0,
+  "y": 4.5,
+  "width": 1.6,
+  "height": 0.4,
+  "angle_degrees": 12.0,
+  "strength": 4.0,
+  "bend": -0.8,
+  "influence": 0.7
+}
+```
+
+`width` and `height` must be positive, `strength >= 0`, and `influence > 0`.
+The angle is counterclockwise in the Y-up simulation world.
+
+### Polygon
+
+```json
+{
+  "element_id": "island_irregular",
+  "vertices": [[5.0, 2.0], [6.3, 2.2], [6.0, 3.4], [4.8, 3.0]],
+  "strength": 5.0,
+  "bend": 1.0,
+  "influence": 0.8
+}
+```
+
+A polygon needs at least three vertices, nonzero area, and no self-intersection
+or zero-length edge. `strength >= 0` and `influence > 0`.
+
+### GPU interaction polygon
+
+This is the unified production-GPU schema; it is not an additional CPU profile
+collection:
+
+```json
+{
+  "element_id": "intake_west",
+  "vertices": [[4.2, 7.35], [5.3, 7.55], [5.1, 8.45], [4.1, 8.25]],
+  "mode": "absorb",
+  "absorption_fraction": 0.5,
+  "repellent_force": 0.0,
+  "wave_strength": 0.18,
+  "influence": 0.35,
+  "enabled": true
+}
+```
+
+The ID must be nonempty. A polygon needs three through 12 finite vertices, no
+zero-length edge, nonzero area, and no self-intersection.
+`absorption_fraction`, `repellent_force`, and `wave_strength` are normalized
+`0.0…1.0`; `influence >= 0`; and `mode` is `"absorb"` or `"repel"`. Across one
+stage, at most eight valid enabled or disabled resources can be configured.
+
+Absorb mode considers only swept entries through upstream-facing edges whose
+outward normal points toward -X. It makes exactly one deterministic choice from
+the stable polygon ID and global particle identity. An accepted head stops just
+inside the crossed edge while its immutable tail fades, then its slot recycles
+cleanly. A rejected head receives one wave impulse and continues; it is not
+re-evaluated from a tail segment. `absorption_fraction = 0.0` accepts no heads
+and `1.0` accepts every qualifying head.
+
+Repel mode changes heads only. It applies a soft redirect across `influence` and
+a swept boundary correction to prevent a fixed step from tunneling through the
+polygon. `repellent_force = 0.0` contributes no redirect and `1.0` applies the
+maximum configured response. Already emitted trail segments are immutable and
+never evaluate either mode.
+
+### GPU water-source polygon
+
+```json
+{
+  "element_id": "tributary_west",
+  "vertices": [[1.2, 3.6], [2.0, 3.6], [2.0, 5.4], [1.2, 5.4]],
+  "enabled": true,
+  "emission_fraction": 0.18,
+  "flow_direction": [1.0, 0.0],
+  "seed": 1701
+}
+```
+
+The ID must be nonempty. A source needs three through 12 finite vertices, no
+zero-length edge, nonzero area, and no self-intersection. `emission_fraction`
+is normalized `0.0…1.0`; `flow_direction` must be finite and nonzero. `seed` is
+optional and accepts `null`, `-1`, or a nonnegative 32-bit integer. Across one
+stage, at most eight valid resources can be configured.
+
+On each new or recycled water-head lifecycle, the GPU sums enabled source
+fractions and clamps the sum to `1.0` to decide whether that head starts at a
+source or the ordinary left inlet. A selected source is weighted by its
+fraction. Emission then samples all downstream-facing edges according to edge
+length times positive outward-normal alignment with `flow_direction`. In the
+production +X model, the selected edge sample supplies Y, while a second,
+independent deterministic lifecycle sample supplies X between the polygon's
+packed bounding-box minimum and maximum X. The source therefore emits across
+its horizontal area instead of placing every new head on one vertical seam.
+The head starts in the configured direction. Disabled and zero-fraction records
+produce no water.
+
+The packed source image is configuration data, not a rendered occupancy mask.
+It is rebuilt only when source geometry/policy changes. Live water positions
+remain GPU-owned, and no particle or water frame is read back to the CPU.
+
+### Shoreline
+
+```json
+{
+  "element_id": "shore_bottom",
+  "vertices": [
+    [-2.0, -2.0], [18.0, -2.0], [18.0, 0.0],
+    [12.0, 0.7], [8.0, 2.1], [4.0, 3.5], [-2.0, 3.5]
+  ],
+  "water_edge_indices": [2, 3, 4, 5],
+  "side": "bottom",
+  "strength": 5.1428571429,
+  "influence": 1.0928571429,
+  "power": 2.0,
+  "force_offset": 0.6428571429
+}
+```
+
+The land polygon must be simple and closed implicitly. The water-edge chain
+needs at least two valid, forward-adjacent, zero-based indices. `side` is
+`"bottom"` or `"top"`; `strength >= 0`, `influence > 0`, `power > 0`, and
+`force_offset >= 0`.
+
+### Absorber
+
+```json
+{
+  "element_id": "diversion_a",
+  "x": 6.0,
+  "y": 2.0,
+  "width": 0.5,
+  "height": 1.0,
+  "absorption_fraction": 0.4,
+  "stop_margin_fraction": 0.12
+}
+```
+
+`width` and `height` must be positive. `absorption_fraction` is 0–1 and
+`stop_margin_fraction` is 0–0.49.
+
+Absorber selection and stopping depth are deterministic for a water-slot ID
+and absorber stable ID. Reordering the absorber array therefore does not
+change which lines an existing absorber selects.
+
+### Reservoir
+
+```json
+{
+  "element_id": "reservoir_main",
+  "x": 11.5714285714,
+  "y": 2.5714285714,
+  "radius": 1.8642857143,
+  "outlet_width": 0.7,
+  "gate_open": true,
+  "circulation": 2.0,
+  "swirl_strength": 3.0857142857,
+  "confinement_strength": 3.2,
+  "wall_strength": 10.2857142857,
+  "outlet_strength": 5.1428571429,
+  "wall_influence": 0.2828571429,
+  "orbit_radius_fraction": 0.62,
+  "orbit_radius_spread": 0.52
+}
+```
+
+`radius > 0`; `outlet_width` is 0 through the full diameter.
+`swirl_strength`, `confinement_strength`, `wall_strength`, and
+`outlet_strength` are nonnegative; `wall_influence > 0`;
+`orbit_radius_fraction` is 0–1; and `orbit_radius_spread >= 0`. Circulation is
+signed, so its sign may reverse the swirl direction.
+
+### Reservoir removal policy
+
+Removing a reservoir, or replacing the reservoir set without its stable ID,
+immediately deactivates retained water assigned to that reservoir. It does not
+teleport that stored water downstream and does not route it through a deleted
+gate. Source lines and water associated with remaining reservoirs continue.
+
+This policy prevents orphaned retained slots from circling an object that no
+longer exists. To drain a reservoir visibly, first open/widen its gate and
+allow it to release; remove it only after the desired drain period.
+
+### Editing occupied geometry
+
+A live center or radius change to a reservoir with the same stable ID remaps
+water that is still inside the old reservoir into the new circle. The model
+preserves each head's normalized local radius/angle and remaps the portion of
+its trail inside the old pool. Water that already left the old gate continues
+downstream and is not teleported by the edit. Release readiness and accumulated
+gate progress remain intact.
+
+Moving or resizing an absorber similarly remaps a trail currently assigned to
+that absorber, its in-absorber history, and its normalized stopping depth.
+Removing the absorber clears that assignment so a stopped head can resume.
+These continuity rules depend on stable IDs. A removal committed in one
+message, followed by an add in a later message, has removal semantics rather
+than migration semantics. A remove and upsert of the same ID inside one atomic
+message leaves that ID present in the final candidate and therefore preserves
+continuity.
+
+GPU interaction edits have a different, intentionally simple policy. New and
+ordinary flowing heads use the repacked polygon texture on their next process
+step, so a controller may move, reshape, enable, disable, or retune polygons at
+runtime. Previously emitted segments never move. A head already accepted by an
+absorber stays at its recorded stop position until its tail finishes fading and
+the slot recycles, even if that polygon is subsequently moved or removed. This
+prevents a live geometry edit from stretching or rewriting visible history.
+
+### Production GPU reservoir slot occupancy
+
+Unlike the retained CPU model's configurable `retention_capacity`, the
+production GPU water system has no separate reservoir-retention pool. A
+retained head continues to occupy one of the stage's fixed 300 active water-head
+slots until it exits. A closed or high-capture reservoir can therefore
+temporarily thin ordinary inlet lanes. If all active slots are retained, no new
+ordinary inlet lifecycle can start until release and recycling free a slot.
+This is bounded slot occupancy, not a memory leak or rendering failure.
+
+At every ordinary lifecycle restart, the water shader mixes the slot's
+lifecycle generation into its inlet-lane seed. A recycled slot can reappear in
+a different Y lane and refill a band that was previously starved instead of
+returning forever to the same lane. Lifecycle reseeding redistributes freed
+slots; it cannot create capacity while slots remain retained.
+
+## Production GPU salmon
+
+`GPUSalmon2D` is a fixed 300-slot GPU system outside the water-only viewport.
+The CPU writes only release generations, evenly distributed lane selectors, and
+five palette indices into a small control texture. The shader searches the
+right edge of the water-only texture for occupied lanes, moves accepted salmon
+upstream, samples water contact, steers, latches water loss, and emits immutable
+curved segments. It never reads particle state or the rendered water image back
+to the CPU.
+
+The default release contains 25 salmon. Their colors are `#FF5C8A`, `#FF7A72`,
+`#FF8C42`, `#FFAD33`, and `#FFD23F`. Their default visible trail is 100 native
+pixels long and 3 pixels wide. The centered contact rectangle is 240 pixels
+wide by 24 pixels tall. `salmon.water_alpha_threshold` defaults to `0.001`, so
+any meaningfully nontransparent pixel counts as water. The same fixed 9 x 13
+sample field selects a complete 2D direction toward occupied samples behind the
+fish. Its score strongly favors continuity with the current swim heading and
+adds a smaller upstream bias; `salmon.water_steering_strength` controls how
+strongly that direction changes the current velocity. If the right edge has no
+suitable water when a release arrives, the invisible slot retries rather than
+losing the command. No salmon runtime path or default changes with this 2D
+steering update.
+
+Water loss is a one-way decision for that release generation. The salmon
+cannot be revived by later water contact. During its configured 0.5-second
+fade, it continues in the last direction with exponential damping and emits a
+rolling short trail whose alpha diminishes to zero. Existing immutable child
+segments retain their own short spatial lifetime and age out normally, while
+the newly emitted fading segments make the complete loss transition visible.
+
+The salmon draw shader interpolates age along each segment's `UV.x` over one
+30 Hz sample interval. Neighboring endpoints therefore receive the same alpha,
+removing the fixed-alpha steps that were previously visible in faint tails.
+
+Production GPU salmon paths and defaults are:
+
+| Path | Default | Meaning |
+|---|---:|---|
+| `salmon.enabled` | `true` | Enables visible salmon/release handling |
+| `salmon.per_release` | `25` | Default `S`/action batch |
+| `salmon.min_speed_pixels` | `60` | Low-flow upstream-speed floor and trail-pool bound |
+| `salmon.water_alpha_threshold` | `0.001` | Any meaningfully nontransparent water qualifies |
+| `salmon.contact_width_pixels` | `240` | Full centered contact width |
+| `salmon.contact_height_pixels` | `24` | Full centered contact height |
+| `salmon.water_steering_strength` | `5.0` | Full 2D occupancy steering with heading continuity and upstream bias |
+| `salmon.trail_length_pixels` | `100` | Spatial immutable-trail length |
+| `salmon.line_width_pixels` | `3` | Trail width |
+| `salmon.fade_seconds` | `0.5` | Latched no-water fade interval |
+| `salmon.alpha` | `1.0` | Global salmon alpha |
+| `salmon.occupancy_flip_y` | `false` | Platform/debug fallback for an inverted viewport texture |
+
+Above 60 pixels/second, salmon follow the effective live water speed. The
+minimum prevents a 100-pixel spatial trail from acquiring an unbounded lifetime
+and segment-pool requirement as `flow_rate` approaches zero.
+
+Leave `salmon.occupancy_flip_y` false unless a target renderer presents the
+`ViewportTexture` vertically inverted. It changes only occupancy sampling; it
+does not alter water or salmon rendering coordinates.
+
+## Production GPU leaves
+
+`GPULeaf2D` is a fixed 300-slot GPU system at absolute Z index `10`, outside the
+water-only viewport. The CPU writes only release generations, scheduled delays,
+independently shuffled stratified X-lane selectors, seven palette indices, and
+top/bottom-origin codes into a fixed 300 x 2 control texture. Leaf position,
+size, delay countdown, water contact, irreversible attachment, water-path
+following, disk rendering, and stopped-fade opacity stay on the GPU. There is
+one resident head pool and no leaf segment pool. Neither particle state nor the
+rendered water image is read back.
+
+Pressing `L`, calling `release_leaves()`, or sending a `release_leaves` action
+schedules 15 leaves from the top edge and 15 from the bottom edge by default.
+Each cohort retains one sample in every stratified lane across the complete X
+axis. A separate deterministic shuffle per bank assigns those X lanes to launch
+times, so X position and delay order are decoupled. The public API argument is a
+per-side count from 1 through 150 and the return value is the total scheduled:
+
+```gdscript
+stage.release_leaves()       # 15 top + 15 bottom; returns 30
+stage.release_leaves(20)     # 20 top + 20 bottom; returns 40
+```
+
+The default batch does not appear simultaneously. Its deterministic sequence
+alternates top, bottom, top, bottom. `leaves.release_stagger_interval_seconds`
+sets a `0.20`-second base gap, while a stable multiplier from `0.55` through
+`1.45` makes successive gaps irregularly span `0.11…0.29` seconds. The default
+15-plus-15 batch spans about `5.93` seconds, approximately twice its former
+maximum delay. Lane order uses a separate stable mix from gap timing. All
+absolute delays are written once with the release; the GPU scheduled state
+counts them down without CPU timers or particle readback. Resetting and
+replaying the same batch reproduces its cadence and lane shuffle.
+
+Leaves are head-only filled disks. Their exact palette is `#8C3F0A`, `#A95412`,
+`#C47A12`, `#C29A18`, `#8A8F2A`, `#4F772D`, and `#365F32`. The default base
+diameter is 10 pixels, or a 5-pixel radius. A stable per-generation scale from
+`1.0…2.0` produces diameters of 10…20 pixels, or radii of 5…10 pixels. The draw
+shader gives each disk a soft antialiased radial edge; no motion segments or
+trail pool are created. Before
+water contact, each leaf searches while moving inward from its top or bottom
+source edge at 120 pixels per second with 2–6 pixels of horizontal sway and a
+stable random period from 1.2 through 2.8 seconds. A
+17 x 17 grid samples the forward/inward portion of a 120-pixel-radius 2D
+vicinity; samples back toward the originating bank are rejected. A detected
+stream steers the leaf 35% toward the selected water direction while preserving
+an inward component. If no water is touched within 256 pixels of inward travel,
+the leaf enters `STOPPED_FADING`: its disk freezes, fades to transparent, and
+retires after 0.5 seconds.
+
+The contact disk has a 12-pixel radius and accepts water alpha at or above
+`0.001`. Contact makes one position-preserving transition into the latched
+water-following state at 300 pixels per second and initializes its cached
+heading to +X. At a default `0.12`-second interval with a deterministic per-leaf
+phase, a forward probe fan searches 8 through 56 pixels around that cached local
+heading over a 35-degree half-angle. At multiple radii it combines center
+samples with lower-weight flank samples before applying strong continuity and a
+smaller downstream bias. This wider water support lets a leaf anticipate bends
+without reacting to a different neighboring alpha sample on every frame. Each
+accepted turn becomes the next cached heading, so turns accumulate around
+reservoir curves. Velocity response is `8.0 s⁻¹`. Attachment never returns to
+free motion, including through a temporary alpha gap, and an attached leaf
+retires only after its complete disk clears the right edge.
+
+The disk's stable size is derived from particle index and release generation,
+so it does not flicker or change radius while moving. `STOPPED_FADING` changes
+the resident disk's alpha directly. The visual radius is independent of the
+larger water-contact radius used by the occupancy test.
+
+Production GPU leaf paths and defaults are:
+
+| Path | Default | Meaning |
+|---|---:|---|
+| `leaves.enabled` | `true` | Enables visible leaves/release handling |
+| `leaves.per_side` | `15` | Default count from each of the top and bottom edges |
+| `leaves.release_stagger_interval_seconds` | `0.20` | Base gap for alternating top/bottom scheduled starts; fixed multipliers produce 0.11…0.29-second gaps and an approximately 5.93-second default span |
+| `leaves.free_speed_pixels` | `120` | Free-flight vertical speed |
+| `leaves.flow_speed_pixels` | `300` | Attached downstream speed |
+| `leaves.speed_variation` | `0.0` | Per-leaf speed variation |
+| `leaves.velocity_response` | `8.0` | Response toward the cached local water heading |
+| `leaves.sway_amplitude_min_pixels` | `2` | Minimum horizontal sway amplitude |
+| `leaves.sway_amplitude_max_pixels` | `6` | Maximum horizontal sway amplitude |
+| `leaves.sway_period_min_seconds` | `1.2` | Minimum sway period |
+| `leaves.sway_period_max_seconds` | `2.8` | Maximum sway period |
+| `leaves.water_alpha_threshold` | `0.001` | Minimum alpha counted as water |
+| `leaves.contact_radius_pixels` | `12` | Radius of the one-way contact test |
+| `leaves.free_water_search_radius_pixels` | `120` | Radius of the free leaf's 17 x 17 forward/inward 2D water search |
+| `leaves.free_water_steering_strength` | `0.35` | Blend from inward fall toward nearby water |
+| `leaves.free_search_max_distance_pixels` | `256` | Inward bank distance searched before a miss freezes and fades |
+| `leaves.stopped_fade_seconds` | `0.50` | Retirement fade after a missed leaf disk stops moving |
+| `leaves.follow_probe_min_pixels` | `8` | Nearest cached-local-heading probe radius |
+| `leaves.follow_probe_max_pixels` | `56` | Farthest multi-radius center/flank probe radius |
+| `leaves.follow_turn_degrees` | `35` | Cached-local-heading probe half-angle per resample |
+| `leaves.follow_resample_interval_seconds` | `0.12` | Interval between cached water-heading refreshes |
+| `leaves.occupancy_flip_y` | `false` | Platform/debug fallback for an inverted texture |
+| `leaves.disk_radius_pixels` | `5` | Canonical base visual radius for the head-only disk |
+| `leaves.radius_variation` | `1.0` | Canonical one-sided deterministic radius variation, range 0…1; base × 1.0…2.0 gives radii of 5…10 pixels |
+| `leaves.line_width_pixels` | `10` | Compatibility diameter control; equivalent to twice `disk_radius_pixels` |
+| `leaves.line_width_variation` | `1.0` | Compatibility alias for `radius_variation` |
+| `leaves.alpha` | `1.0` | Global leaf alpha |
+
+`leaves.contact_radius_pixels` controls water detection and is independent of
+the smaller visual `leaves.disk_radius_pixels`. Pause/resume applies to the leaf
+head pool. The stage's `reset` action clears leaf release generations and all
+visible disks; an immediate new release remains valid even while paused.
+
+## Actions
+
+Actions can be strings:
+
+```json
+{
+  "protocol": "ink-flow/1",
+  "revision": 1045,
+  "target": "delta",
+  "changes": {},
+  "geometry_ops": [],
+  "actions": ["pause", "capture_screenshot"]
+}
+```
+
+Or dictionaries with future-facing arguments:
+
+```json
+"actions": [
+  {"name": "release_salmon", "arguments": {"count": 40}},
+  {"name": "release_leaves", "arguments": {"count_per_side": 20}}
+]
+```
+
+Common implemented action names are:
+
+- `toggle_debug_geometry`
+- `reset`
+- `pause`
+- `resume`
+- `capture_screenshot`
+- `release_salmon`
+- `release_leaves`
+
+On the production GPU stage, `release_salmon` without arguments schedules the
+configured `salmon.per_release` batch (25 by default). A dictionary may specify
+`arguments.count` from 1 through the fixed capacity of 300. `release_leaves`
+without arguments schedules `leaves.per_side` from both the top and bottom
+edges (15 + 15 by default). Its dictionary form accepts
+`arguments.count_per_side` from 1 through 150; `arguments.count` is an alias
+with the same per-side meaning. The stage also accepts `toggle_gate`; `reset`
+restarts water, salmon, and leaves and returns the presentation calendar to its
+configured production start (`07/01-00:00`). Reset preserves both pause and
+calendar auto-advance mode. Screenshot
+capture remains part of the retained CPU action set unless the hosting scene
+supplies its own capture handler.
+
+## Legacy origin/main controller compatibility
+
+The existing `origin/main` `controller.py` does not send an `ink-flow/1`
+envelope. It broadcasts a legacy dictionary at 60 Hz with a `speed` value from
+0 through 9 plus chair/regime metadata.
+
+`FlowControlBus` recognizes packets without `protocol` that contain `speed` and
+normalizes them to:
+
+```json
+{
+  "protocol": "ink-flow/1",
+  "revision": 1,
+  "target": "*",
+  "changes": {"flow_rate": 0.5555555556},
+  "geometry_ops": [],
+  "actions": [],
+  "legacy": true,
+  "legacy_speed": 5.0,
+  "metadata": {"speed": 5, "chairs": [0, 1, 0, 0, 0, 0, 0]}
+}
+```
+
+The mapping is `flow_rate = clamp(speed, 0, 9) / 9`. Chair, occupancy,
+`ring_alpha`, regime, stale/source, timestamp, temperature, and vote data are
+preserved under `metadata`; common chair/regime fields are also copied to the
+normalized message's top level.
+
+Unchanged 60 Hz legacy packets are coalesced instead of filling every model's
+queue. Meaningful speed/chair/regime changes are delivered. The latest state is
+cached and replayed once if a model appears after the bus began listening, so
+selecting a scene does not require a chair state to change before flow starts.
+Localhost and broadcast copies of the same packet are also deduplicated.
+
+## Keyboard controls
+
+When `accept_keyboard_input` is enabled on a model:
+
+| Key | Runtime effect |
+|---|---|
+| `0`–`9` | Set `flow_rate` to digit ÷ 9 |
+| `V` | Toggle obstacle, shoreline, absorber, and reservoir debug geometry |
+| `G` | Toggle the first reservoir's gate |
+| `[` | Narrow the first reservoir gate by `gate_width_step` |
+| `]` | Widen the first reservoir gate by `gate_width_step` |
+| `S` | Production GPU: release the configured salmon batch (25 by default) |
+| `L` | Production GPU: release 15 leaves from the top and 15 from the bottom |
+| `Space` | Production GPU: pause/resume water, salmon, leaves, and the internal model calendar |
+| `F12` | Capture a PNG screenshot |
+| `Escape` | Return from the display scene to `startup_selector.tscn` |
+
+The first reservoir in the default profile is `reservoir_main`.
+
+Production GPU keyboard paths are isolated. Digit keys update only water
+`flow_rate`; they do not rebuild, retune, or release the salmon/leaf systems or
+resize their segment pools. `S` releases only salmon, and `L` releases only
+leaves. Every recognized stage key is marked handled so another scene node
+cannot process the same event a second time. Use the ecology runtime paths and
+release actions when a controller needs to change those systems.
+
+In the production GPU stage, `V` toggles all debug geometry together: the
+reservoir guide is cyan, absorb/repel polygons are gold, and water-source
+polygons plus downstream-emission arrows are violet. Disabled polygons use a
+faint version of their class color so they can still be found while debugging.
+The background grid, stage title, and model date remain visible because they are
+not debug geometry.
+
+## Screenshots
+
+Screenshots are written to:
+
+```text
+user://ink_flow_screenshots/<screen_id>_<timestamp>.png
+```
+
+Godot resolves `user://` to the current platform's application-data directory.
+On success, `FlowModel2D.action_completed` emits the globalized absolute path in
+`details.path`, which is the reliable path for a controller UI to display.
+
+## Runtime state and signals
+
+`FlowModel2D.get_state_snapshot()` returns the protocol name, screen ID, last
+revision, serialized parameter values, all geometry, runtime stats, and the
+latest controller metadata. `describe_parameters()` adds type/range/reset
+schema information to every scalar parameter.
+
+Model signals include configuration, parameter, geometry, gate, action,
+reset, stats, and control-error notifications. The transport emits
+`listening_started`, `packet_received`, `packet_routed`, `packet_error`, and
+`transport_error`.
+
+`GPUFlowStage2D.runtime_summary()` exposes its presentation state directly.
+Grid fields are `stage_grid_visible`, `stage_grid_spacing_pixels`,
+`stage_grid_line_width_pixels`, `stage_grid_color`, `stage_grid_z_index`, and
+`stage_grid_line_count`. Date fields are `stage_date_visible`,
+`stage_date_text`, `stage_date_format`, `stage_date_position`, `stage_date_color`,
+`stage_date_font_size`, `stage_date_font_resource`, and `stage_date_z_index`.
+Clock fields are `model_day_index`, `model_day_of_year`,
+`model_minute_of_day`, `model_elapsed_seconds`, `model_year_progress`,
+`model_year_duration_seconds`, `model_year_frames_at_30_fps`,
+`model_year_minute_count`, `model_calendar_day_count`,
+`model_calendar_auto_advance`, `model_calendar_source`, and
+`model_start_day_index`.
+
+Watershed fields are `watershed_data_path`, `watershed_data_loaded`,
+`watershed_data_error`, `watershed_data_river`, `watershed_data_row_count`,
+`watershed_data_row_index`, `watershed_data_row_fraction`,
+`watershed_data_drives_flow_rate`, `watershed_interpolate_flow_rate`,
+`watershed_interpolated_flow_rate`, `watershed_flow_percent`,
+`watershed_row_duration_seconds`, `watershed_model_minutes_per_row`, and
+`watershed_current_row`. The current-row dictionary contains `row_index`,
+`row_count`, `raw_value`, `normalized_flow`, `scaled_flow`, `high_variation`,
+`interpolated_flow_rate`, `row_fraction`, and `model_date_time`.
+
+Layering can be inspected through `background_z_index`, `stage_title_z_index`,
+`stage_title_below_animated_features`, `stage_grid_above_background`, and
+`stage_text_above_grid`. The corresponding occupancy guarantees are
+`water_texture_excludes_background`, `water_texture_excludes_stage_grid`,
+`water_texture_excludes_debug_overlay`, `water_texture_excludes_stage_title`,
+and `water_texture_excludes_stage_date`.
+
+This state/control layer is the intended seam for a later control scene. The
+production GPU stage adds salmon, leaves, and water-source polygons through that
+seam. Both ecological overlays sample the same water-only texture without
+changing the water-profile, geometry targeting, or UDP envelope described here.
+
+## Automated validation suites
+
+From `godot_experiments/`, run:
+
+```sh
+Godot --headless --path . \
+  --scene res://flow/tests/flow_runtime_smoke.tscn
+```
+
+The test loads a real `FlowModel2D`, exercises parameters, gates, geometry
+upsert/removal, atomic rollback, pause/resume, direct protocol routing, legacy
+speed compatibility, and a real localhost UDP JSON packet. A successful run
+ends with `FLOW_RUNTIME_SMOKE: PASS`. It deliberately submits one over-budget
+configuration to verify rollback, so the corresponding rejection warning is
+expected.
+
+The retained validation set has exactly six suites:
+
+| Suite | Scene |
+|---|---|
+| Controller transport and retained runtime | `res://flow/tests/flow_runtime_smoke.tscn` |
+| Reusable production GPU stage | `res://flow/gpu_stage/gpu_flow_stage_smoke.tscn` |
+| GPU source texture packing | `res://flow/gpu_stage/gpu_flow_source_texture_smoke.tscn` |
+| GPU salmon | `res://flow/gpu_stage/gpu_salmon_smoke.tscn` |
+| GPU leaves | `res://flow/gpu_stage/gpu_leaf_smoke.tscn` |
+| Seven production wrappers | `res://flow/tests/gpu_stage_scenes_smoke.tscn` |
+
+The five deployed GPU suites verify the water-only viewport, the two
+bounded 128 x 1 `RGBAF` configuration textures, propagation to all seven water
+particle-process materials, source weighted-edge Y plus independent
+bounding-box X sampling, source and interaction controller operations, salmon
+and leaf release/control without CPU readback, targeted screen isolation, and
+the shared Barlow Condensed Medium resource. The grid, date-time, and watershed
+timeline described above are runtime contracts; the current smoke scenes do not
+assert their complete behavior.
+The standalone leaf smoke is:
+
+```sh
+Godot --headless --path . \
+  --rendering-method mobile \
+  --scene res://flow/gpu_stage/gpu_leaf_smoke.tscn
+```
+
+It checks the fixed 300-slot pool, exact 15-top/15-bottom default release,
+deterministic irregular alternating `0.11…0.29`-second gaps and an approximately
+5.93-second default span, independent deterministic X-lane shuffles per bank,
+custom per-side release, palette, head-only antialiased disks with deterministic
+10…20-pixel diameters and 5…10-pixel radii, 2–6-pixel free-sway contract, the
+120-pixel 17 x 17
+nearby-water search and 0.35 steering blend, 256-pixel inward search bound,
+frozen 0.5-second disk fade, zero segment capacity, one-way attachment state,
+8…56-pixel center/flank support over a 35-degree fan at a 0.12-second cadence,
+water-texture assignment, pause/reset/immediate re-release behavior, and
+absence of CPU readback. All GPU
+smoke commands and their expected scope are listed in
+`res://flow/gpu_stage/README.md`.

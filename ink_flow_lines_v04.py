@@ -6,7 +6,7 @@ and polygonal obstacles, shoreline polygons, absorbers, and reservoirs.
 
 Interactive releases:
     S releases 25 upstream-swimming salmon.
-    L queues 25 rigid vesica-piscis leaves from each shoreline side.
+    L queues 25 rotating oval particles from each shoreline side.
 
 Optional export:
     Set SAVE_MP4 = True and install ffmpeg.
@@ -24,7 +24,7 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
-from matplotlib.collections import LineCollection
+from matplotlib.collections import LineCollection, PolyCollection
 from matplotlib.colors import to_rgba_array
 from matplotlib.patches import Arc, Circle, Polygon as PolygonPatch
 
@@ -124,13 +124,14 @@ BASE_FLOW_Y = 0.0
 NOISE_STRENGTH = 0.6 * WORLD_SCALE
 NOISE_SCALE = 1.5 / WORLD_SCALE
 NOISE_SPEED = 0.75
+SHORE_EXIT_ANGLE_JITTER_DEGREES = 16.0
 
 # Soft particle pressure prevents neighboring trails from collapsing onto the
 # same path after they pass an obstacle.
-PARTICLE_SEPARATION_RADIUS = 0.075 * WORLD_SCALE
-PARTICLE_SEPARATION_STRENGTH = 0.85 * WORLD_SCALE
+PARTICLE_SEPARATION_RADIUS = 0.14 * WORLD_SCALE
+PARTICLE_SEPARATION_STRENGTH = 1.25 * WORLD_SCALE
 PARTICLE_SEPARATION_X_SCALE = 0.15
-PARTICLE_SEPARATION_MAX_FORCE = 1.0 * WORLD_SCALE
+PARTICLE_SEPARATION_MAX_FORCE = 1.5 * WORLD_SCALE
 
 # Each trail receives one stable random width from this range.
 LINE_WIDTH_MIN = 0.5
@@ -169,11 +170,10 @@ LEAF_RELEASE_KEY = "l"
 LEAVES_PER_SIDE = 25
 MAX_LEAVES = 300
 LEAF_RELEASE_INTERVAL_MS = 50.0
-LEAF_ARC_POINT_COUNT = 7
-LEAF_POINT_COUNT = LEAF_ARC_POINT_COUNT * 2 - 1
-LEAF_LENGTH_MIN_PX = 18.0
-LEAF_LENGTH_MAX_PX = 30.0
-LEAF_LINE_WIDTH = 2.0
+LEAF_OVAL_RADIUS_MIN_PX = 8.0
+LEAF_OVAL_RADIUS_MAX_PX = 16.0
+LEAF_OVAL_ASPECT_RATIO = 0.6
+LEAF_OVAL_POINT_COUNT = 20
 # User-facing tuning value in pixels. It is converted to world units below.
 LEAF_COLLISION_RADIUS = 12.0
 LEAF_FALL_SPEED_PX = 120.0
@@ -181,10 +181,10 @@ LEAF_SWAY_AMPLITUDE_MIN_PX = 6.0
 LEAF_SWAY_AMPLITUDE_MAX_PX = 18.0
 LEAF_SWAY_PERIOD_MIN_SECONDS = 1.2
 LEAF_SWAY_PERIOD_MAX_SECONDS = 2.8
-# Include both outline length and maximum sway so angled trajectories clear
-# the opposite frame edge completely before their slots are reclaimed.
+# Include both oval radius and maximum sway so angled trajectories clear the
+# opposite frame edge completely before their slots are reclaimed.
 LEAF_EXIT_MARGIN_PX = (
-    LEAF_LENGTH_MAX_PX + LEAF_SWAY_AMPLITUDE_MAX_PX
+    LEAF_OVAL_RADIUS_MAX_PX + LEAF_SWAY_AMPLITUDE_MAX_PX
 )
 LEAF_ROTATION_MIN_DEGREES_PER_FRAME = 0.1
 LEAF_ROTATION_MAX_DEGREES_PER_FRAME = 1.0
@@ -368,29 +368,57 @@ POLYGON_OBSTACLES = [
 # bottom banks. Edit the water-facing vertices (indices listed alongside each
 # polygon) to make either shoreline bend through the frame. Keep the outer
 # closure edges beyond the visible canvas so they do not steer the river.
+
 SHORELINE_POLYGONS = [
     ShorelinePolygon(
         vertices=(
-            (-SHORE_POLYGON_MARGIN, -SHORE_POLYGON_MARGIN),
-            (WIDTH + SHORE_POLYGON_MARGIN, -SHORE_POLYGON_MARGIN),
-            (WIDTH + SHORE_POLYGON_MARGIN, 0.0),
-            (-SHORE_POLYGON_MARGIN, 0.0),
+            # Hidden outer land boundary
+            (-SHORE_POLYGON_MARGIN, -SHORE_POLYGON_MARGIN),         # 0
+            (WIDTH + SHORE_POLYGON_MARGIN, -SHORE_POLYGON_MARGIN),  # 1
+
+            # Water-facing edge, ordered right to left
+            (WIDTH + SHORE_POLYGON_MARGIN, 0.0),                    # 2
+            (16.0, 0.0),                                            # 3
+            (14.0, 0.0),                                            # 4
+            (12.0, 0.7),                                            # 5
+            (10.0, 1.4),                                            # 6
+            (8.0, 2.1),                                             # 7
+            (6.0, 2.8),                                             # 8
+            (4.0, 3.5),                                             # 9
+            (0.0, 3.5),                                             # 10
+
+            # Hidden left closure
+            (-SHORE_POLYGON_MARGIN, 3.5),                            # 12
         ),
-        water_edge_indices=(2, 3),
+        water_edge_indices=(2, 3, 4, 5, 6, 7, 8, 9, 10),
         side="bottom",
         force_offset=BOTTOM_SHORE_Y_OFFSET,
     ),
+
     ShorelinePolygon(
         vertices=(
-            (-SHORE_POLYGON_MARGIN, HEIGHT),
-            (WIDTH + SHORE_POLYGON_MARGIN, HEIGHT),
+            # Irregular water-facing edge, ordered left to right
+            (-SHORE_POLYGON_MARGIN, 8.40),         # index 0
+            (2.0, 8.60),                           # index 1
+            (4.0, 8.10),                           # index 2
+            (6.0, 8.50),                           # index 3
+            (8.0, 7.90),                           # index 4
+            (10.0, 8.40),                          # index 5
+            (12.0, 6.00),                          # index 6
+            (14.0, 8.60),                          # index 7
+            (WIDTH + SHORE_POLYGON_MARGIN, 8.50),  # index 8
+
+            # Outer land boundary
             (
                 WIDTH + SHORE_POLYGON_MARGIN,
                 HEIGHT + SHORE_POLYGON_MARGIN,
-            ),
-            (-SHORE_POLYGON_MARGIN, HEIGHT + SHORE_POLYGON_MARGIN),
+            ),                                     # index 9
+            (
+                -SHORE_POLYGON_MARGIN,
+                HEIGHT + SHORE_POLYGON_MARGIN,
+            ),                                     # index 10
         ),
-        water_edge_indices=(0, 1),
+        water_edge_indices=(0, 1, 2, 3, 4, 5, 6, 7, 8),
         side="top",
         force_offset=TOP_SHORE_Y_OFFSET,
     ),
@@ -474,7 +502,7 @@ RESERVOIRS = [
         11.5714285714,
         2.5714285714,
         radius=1.8642857143,
-        outlet_width=0.1285714286,
+        outlet_width=0.25,
         gate_open=True,
         circulation=2.0,  # positive is counterclockwise; negative is clockwise
     ),
@@ -498,17 +526,49 @@ particle_flow_offsets = (
     - PARTICLE_FLOW_VARIATION
 )
 
-def shore_force(points: np.ndarray) -> np.ndarray:
+# Rotate each water line's shoreline response by one stable, evenly
+# distributed angle. This separates paths even when their heads reach the
+# same collision point at different times.
+particle_shore_angle_offsets = np.deg2rad(
+    (
+        np.mod(
+            (np.arange(PARTICLE_POOL_SIZE) + 1) * 0.4142135623730951,
+            1.0,
+        )
+        * 2.0
+        - 1.0
+    )
+    * SHORE_EXIT_ANGLE_JITTER_DEGREES
+)
+
+
+def shore_force(
+    points: np.ndarray,
+    particle_indices: np.ndarray | None = None,
+    apply_angle_jitter: bool = True,
+) -> np.ndarray:
     """
     Push particles out of the configured solid shoreline polygons.
 
     The force starts gently at SHORE_INFLUENCE distance and becomes
     stronger as a particle approaches or enters land.
     """
+    if particle_indices is None:
+        particle_indices = np.arange(len(points), dtype=np.intp)
+    else:
+        particle_indices = np.asarray(particle_indices, dtype=np.intp)
+        if len(particle_indices) != len(points):
+            raise ValueError(
+                "particle_indices must contain one index per point"
+            )
+
     force = np.zeros_like(points)
+    angles = particle_shore_angle_offsets[particle_indices]
+    cos_angle = np.cos(angles)
+    sin_angle = np.sin(angles)
 
     for shoreline in SHORELINE_POLYGONS:
-        force += polygon_obstacle_force(
+        shoreline_force = polygon_obstacle_force(
             points,
             np.asarray(shoreline.vertices, dtype=float),
             shoreline.strength,
@@ -517,6 +577,16 @@ def shore_force(points: np.ndarray) -> np.ndarray:
             influence_power=shoreline.power,
             distance_offset=shoreline.force_offset,
         )
+        if apply_angle_jitter:
+            original_x = shoreline_force[:, 0].copy()
+            original_y = shoreline_force[:, 1].copy()
+            shoreline_force[:, 0] = (
+                original_x * cos_angle - original_y * sin_angle
+            )
+            shoreline_force[:, 1] = (
+                original_x * sin_angle + original_y * cos_angle
+            )
+        force += shoreline_force
 
     return force
 
@@ -671,7 +741,10 @@ def polygon_obstacle_force(
     return force
 
 
-def particle_separation_force(points: np.ndarray) -> np.ndarray:
+def particle_separation_force(
+    points: np.ndarray,
+    particle_indices: np.ndarray | None = None,
+) -> np.ndarray:
     """
     Apply a soft local pressure between nearby particle heads.
 
@@ -681,6 +754,14 @@ def particle_separation_force(points: np.ndarray) -> np.ndarray:
     count = len(points)
     if count < 2:
         return np.zeros_like(points)
+    if particle_indices is None:
+        particle_indices = np.arange(count, dtype=np.intp)
+    else:
+        particle_indices = np.asarray(particle_indices, dtype=np.intp)
+        if len(particle_indices) != count:
+            raise ValueError(
+                "particle_indices must contain one index per point"
+            )
 
     offsets = points[:, None, :] - points[None, :, :]
     distance_sq = np.einsum(
@@ -688,10 +769,12 @@ def particle_separation_force(points: np.ndarray) -> np.ndarray:
         offsets,
         offsets,
     )
+    self_pairs = np.eye(count, dtype=bool)
     nearby = (
-        (distance_sq > 1e-12)
+        ~self_pairs
         & (distance_sq < PARTICLE_SEPARATION_RADIUS ** 2)
     )
+    coincident = nearby & (distance_sq <= 1e-12)
 
     distance = np.sqrt(
         np.maximum(distance_sq, 1e-12)
@@ -705,6 +788,15 @@ def particle_separation_force(points: np.ndarray) -> np.ndarray:
         0.0,
     )
     directions = offsets / distance[:, :, None]
+    if np.any(coincident):
+        # Exact overlaps have no geometric direction. Split them vertically
+        # using stable particle identity: each pair receives equal and
+        # opposite directions, so coincident heads fan apart deterministically.
+        identity_order = np.sign(
+            particle_indices[:, None] - particle_indices[None, :]
+        )
+        directions[:, :, 0][coincident] = 0.0
+        directions[:, :, 1][coincident] = identity_order[coincident]
     force = np.sum(
         directions * pressure[:, :, None],
         axis=1,
@@ -914,6 +1006,7 @@ def velocity_field(
     time_value: float,
     separation_force: np.ndarray | None = None,
     particle_indices: np.ndarray | None = None,
+    apply_shore_angle_jitter: bool = True,
 ) -> np.ndarray:
     if particle_indices is None:
         particle_indices = np.arange(len(points), dtype=np.intp)
@@ -929,7 +1022,11 @@ def velocity_field(
     velocity[:, 1] = BASE_FLOW_Y
 
     velocity += curl_noise(points, time_value)
-    velocity += shore_force(points)
+    velocity += shore_force(
+        points,
+        particle_indices,
+        apply_angle_jitter=apply_shore_angle_jitter,
+    )
     if separation_force is not None:
         velocity += separation_force
 
@@ -1140,8 +1237,6 @@ WATER_GRID_CELL_SIZE = WATER_GRID_CELL_PX * DATA_UNITS_PER_PIXEL
 LEAF_COLLISION_RADIUS_DATA = (
     LEAF_COLLISION_RADIUS * DATA_UNITS_PER_PIXEL
 )
-LEAF_LENGTH_MIN_DATA = LEAF_LENGTH_MIN_PX * DATA_UNITS_PER_PIXEL
-LEAF_LENGTH_MAX_DATA = LEAF_LENGTH_MAX_PX * DATA_UNITS_PER_PIXEL
 LEAF_EXIT_MARGIN_DATA = LEAF_EXIT_MARGIN_PX * DATA_UNITS_PER_PIXEL
 LEAF_FALL_SPEED_DATA = LEAF_FALL_SPEED_PX * DATA_UNITS_PER_PIXEL
 LEAF_SWAY_AMPLITUDE_MIN_DATA = (
@@ -1185,11 +1280,12 @@ leaf_positions = np.full((MAX_LEAVES, 2), np.nan)
 leaf_transit_positions = np.full((MAX_LEAVES, 2), np.nan)
 leaf_targets = np.full((MAX_LEAVES, 2), np.nan)
 leaf_local_shapes = np.full(
-    (MAX_LEAVES, LEAF_POINT_COUNT, 2),
+    (MAX_LEAVES, LEAF_OVAL_POINT_COUNT, 2),
     np.nan,
 )
 leaf_segments = np.full_like(leaf_local_shapes, np.nan)
 leaf_states = np.full(MAX_LEAVES, LEAF_STATE_INACTIVE, dtype=np.int8)
+leaf_oval_radii_px = np.full(MAX_LEAVES, np.nan)
 leaf_angles = np.zeros(MAX_LEAVES)
 leaf_spin_rates = np.zeros(MAX_LEAVES)
 leaf_sway_amplitudes = np.zeros(MAX_LEAVES)
@@ -1219,6 +1315,7 @@ def deactivate_leaves(indices: np.ndarray) -> None:
     leaf_targets[indices] = np.nan
     leaf_local_shapes[indices] = np.nan
     leaf_segments[indices] = np.nan
+    leaf_oval_radii_px[indices] = np.nan
     leaf_water_slots[indices] = -1
     leaf_water_sample_indices[indices] = -1
     leaf_last_water_anchors[indices] = np.nan
@@ -1409,17 +1506,32 @@ def retain_source_particles(
         particle_flow_offsets[retention_index] = particle_flow_offsets[
             source_index
         ]
+        particle_shore_angle_offsets[retention_index] = (
+            particle_shore_angle_offsets[source_index]
+        )
         retirement_flow_rates[retention_index] = retirement_flow_rates[
             source_index
         ]
         particle_launch_times_ms[retention_index] = elapsed_ms
         retained[retention_index] = True
         retained_reservoir_indices[retention_index] = reservoir_index
-        reservoir_release_progress[retention_index] = 0.0
-        reservoir_release_thresholds[retention_index] = rng.uniform(
+        release_threshold = rng.uniform(
             RESERVOIR_RELEASE_THRESHOLD_MIN,
             RESERVOIR_RELEASE_THRESHOLD_MAX,
         )
+        reservoir_release_thresholds[retention_index] = release_threshold
+        reservoir = RESERVOIRS[reservoir_index]
+        if reservoir.gate_open and reservoir_gate_fraction(reservoir) > 0.0:
+            # Start an initially open reservoir in a distributed steady-state
+            # phase instead of forcing every captured line to begin at zero.
+            # This removes the artificial startup pause while preserving the
+            # same long-term aperture-controlled release rate.
+            reservoir_release_progress[retention_index] = rng.uniform(
+                0.0,
+                release_threshold,
+            )
+        else:
+            reservoir_release_progress[retention_index] = 0.0
         reservoir_release_ready[retention_index] = False
         retiring[retention_index] = False
         absorbed[retention_index] = False
@@ -1953,7 +2065,7 @@ def claim_leaf_slots(count: int) -> np.ndarray:
 
 
 def refresh_leaf_collection() -> None:
-    """Transform every immutable local curve into its current world pose."""
+    """Transform each filled oval into its current rotated world pose."""
     leaf_segments[:] = np.nan
     visible_mask = (
         (leaf_states != LEAF_STATE_INACTIVE)
@@ -1977,42 +2089,26 @@ def refresh_leaf_collection() -> None:
 
     display_colors = leaf_rgba.copy()
     display_colors[~visible_mask, 3] = 0.0
-    leaf_collection.set_segments(leaf_segments)
-    leaf_collection.set_color(display_colors)
+    leaf_collection.set_verts(leaf_segments)
+    leaf_collection.set_facecolors(display_colors)
 
 
-def vesica_piscis_leaf_shapes(lengths: np.ndarray) -> np.ndarray:
-    """Build rigid two-arc lenses from equal intersecting circles."""
-    # Unit-length vesica piscis: the circle radius is 1/sqrt(3), so the two
-    # circle-intersection tips lie exactly at x=-0.5 and x=0.5. The circle
-    # centers are one radius apart, placing each center on the other circle.
-    radius = 1.0 / math.sqrt(3.0)
-    upper_angles = np.linspace(
-        5.0 * math.pi / 6.0,
-        math.pi / 6.0,
-        LEAF_ARC_POINT_COUNT,
+def oval_leaf_shapes(radii_px: np.ndarray) -> np.ndarray:
+    """Build filled elliptical particles from major radii in pixels."""
+    angles = np.linspace(
+        0.0,
+        2.0 * math.pi,
+        LEAF_OVAL_POINT_COUNT,
+        endpoint=False,
     )
-    lower_angles = np.linspace(
-        11.0 * math.pi / 6.0,
-        7.0 * math.pi / 6.0,
-        LEAF_ARC_POINT_COUNT,
-    )
-    upper_arc = np.column_stack(
+    major_radii = radii_px * DATA_UNITS_PER_PIXEL
+    unit_ovals = np.column_stack(
         (
-            radius * np.cos(upper_angles),
-            -radius * 0.5 + radius * np.sin(upper_angles),
+            np.cos(angles),
+            LEAF_OVAL_ASPECT_RATIO * np.sin(angles),
         )
     )
-    lower_arc = np.column_stack(
-        (
-            radius * np.cos(lower_angles),
-            radius * 0.5 + radius * np.sin(lower_angles),
-        )
-    )
-    # The lower arc starts at the same right-hand tip where the upper arc
-    # ends. Its final point repeats the left tip, closing the outline.
-    unit_outline = np.concatenate((upper_arc, lower_arc[1:]), axis=0)
-    return lengths[:, None, None] * unit_outline[None, :, :]
+    return major_radii[:, None, None] * unit_ovals[None, :, :]
 
 
 def leaf_exit_targets(
@@ -2057,7 +2153,7 @@ def leaf_exit_targets(
 
 
 def release_leaves() -> None:
-    """Queue 25 rigid vesica-piscis leaves from each shoreline side."""
+    """Queue 25 rotating oval particles from each shoreline side."""
     global next_leaf_release_ms
 
     total = LEAVES_PER_SIDE * 2
@@ -2117,6 +2213,7 @@ def release_leaves() -> None:
     leaf_spin_rates[slots] = (
         np.deg2rad(rotation_degrees_per_frame) * TARGET_FPS
     )
+
     leaf_sway_amplitudes[slots] = rng.uniform(
         LEAF_SWAY_AMPLITUDE_MIN_DATA,
         LEAF_SWAY_AMPLITUDE_MAX_DATA,
@@ -2131,12 +2228,14 @@ def release_leaves() -> None:
     leaf_sway_phases[slots] = rng.uniform(0.0, 2.0 * math.pi, total)
     leaf_sway_offsets[slots] = 0.0
 
-    lengths = rng.uniform(
-        LEAF_LENGTH_MIN_DATA,
-        LEAF_LENGTH_MAX_DATA,
+    leaf_oval_radii_px[slots] = rng.uniform(
+        LEAF_OVAL_RADIUS_MIN_PX,
+        LEAF_OVAL_RADIUS_MAX_PX,
         total,
     )
-    leaf_local_shapes[slots] = vesica_piscis_leaf_shapes(lengths)
+    leaf_local_shapes[slots] = oval_leaf_shapes(
+        leaf_oval_radii_px[slots]
+    )
     leaf_rgba[slots] = to_rgba_array(
         rng.choice(LEAF_COLORS, size=total)
     )
@@ -2299,8 +2398,6 @@ def update_leaves(frame: int) -> None:
 
     attached = np.flatnonzero(leaf_states == LEAF_STATE_ATTACHED)
     if len(attached) > 0:
-        # Rotation is an intrinsic property of each leaf. Water translates the
-        # rigid outline without resetting or steering its rotational phase.
         leaf_angles[attached] += leaf_spin_rates[attached] * DT
         water_slots = leaf_water_slots[attached]
         sample_indices = leaf_water_sample_indices[attached]
@@ -2627,12 +2724,12 @@ ax.add_collection(salmon_collection)
 
 initial_leaf_colors = leaf_rgba.copy()
 initial_leaf_colors[:, 3] = 0.0
-leaf_collection = LineCollection(
+leaf_collection = PolyCollection(
     leaf_segments,
-    colors=initial_leaf_colors,
-    linewidths=LEAF_LINE_WIDTH,
-    capstyle="round",
-    joinstyle="round",
+    closed=True,
+    facecolors=initial_leaf_colors,
+    linewidths=0.0,
+    edgecolors="none",
     antialiased=True,
     clip_on=True,
     zorder=8,
@@ -2789,6 +2886,7 @@ def update_salmon(frame: int, frame_end_ms: float) -> None:
             salmon_positions[field_slots],
             time_value,
             particle_indices=source_indices,
+            apply_shore_angle_jitter=False,
         )
         travel_velocity = field_velocity * direction_sign[:, None]
         midpoint = (
@@ -2799,6 +2897,7 @@ def update_salmon(frame: int, frame_end_ms: float) -> None:
             midpoint,
             time_value + substep_dt * 0.5,
             particle_indices=source_indices,
+            apply_shore_angle_jitter=False,
         )
         midpoint_velocity = (
             midpoint_field_velocity * direction_sign[:, None]
@@ -2970,7 +3069,8 @@ def update(frame: int):
         & ~absorbed[source_slots]
     ]
     frame_separation_force[separation_slots] = particle_separation_force(
-        positions[separation_slots]
+        positions[separation_slots],
+        separation_slots,
     )
 
     # Take several small midpoint-integration steps per displayed frame. This

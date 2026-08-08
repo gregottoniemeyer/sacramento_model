@@ -1,0 +1,195 @@
+[gd_resource type="Resource" script_class="FlowProfile" load_steps=21 format=3]
+
+[ext_resource type="Script" path="res://flow/flow_profile.gd" id="1_profile"]
+[ext_resource type="Script" path="res://flow/flow_circle_obstacle.gd" id="2_circle"]
+[ext_resource type="Script" path="res://flow/flow_rectangle_obstacle.gd" id="3_rectangle"]
+[ext_resource type="Script" path="res://flow/flow_polygon_obstacle.gd" id="4_polygon"]
+[ext_resource type="Script" path="res://flow/flow_shoreline.gd" id="5_shoreline"]
+[ext_resource type="Script" path="res://flow/flow_absorber.gd" id="6_absorber"]
+[ext_resource type="Script" path="res://flow/flow_reservoir.gd" id="7_reservoir"]
+
+[sub_resource type="Resource" id="Rectangle_main"]
+script = ExtResource("3_rectangle")
+element_id = &"rectangle_main"
+x = 7.7142857143
+y = 4.5
+width = 2.5714285714
+height = 2.5714285714
+angle_degrees = 45.0
+strength = 0.3214285714
+bend = -1.0285714286
+influence = 0.8357142857142859
+
+[sub_resource type="Resource" id="Shore_bottom"]
+script = ExtResource("5_shoreline")
+element_id = &"shore_bottom"
+vertices = PackedVector2Array(-2.185714285714286, -2.185714285714286, 18.185714285714287, -2.185714285714286, 18.185714285714287, 0, 16, 0, 14, 0, 12, 0.7, 10, 1.4, 8, 2.1, 6, 2.8, 4, 3.5, 0, 3.5, -2.185714285714286, 3.5)
+water_edge_indices = PackedInt32Array(2, 3, 4, 5, 6, 7, 8, 9, 10)
+side = "bottom"
+strength = 5.142857142857143
+influence = 1.092857142857143
+power = 2.0
+force_offset = 0.6428571428571429
+
+[sub_resource type="Resource" id="Shore_top"]
+script = ExtResource("5_shoreline")
+element_id = &"shore_top"
+vertices = PackedVector2Array(-2.185714285714286, 8.4, 2, 8.6, 4, 8.1, 6, 8.5, 8, 7.9, 10, 8.4, 12, 6, 14, 8.6, 18.185714285714287, 8.5, 18.185714285714287, 11.185714285714287, -2.185714285714286, 11.185714285714287)
+water_edge_indices = PackedInt32Array(0, 1, 2, 3, 4, 5, 6, 7, 8)
+side = "top"
+strength = 5.142857142857143
+influence = 1.092857142857143
+power = 2.0
+force_offset = 0.6428571428571429
+
+[sub_resource type="Resource" id="Absorber_8_5"]
+script = ExtResource("6_absorber")
+element_id = &"absorber_8_5"
+x = 3.5
+y = 8.5
+width = 0.5
+height = 0.5
+absorption_fraction = 0.6
+stop_margin_fraction = 0.12
+
+[sub_resource type="Resource" id="Absorber_7_5"]
+script = ExtResource("6_absorber")
+element_id = &"absorber_7_5"
+x = 3.5
+y = 7.5
+width = 0.5
+height = 0.5
+absorption_fraction = 0.6
+stop_margin_fraction = 0.12
+
+[sub_resource type="Resource" id="Absorber_6_5"]
+script = ExtResource("6_absorber")
+element_id = &"absorber_6_5"
+x = 3.5
+y = 6.5
+width = 0.5
+height = 0.5
+absorption_fraction = 0.6
+stop_margin_fraction = 0.12
+
+[sub_resource type="Resource" id="Absorber_5_5"]
+script = ExtResource("6_absorber")
+element_id = &"absorber_5_5"
+x = 3.5
+y = 5.5
+width = 0.5
+height = 0.5
+absorption_fraction = 0.6
+stop_margin_fraction = 0.12
+
+[sub_resource type="Resource" id="Absorber_4_5"]
+script = ExtResource("6_absorber")
+element_id = &"absorber_4_5"
+x = 3.5
+y = 4.5
+width = 0.5
+height = 0.5
+absorption_fraction = 0.6
+stop_margin_fraction = 0.12
+
+[sub_resource type="Resource" id="Absorber_3_5"]
+script = ExtResource("6_absorber")
+element_id = &"absorber_3_5"
+x = 3.5
+y = 3.5
+width = 0.5
+height = 0.5
+absorption_fraction = 0.6
+stop_margin_fraction = 0.12
+
+[sub_resource type="Resource" id="Absorber_2_5"]
+script = ExtResource("6_absorber")
+element_id = &"absorber_2_5"
+x = 3.5
+y = 2.5
+width = 0.5
+height = 0.5
+absorption_fraction = 0.6
+stop_margin_fraction = 0.12
+
+[sub_resource type="Resource" id="Absorber_1_5"]
+script = ExtResource("6_absorber")
+element_id = &"absorber_1_5"
+x = 3.5
+y = 1.5
+width = 0.5
+height = 0.5
+absorption_fraction = 0.6
+stop_margin_fraction = 0.12
+
+[sub_resource type="Resource" id="Absorber_0_5"]
+script = ExtResource("6_absorber")
+element_id = &"absorber_0_5"
+x = 3.5
+y = 0.5
+width = 0.5
+height = 0.5
+absorption_fraction = 0.6
+stop_margin_fraction = 0.12
+
+[sub_resource type="Resource" id="Reservoir_main"]
+script = ExtResource("7_reservoir")
+element_id = &"reservoir_main"
+x = 11.5714285714
+y = 2.5714285714
+radius = 1.8642857143
+outlet_width = 0.25
+gate_open = true
+circulation = 2.0
+swirl_strength = 3.085714285714286
+confinement_strength = 3.2
+wall_strength = 10.285714285714286
+outlet_strength = 5.142857142857143
+wall_influence = 0.28285714285714286
+orbit_radius_fraction = 0.62
+orbit_radius_spread = 0.52
+
+[resource]
+script = ExtResource("1_profile")
+world_size = Vector2(16, 9)
+legacy_world_height = 7.0
+target_fps = 30
+simulation_substeps = 20
+max_particles = 300
+retention_capacity = 100
+trail_length = 1200
+particle_launch_delay_ms = 10.0
+random_seed = -1
+flow_rate = 0.5
+max_flow_speed = 10.0
+flow_variation = 0.1
+min_active_flow = 0.001
+base_flow = Vector2(2.5714285714285716, 0)
+noise_strength = 0.7714285714285715
+noise_scale = 1.1666666666666665
+noise_speed = 0.75
+shore_exit_angle_jitter_degrees = 16.0
+separation_radius = 0.18000000000000002
+separation_strength = 1.6071428571428572
+separation_x_scale = 0.15
+separation_max_force = 1.9285714285714288
+line_width_min = 0.5
+line_width_max = 3.0
+particle_alpha = 1.0
+background_color = Color(0, 0, 0, 1)
+line_colors = PackedColorArray(1, 1, 1, 1, 0.9176470588235294, 0.9686274509803922, 0.9333333333333333, 1, 0.8274509803921568, 0.9372549019607843, 0.8627450980392157, 1, 0.6745098039215687, 0.8823529411764706, 0.6862745098039216, 1, 0.4823529411764706, 0.8117647058823529, 0.7686274509803922, 1, 0.2901960784313726, 0.6901960784313725, 0.8823529411764706, 1, 0.11764705882352941, 0.5647058823529412, 1, 1)
+spawn_x = -0.0642857142857143
+spawn_y_margin = 0.19285714285714287
+reservoir_release_rate = 2.0
+release_threshold_min = 0.5
+release_threshold_max = 1.5
+gate_width_step = 0.0642857142857143
+debug_geometry_visible = true
+debug_geometry_color = Color(1, 0.6470588235294118, 0, 1)
+debug_geometry_line_width = 1.5
+circle_obstacles = Array[ExtResource("2_circle")]([])
+rectangle_obstacles = Array[ExtResource("3_rectangle")]([SubResource("Rectangle_main")])
+polygon_obstacles = Array[ExtResource("4_polygon")]([])
+shorelines = Array[ExtResource("5_shoreline")]([SubResource("Shore_bottom"), SubResource("Shore_top")])
+absorbers = Array[ExtResource("6_absorber")]([SubResource("Absorber_8_5"), SubResource("Absorber_7_5"), SubResource("Absorber_6_5"), SubResource("Absorber_5_5"), SubResource("Absorber_4_5"), SubResource("Absorber_3_5"), SubResource("Absorber_2_5"), SubResource("Absorber_1_5"), SubResource("Absorber_0_5")])
+reservoirs = Array[ExtResource("7_reservoir")]([SubResource("Reservoir_main")])

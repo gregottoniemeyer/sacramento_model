@@ -1,0 +1,8 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://flow/flow_model_2d.gd" id="1_model"]
+[ext_resource type="Resource" path="res://flow/default_flow_profile.tres" id="2_profile"]
+
+[node name="FlowModel2D" type="Node2D"]
+script = ExtResource("1_model")
+preset = ExtResource("2_profile")

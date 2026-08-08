@@ -1,0 +1,41 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://flow/multimesh_stage/cpu_multimesh_flow_stage_2d.gd" id="1_stage"]
+[ext_resource type="Script" path="res://flow/gpu_stage/gpu_flow_interaction_polygon.gd" id="2_interaction"]
+[ext_resource type="Script" path="res://flow/multimesh_stage/cpu_flow_source_polygon.gd" id="3_source"]
+
+[sub_resource type="Resource" id="Interaction_absorber_test"]
+resource_local_to_scene = true
+script = ExtResource("2_interaction")
+element_id = &"absorber_test"
+vertices = PackedVector2Array(4.2, 7.35, 5.3, 7.55, 5.1, 8.45, 4.1, 8.25)
+mode = 0
+absorption_fraction = 0.5
+repellent_force = 0.0
+wave_strength = 0.18
+influence = 0.35
+
+[sub_resource type="Resource" id="Interaction_repeller_test"]
+resource_local_to_scene = true
+script = ExtResource("2_interaction")
+element_id = &"repeller_test"
+vertices = PackedVector2Array(7.4, 6, 8.4, 6.2, 8.2, 7.4, 7.3, 7.1)
+mode = 1
+absorption_fraction = 0.0
+repellent_force = 0.7
+wave_strength = 0.0
+influence = 0.8
+
+[sub_resource type="Resource" id="Source_test"]
+resource_local_to_scene = true
+script = ExtResource("3_source")
+element_id = &"source_test"
+vertices = PackedVector2Array(1.2, 3.6, 2, 3.6, 2, 5.4, 1.2, 5.4)
+emission_fraction = 0.18
+flow_direction = Vector2(1, 0)
+seed = 1701
+
+[node name="CPUMultiMeshFlowStage2D" type="Node2D"]
+script = ExtResource("1_stage")
+interaction_polygons = Array[ExtResource("2_interaction")]([SubResource("Interaction_absorber_test"), SubResource("Interaction_repeller_test")])
+source_polygons = Array[ExtResource("3_source")]([SubResource("Source_test")])

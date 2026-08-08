@@ -136,6 +136,67 @@ flowchart LR
 - Polygon forces use nearest-boundary distance, winding-derived boundary
   normals, even-odd containment, and an emergency push for penetrations.
 
+#### Drawing shoreline polygons
+
+`vertices` describes the complete boundary of a solid land polygon, not an
+open shoreline. The code automatically joins the last vertex back to the
+first. Every resulting edge is shown when debug geometry is visible and every
+edge contributes to collision forces. Put the non-water closure edges outside
+the `16 × 9` canvas with `SHORE_POLYGON_MARGIN`; otherwise the automatic
+closing segment can appear as an unintended second shore and steer water.
+
+Vertex indices are zero-based. A polygon with ten vertices uses indices
+`0` through `9`. `water_edge_indices` must contain at least two consecutive,
+forward-adjacent indices from `vertices`. It marks the chain used to release
+leaves and calculate waterward normals; it does not disable the polygon's
+other collision edges.
+
+For the default counterclockwise land polygons, order the visible edge as
+follows:
+
+- Bottom shore: right to left, producing waterward normals that point upward.
+- Top shore: left to right, producing waterward normals that point downward.
+
+This ordering is independent of the river's left-to-right flow. The `side`
+field labels the shoreline for inlet and leaf behavior; it does not reorder
+vertices or determine which side of an edge is land.
+
+The following bottom shoreline encloses land that is wide at the bottom and
+narrows toward a short plateau at `y = 3.5`. Its three closure edges remain
+outside the visible canvas:
+
+```python
+ShorelinePolygon(
+    vertices=(
+        # Hidden outer land boundary
+        (-SHORE_POLYGON_MARGIN, -SHORE_POLYGON_MARGIN),         # 0
+        (WIDTH + SHORE_POLYGON_MARGIN, -SHORE_POLYGON_MARGIN),  # 1
+
+        # Water-facing edge, ordered right to left
+        (WIDTH + SHORE_POLYGON_MARGIN, 0.0),                    # 2
+        (16.0, 0.0),                                            # 3
+        (14.0, 0.0),                                            # 4
+        (12.0, 0.7),                                            # 5
+        (10.0, 1.4),                                            # 6
+        (8.0, 2.1),                                             # 7
+        (6.0, 2.8),                                             # 8
+        (4.0, 3.5),                                             # 9
+        (2.0, 3.5),                                             # 10
+        (0.0, 3.5),                                             # 11
+
+        # Hidden left closure
+        (-SHORE_POLYGON_MARGIN, 3.5),                           # 12
+    ),
+    water_edge_indices=(2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+    side="bottom",
+    force_offset=BOTTOM_SHORE_Y_OFFSET,
+)
+```
+
+To make the shoreline irregular, move, add, or remove points within the
+water-facing chain while preserving its direction and adjacency. Keep the
+complete polygon simple: its edges must not cross one another.
+
 ### Absorbers
 
 - An absorber is an axis-aligned rectangle with an absorption fraction from
@@ -168,6 +229,9 @@ flowchart LR
 - Readiness progress accumulates at
   `aperture × RESERVOIR_RELEASE_RATE`; each line has a random threshold from
   `0.5…1.5`.
+- Lines captured while a gate is already open begin at randomized positions
+  within that release cycle. This avoids an artificial startup pause while
+  preserving the same long-term release rate.
 - Readiness latches, but a ready trail still has to circulate to the physical
   gate before leaving.
 - Closing or resizing a gate does not reset retained water.
@@ -201,13 +265,14 @@ flowchart LR
 - Scheduled leaves have no geometry and zero alpha; they are invisible before
   their individual release time.
 - Release points are stratified across each explicit water-facing shore chain.
-- Each leaf is a rigid, closed 13-point vesica-piscis outline with a muted
-  orange, ochre, or green color.
+- Each leaf is rendered as a filled oval with a stable random major radius
+  from `3…5 px`, a `0.6` minor-to-major aspect ratio, and a muted orange,
+  ochre, or green color.
 - Unattached leaves travel along the waterward shore normal, cross the complete
   screen, and clear the opposite edge if they never encounter water.
 - Falling leaves sway left/right by a bounded `6…18 px`, with random periods
   from `1.2…2.8 s`.
-- Every leaf has a random clockwise or counterclockwise rotation of
+- Every oval has a random clockwise or counterclockwise rotation of
   `0.1…1.0°` per simulation frame. Rotation continues after attachment and in
   reservoirs.
 - Attachment checks occur every two displayed frames. Water histories are
@@ -271,6 +336,7 @@ Current configured scene:
 | `NOISE_STRENGTH` | Curl amplitude. |
 | `NOISE_SCALE` | Curl spatial frequency; larger means tighter features. |
 | `NOISE_SPEED` | Curl animation rate. |
+| `SHORE_EXIT_ANGLE_JITTER_DEGREES` | Maximum stable per-line rotation of shoreline repulsion; currently `±16°`. |
 | `PARTICLE_SEPARATION_RADIUS` | Neighborhood for post-obstacle dispersion. |
 | `PARTICLE_SEPARATION_STRENGTH` | Magnitude of separation pressure. |
 | `PARTICLE_SEPARATION_X_SCALE` | Fraction of pressure retained along X. |
@@ -314,9 +380,9 @@ Current configured scene:
 | --- | ---: |
 | `LEAVES_PER_SIDE`, `MAX_LEAVES` | `25`, `300` |
 | `LEAF_RELEASE_INTERVAL_MS` | `50` |
-| `LEAF_ARC_POINT_COUNT`, total outline points | `7`, `13` |
-| `LEAF_LENGTH_MIN_PX/MAX_PX` | `18…30` |
-| `LEAF_LINE_WIDTH` | `2` |
+| `LEAF_OVAL_RADIUS_MIN_PX/MAX_PX` | `3…5 px` |
+| `LEAF_OVAL_ASPECT_RATIO` | `0.6` |
+| `LEAF_OVAL_POINT_COUNT` | `20` |
 | `LEAF_COLLISION_RADIUS` | `12 px` |
 | `LEAF_FALL_SPEED_PX` | `120 px/s` |
 | `LEAF_SWAY_AMPLITUDE_MIN_PX/MAX_PX` | `6…18 px` |
@@ -374,17 +440,17 @@ once below. “Godot owner” is the proposed destination, not an existing class
 
 | Python function | Responsibility | Godot owner |
 | --- | --- | --- |
-| `shore_force(points)` | Sum force from every solid shoreline polygon. | `FlowField` |
+| `shore_force(points, particle_indices=None, apply_angle_jitter=True)` | Sum shoreline forces and apply stable per-line exit-angle variation to water. | `FlowField` |
 | `safe_normalize(vectors, minimum)` | Return safe normalized vectors and true lengths. | `FlowMath` |
 | `rectangle_vertices(obstacle)` | Convert a rotated rectangle to four world vertices. | `FlowMath` |
 | `points_inside_polygon(points, vertices)` | Vectorized even-odd polygon containment. | `FlowMath` |
 | `polygon_obstacle_force(...)` | Compute nearest-edge repulsion, bend, and penetration recovery. | `FlowField` |
-| `particle_separation_force(points)` | Compute capped local pressure between source heads. | `WaterSystem` |
+| `particle_separation_force(points, particle_indices=None)` | Compute capped local pressure between source heads, using stable identity to split exact overlaps. | `WaterSystem` |
 | `reservoir_gate_fraction(reservoir)` | Normalize outlet width to aperture `0…1`. | `ReservoirSystem` |
 | `reservoir_force(...)` | Compute swirl, orbit confinement, wall, and outlet forces. | `ReservoirSystem` |
 | `reservoir_pooling_mask(...)` | Identify heads retained rather than released by a reservoir. | `ReservoirSystem` |
 | `curl_noise(points, time_value)` | Generate decorative time-varying sine curl. | `FlowField` |
-| `velocity_field(...)` | Compose every force, apply per-slot flow, and cap speed. | `FlowField` |
+| `velocity_field(...)` | Compose every force, optionally apply shore-angle variation, apply per-slot flow, and cap speed. | `FlowField` |
 
 ### Inlet and water lifecycle
 
@@ -425,17 +491,16 @@ once below. “Godot owner” is the proposed destination, not an existing class
 
 | Python function | Responsibility | Godot owner |
 | --- | --- | --- |
-| `deactivate_leaves(indices)` | Clear every lifecycle, geometry, schedule, sway, spin, and binding field. | `LeafSystem` |
+| `deactivate_leaves(indices)` | Clear every lifecycle, oval geometry, schedule, sway, spin, and binding field. | `LeafSystem` |
 | `detach_leaves_from_water_slots(water_slots)` | Remove leaves whose carrier water is deleted. | `LeafSystem` |
 | `migrate_leaf_attachments(source_slot, retention_slot)` | Rebind leaves to the nearest copied reservoir-history point. | `LeafSystem` |
 | `shoreline_water_edge_geometry(shoreline)` | Validate explicit water edges and compute waterward normals. | `Shoreline2D` / `LeafSystem` |
 | `clip_segment_to_viewport(start, vector)` | Clip a finite shore segment to the visible world. | `FlowMath` |
 | `sample_shoreline_release_points(side, count)` | Stratify release points over one visible shore chain. | `LeafSystem` |
 | `claim_leaf_slots(count)` | Claim inactive slots or recycle the oldest leaves. | `LeafSystem` |
-| `refresh_leaf_collection()` | Transform rigid outlines and apply visibility/colors. | `LeafRenderer` |
-| `vesica_piscis_leaf_shapes(lengths)` | Build closed two-circle lens outlines. | `LeafSystem` or cached mesh resource |
+| `refresh_leaf_collection()` | Transform filled ovals and apply visibility/colors. | `LeafRenderer` |
 | `leaf_exit_targets(shore_points, waterward_normals)` | Project uncaught leaves beyond the opposite edge. | `LeafSystem` |
-| `release_leaves()` | Queue both cohorts and assign timing, paths, shapes, sway, spin, and color. | `LeafSystem` |
+| `release_leaves()` | Queue both cohorts and assign timing, paths, oval radii, sway, spin, and color. | `LeafSystem` |
 | `build_water_attachment_lookup()` | Build a water-only spatial index with exact slot/history identities. | `WaterSpatialIndex` |
 | `attach_waiting_leaves(indices)` | Bind nearby falling/waiting leaves to water. | `LeafSystem` |
 | `update_leaves(frame)` | Release, move, sway, rotate, attach, carry, and remove leaves. | `LeafSystem` |
@@ -492,7 +557,40 @@ Order matters because several systems share water history identities.
 Updating leaves before water recycling is essential: leaves must see advanced
 history, migrate with captured water, and never read a newly reused slot.
 
-## Proposed Godot 4 architecture
+## Godot 4 core port
+
+The first Godot implementation milestone now lives in
+`godot_experiments/flow/`. It replaces the chevron/ring animation inside all
+seven display scenes with independent instances of one shared
+`FlowModel2D` scene.
+
+Implemented in this milestone:
+
+- Fixed 30 Hz simulation frames with 20 midpoint RK2 substeps.
+- Source and reservoir-retention water pools with ring-buffer trails.
+- Per-line flow variation, coherent curl motion, head separation, and
+  shoreline exit-angle variation.
+- Circle, rotated rectangle, polygon, shoreline, absorber, and reservoir
+  geometry.
+- Reservoir capture, distributed circular orbits, live gate state/width, and
+  aperture-controlled release readiness.
+- Inspector-editable typed resources plus atomic runtime parameter and
+  geometry updates.
+- A persistent UDP control bus with seven stable screen targets and backward
+  compatibility for the existing controller's `speed` packets.
+- Runtime debug geometry, keyboard flow/gate controls, and screenshots.
+
+The core solver runs in Godot's fixed 2D physics loop, but deliberately uses
+analytic soft-force geometry rather than `RigidBody2D` contacts. Rigid-body
+responses cannot reproduce the reference model's influence fields,
+circulation, absorbers, or trail histories.
+
+Salmon and leaves are the next overlay milestone because both depend on stable
+water-history identities. The complete runtime protocol, parameter list,
+geometry schemas, and screen IDs are documented in
+`godot_experiments/flow/GODOT_FLOW_RUNTIME.md`.
+
+## Godot 4 architecture
 
 The primary refactor is separation of configuration, hot simulation data,
 rendering, and interaction. The Python module currently keeps all four as
@@ -623,8 +721,7 @@ Start with visual parity and profile before optimizing:
 - Pool 400 `Line2D` nodes for water, with round joints/caps and stable random
   color/width.
 - Pool 300 short `Line2D` nodes for salmon.
-- Pool 300 closed `Line2D` nodes for leaves. Set the 13 local points once per
-  release, then update only node position and rotation.
+- Pool 300 filled oval nodes with stable per-release radii and rotation.
 - Draw all debug geometry from one custom `Node2D._draw()` implementation.
 
 Godot's `Line2D` supports packed point arrays, round joints/caps, antialiasing,
@@ -679,8 +776,8 @@ arguments during startup.
    - Add water occupancy, upstream/return motion, dam choice, trail trimming,
      full-tail exits, and fading.
 6. **Port leaves**
-   - Add shore sampling, serialized invisible release, vesica geometry, sway,
-     continuous spin, water-only attachment, and reservoir migration.
+   - Add shore sampling, serialized invisible release, variable-radius ovals,
+     sway, continuous spin, water-only attachment, and reservoir migration.
 7. **Add runtime editing**
    - Expose transform and behavior fields and apply edits atomically at tick
      boundaries.
@@ -712,9 +809,9 @@ arguments during startup.
 - [ ] Leaf cohorts contain exactly 25 releases per shore.
 - [ ] Scheduled leaves are invisible and rapid key presses remain serialized.
 - [ ] Uncaught leaves cross the center and clear the opposite edge.
-- [ ] Leaf sway is bounded and spin remains `0.1…1.0°/frame` with random sign.
+- [ ] Leaf sway is bounded and oval radii remain stable within `3…5 px`.
+- [ ] Leaf spin remains `0.1…1.0°/frame` with a stable random sign.
 - [ ] Leaves attach only to water, never salmon.
-- [ ] Leaf rotation does not reset on attachment.
 - [ ] Leaves migrate from source water to retained reservoir water.
 - [ ] Leaves never fade.
 - [ ] Smooth lines retain the visual quality of the Python reference at 30 FPS.

@@ -12,13 +12,25 @@ config_version=5
 
 config/name="Sacramento Model Test"
 run/main_scene="res://startup_selector.tscn"
-config/features=PackedStringArray("4.7", "GL Compatibility")
+config/features=PackedStringArray("4.7", "Mobile")
+run/max_fps=30
 config/icon="res://img/icon.svg"
+
+[autoload]
+
+FlowControlBus="*res://flow/flow_control_bus.gd"
 
 [display]
 
+window/size/viewport_width=1920
+window/size/viewport_height=1080
+window/size/mode=4
 window/stretch/mode="canvas_items"
-window/stretch/aspect="expand"
+
+[flow_control]
+
+udp_port=5005
+bind_address="0.0.0.0"
 
 [physics]
 
@@ -27,7 +39,6 @@ window/stretch/aspect="expand"
 [rendering]
 
 rendering_device/driver.windows="d3d12"
-renderer/rendering_method="gl_compatibility"
-renderer/rendering_method.mobile="gl_compatibility"
+renderer/rendering_method="mobile"
 textures/vram_compression/import_etc2_astc=true
-anti_aliasing/quality/msaa_2d=1
+anti_aliasing/quality/msaa_2d=2
