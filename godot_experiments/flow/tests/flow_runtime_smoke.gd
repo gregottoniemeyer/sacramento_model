@@ -102,6 +102,30 @@ func _run() -> void:
 	var bus := get_node_or_null("/root/FlowControlBus") as Node
 	_expect(bus != null, "FlowControlBus must be available as an autoload.")
 	if bus != null:
+		var model_regimes := get_node_or_null("/root/ModelRegimes") as Node
+		_expect(model_regimes != null, "ModelRegimes must be available as an autoload.")
+		if model_regimes != null:
+			model_regimes.call(&"clear_regimes")
+			var regime_submitted: bool = bool(bus.call(
+				&"submit_packet",
+				{
+					"protocol": "ink-flow/1",
+					"target": "*",
+					"changes": {"regimes.active_indices": [0]},
+				},
+				"smoke-test",
+				0,
+			))
+			_expect(
+				regime_submitted,
+				"A process-global regime packet must be accepted.",
+			)
+			var regime_snapshot: Dictionary = model_regimes.call(&"snapshot")
+			_expect(
+				Array(regime_snapshot.get("active_indices", [])) == [0],
+				"The bus must apply Kinship directly to persistent ModelRegimes.",
+			)
+			model_regimes.call(&"clear_regimes")
 		var submitted: bool = bool(bus.call(
 			&"submit_packet",
 			{
@@ -145,6 +169,7 @@ func _run() -> void:
 			"protocol": "ink-flow/1",
 			"target": "runtime_smoke",
 			"changes": {"separation_strength": 1.23},
+			"metadata": {"request_id": "flow-runtime-smoke-ack"},
 		}).to_utf8_buffer()
 		var send_error: Error = udp.put_packet(wire_packet)
 		_expect(send_error == OK, "The UDP smoke packet must send successfully.")
@@ -152,15 +177,39 @@ func _run() -> void:
 		# than four physics frames on a busy installation machine. Poll for at most
 		# one second at the 30 Hz project rate instead of making delivery timing a
 		# performance assertion.
+		var acknowledgement_received := false
 		for _attempt in range(30):
 			await get_tree().process_frame
 			await get_tree().physics_frame
+			while udp.get_available_packet_count() > 0:
+				var ack_parser := JSON.new()
+				if ack_parser.parse(udp.get_packet().get_string_from_utf8()) != OK:
+					continue
+				if not ack_parser.data is Dictionary:
+					continue
+				var acknowledgement: Dictionary = ack_parser.data
+				acknowledgement_received = (
+					String(acknowledgement.get("protocol", "")) == "ink-flow/1-ack"
+					and String(acknowledgement.get("request_id", ""))
+						== "flow-runtime-smoke-ack"
+					and bool(acknowledgement.get("accepted", false))
+					and int(acknowledgement.get("recipient_count", 0)) == 1
+					and Array(acknowledgement.get("recipient_screen_ids", []))
+						== ["runtime_smoke"]
+				)
 			parameters = model.get_state_snapshot()["parameters"]
-			if is_equal_approx(float(parameters["separation_strength"]), 1.23):
+			if (
+				acknowledgement_received
+				and is_equal_approx(float(parameters["separation_strength"]), 1.23)
+			):
 				break
 		_expect(
 			is_equal_approx(float(parameters["separation_strength"]), 1.23),
 			"A UDP JSON packet must be decoded and routed to the target model."
+		)
+		_expect(
+			acknowledgement_received,
+			"The UDP sender must receive a matching ink-flow/1 acknowledgement.",
 		)
 		udp.close()
 

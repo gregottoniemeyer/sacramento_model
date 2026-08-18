@@ -9,6 +9,9 @@ var gate_open: bool = true
 var gate_half_width: float = 15.0
 var reservoir_center: Vector2 = RESERVOIR_CENTER
 var reservoir_radius: float = RESERVOIR_RADIUS
+var reservoir_visible: bool = true
+var drain_visible: bool = true
+var obstacle_visible: bool = true
 var show_status_label: bool = true
 var interaction_polygons: Array[Dictionary] = []
 var shoreline_obstacles: Array[Dictionary] = []
@@ -29,6 +32,34 @@ func set_reservoir_geometry(center: Vector2, radius: float) -> void:
 	reservoir_center = center
 	reservoir_radius = maxf(radius, 1.0)
 	queue_redraw()
+
+
+func set_feature_visibility(
+	show_reservoir: bool,
+	show_drains: bool,
+	show_obstacles: bool,
+) -> void:
+	reservoir_visible = show_reservoir
+	drain_visible = show_drains
+	obstacle_visible = show_obstacles
+	queue_redraw()
+
+
+func is_reservoir_visible() -> bool:
+	return reservoir_visible
+
+
+func get_visible_interaction_polygon_count() -> int:
+	var visible_count := 0
+	for definition: Dictionary in interaction_polygons:
+		match String(definition.get("mode", "")):
+			"absorb":
+				if drain_visible:
+					visible_count += 1
+			"repel":
+				if obstacle_visible:
+					visible_count += 1
+	return visible_count
 
 
 func set_interaction_polygons(definitions: Array[Dictionary]) -> void:
@@ -59,7 +90,8 @@ func get_source_polygon_count() -> int:
 
 
 func _draw() -> void:
-	_draw_reservoir()
+	if reservoir_visible:
+		_draw_reservoir()
 	_draw_interaction_polygons()
 	_draw_shoreline_obstacles()
 	_draw_source_polygons()
@@ -85,6 +117,13 @@ func _draw() -> void:
 func _draw_interaction_polygons() -> void:
 	var outline_color := Color("d4af37")
 	for definition: Dictionary in interaction_polygons:
+		match String(definition.get("mode", "")):
+			"absorb":
+				if not drain_visible:
+					continue
+			"repel":
+				if not obstacle_visible:
+					continue
 		var vertices_variant: Variant = definition.get("vertices", PackedVector2Array())
 		if not vertices_variant is PackedVector2Array:
 			continue

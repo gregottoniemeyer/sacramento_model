@@ -28,6 +28,7 @@ uniform float trail_lifetime_seconds = 2.0;
 // encounter/admission budgets without rebuilding any geometry.
 uniform bool regime_profile_physics_enabled = false;
 uniform bool regime_reservoir_override_enabled = false;
+uniform bool regime_reservoir_present = true;
 uniform bool regime_drain_override_enabled = false;
 uniform bool regime_drain_power_override_enabled = false;
 uniform bool regime_obstacle_override_enabled = false;
@@ -645,6 +646,32 @@ void process() {
 	bool head_bypassing = CUSTOM.w > 4.5 && CUSTOM.w < 5.5;
 	bool head_gate_staging = CUSTOM.w > 5.5 && CUSTOM.w < 6.5;
 	bool head_gate_flushing = CUSTOM.w > 6.5 && CUSTOM.w < 7.5;
+	bool reservoir_live_admission = (
+		reservoir_admission_enabled && regime_reservoir_present
+	);
+	// A zero regime budget removes the reservoir at runtime, including water
+	// already owned by its state machine. Release those heads into downstream
+	// flow; their immutable orbit trails then disappear over the normal trail
+	// lifetime instead of leaving a permanently visible basin behind.
+	if (
+		!regime_reservoir_present
+		&& (
+			head_entering
+			|| head_retained
+			|| head_exiting
+			|| head_gate_staging
+			|| head_gate_flushing
+		)
+	) {
+		CUSTOM.y = 0.0;
+		CUSTOM.w = STATE_RELEASED;
+		head_entering = false;
+		head_retained = false;
+		head_exiting = false;
+		head_gate_staging = false;
+		head_gate_flushing = false;
+		head_released = true;
+	}
 
 	// Repellers are a soft head-only velocity field. Immutable tail segments have
 	// no simulation pass, so they simply preserve the path the head actually took.
@@ -1002,7 +1029,7 @@ void process() {
 	// Give any head already traversing the reservoir region its one permanent
 	// reject decision while admission is disabled.
 	if (
-		!reservoir_admission_enabled
+		!reservoir_live_admission
 		&& head_flowing
 		&& from_reservoir.x >= entry_decision_x
 		&& from_reservoir.x <= entry_clear_x
@@ -1014,7 +1041,7 @@ void process() {
 	}
 	vec2 previous_from_reservoir = from_reservoir - VELOCITY.xy * DELTA;
 	bool reached_entry_decision = (
-		reservoir_admission_enabled
+		reservoir_live_admission
 		&& head_flowing
 		&& from_reservoir.x >= entry_decision_x
 		&& from_reservoir.x < 0.0

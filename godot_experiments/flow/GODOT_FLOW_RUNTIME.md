@@ -144,7 +144,10 @@ stable internal ID `ranch`; `regimes.agriculture` is the preferred UI alias and
 regimes, allows any combination to be active simultaneously, and survives
 `change_scene_to_file()` and selector navigation. As with `ModelTimeline`, this
 persistence ends at the process boundary; a multi-process installation must
-send the authoritative active set to every process.
+send the authoritative active set to every process. `FlowControlBus` applies
+regime paths to this autoload before routing the remaining packet to stages, so
+a packet received on the selector or during startup is retained for every stage
+that loads afterward and is not applied once per window in a dual-stage process.
 
 ### First-six per-river regime profiles
 
@@ -184,7 +187,11 @@ Area fractions are deterministic admission/encounter budgets, not literal
 geometry or guaranteed screen-area coverage. Stable selectors decide which
 particle lifecycles encounter the authored reservoir, drain/field, obstacle, or
 source behavior. Drain and obstacle `power` independently set response strength
-for admitted encounters. The GPU stage has only one physical
+for admitted encounters. A defined zero reservoir area or count removes the
+reservoir constraint and guide; defined zero drain or obstacle area removes its
+constraint and guide. When a live regime removes a reservoir, retained heads are
+released into downstream flow and their already-recorded orbit trails fade over
+the ordinary trail lifetime. The GPU stage has only one physical
 `reservoir_main`; `reservoir_count=2` is retained desired-state data awaiting a
 two-slot renderer and does not produce a second reservoir.
 
@@ -277,6 +284,9 @@ with 72-pixel centerline spacing. They follow the historical order—Kinship,
 Agriculture, Gold Rush, Water Projects, Hydropower, Tech, Watershed—with a
 72-pixel column interval. Active names are opaque; inactive names remain
 visible at `0.25` alpha.
+The panel listens to the shared `ModelRegimes` authority, so a received
+absolute-state packet immediately highlights Kinship or any other active name,
+including state received before the Delta stage was loaded.
 
 The background grid defaults to 1-native-pixel `#4AB0E1` lines at `0.25` alpha,
 spaced every 120 pixels. The spacing is also the production conversion from one
@@ -606,6 +616,14 @@ The modern protocol name is `ink-flow/1`.
 - `actions` is an array of action names or action dictionaries.
 - `metadata` is optional controller state retained in model snapshots.
 
+Every accepted modern packet receives an `ink-flow/1-ack` UDP reply to its
+source address and port. The reply echoes `metadata.request_id`, reports the
+number and stable `screen_id` values of routed stage recipients, and includes
+the accepted process-wide regime indices and revision. The Governator retries
+unanswered or not-yet-ready startup packets and prints `APPLIED` only after every
+configured process acknowledges the requested indices plus its exact configured
+screen IDs and count.
+
 For the CPU `FlowModel2D`, one message is atomic for `changes` and
 `geometry_ops`: the model validates a duplicated candidate profile and rejects
 the whole configuration update if any field or geometry operation is invalid.
@@ -730,7 +748,8 @@ authoritative per-screen `effective_feature_state_by_screen` plus
 `defined`, `value`, `contributor_count`, and `contributor_ids`. The stage mirrors
 these and publishes its resolved `regime_effective_feature_state`,
 `regime_applied_feature_budgets`, `regime_applied_feature_overrides`,
-`regime_gate_open_fraction`, `regime_reservoir_count_desired_raw`,
+`regime_feature_presence`, `regime_gate_open_fraction`,
+`regime_reservoir_count_desired_raw`,
 `regime_reservoir_count_rendered`, and `regime_reservoir_renderer_capacity`.
 These fields distinguish an undefined feature that preserves authored behavior
 from an explicit-zero override. Shoreline diagnostics are

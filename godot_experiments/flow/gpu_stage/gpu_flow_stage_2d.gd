@@ -365,11 +365,15 @@ var _shoreline_obstacles: Array[Dictionary] = []
 var _shoreline_randomness: float = 0.0
 var _regime_feature_state_for_screen: Dictionary = {}
 var _regime_reservoir_override_enabled: bool = false
+var _regime_reservoir_count_override_enabled: bool = false
 var _regime_drain_override_enabled: bool = false
 var _regime_drain_power_override_enabled: bool = false
 var _regime_obstacle_override_enabled: bool = false
 var _regime_obstacle_power_override_enabled: bool = false
 var _regime_source_override_enabled: bool = false
+var _regime_reservoir_present: bool = true
+var _regime_drain_present: bool = true
+var _regime_obstacle_present: bool = true
 var _regime_reservoir_weight: float = 1.0
 var _regime_drain_weight: float = 1.0
 var _regime_drain_power: float = 1.0
@@ -808,12 +812,16 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 	# physics. Production wrappers opt in and then consume only their own screen row.
 	if not regime_profile_physics_enabled:
 		_regime_reservoir_override_enabled = false
+		_regime_reservoir_count_override_enabled = false
 		_regime_drain_override_enabled = false
 		_regime_drain_power_override_enabled = false
 		_regime_obstacle_override_enabled = false
 		_regime_obstacle_power_override_enabled = false
 		_regime_source_override_enabled = false
 		_regime_gate_aperture_override_enabled = false
+		_regime_reservoir_present = true
+		_regime_drain_present = true
+		_regime_obstacle_present = true
 		_regime_reservoir_weight = 1.0
 		_regime_drain_weight = 1.0
 		_regime_drain_power = 1.0
@@ -827,6 +835,10 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 	_regime_reservoir_override_enabled = _regime_feature_is_defined(
 		_regime_feature_state_for_screen,
 		"reservoir_area_fraction",
+	)
+	_regime_reservoir_count_override_enabled = _regime_feature_is_defined(
+		_regime_feature_state_for_screen,
+		"reservoir_count",
 	)
 	_regime_drain_override_enabled = _regime_feature_is_defined(
 		_regime_feature_state_for_screen,
@@ -884,6 +896,24 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 		0.0,
 		0.0,
 		2.0,
+	)
+	_regime_reservoir_present = (
+		(
+			not _regime_reservoir_override_enabled
+			or _regime_reservoir_weight > 0.000001
+		)
+		and (
+			not _regime_reservoir_count_override_enabled
+			or _regime_reservoir_count > 0.000001
+		)
+	)
+	_regime_drain_present = (
+		not _regime_drain_override_enabled
+		or _regime_drain_weight > 0.000001
+	)
+	_regime_obstacle_present = (
+		not _regime_obstacle_override_enabled
+		or _regime_obstacle_weight > 0.000001
 	)
 	_regime_gate_aperture_override_enabled = _regime_feature_is_defined(
 		_regime_feature_state_for_screen,
@@ -970,6 +1000,10 @@ func _apply_regime_shader_parameters() -> void:
 			_regime_reservoir_override_enabled
 		)
 		process_material.set_shader_parameter(
+			&"regime_reservoir_present",
+			_regime_reservoir_present
+		)
+		process_material.set_shader_parameter(
 			&"regime_drain_override_enabled",
 			_regime_drain_override_enabled
 		)
@@ -1012,6 +1046,13 @@ func _apply_regime_shader_parameters() -> void:
 		process_material.set_shader_parameter(
 			&"regime_source_weight",
 			_regime_source_weight
+		)
+	if _overlay != null:
+		_overlay.call(
+			&"set_feature_visibility",
+			_regime_reservoir_present,
+			_regime_drain_present,
+			_regime_obstacle_present,
 		)
 
 
@@ -1831,6 +1872,7 @@ func runtime_summary() -> Dictionary:
 	var reservoir_admission_enabled_uniforms: Array[bool] = []
 	var regime_profile_physics_enabled_uniforms: Array[bool] = []
 	var regime_reservoir_override_enabled_uniforms: Array[bool] = []
+	var regime_reservoir_present_uniforms: Array[bool] = []
 	var regime_drain_override_enabled_uniforms: Array[bool] = []
 	var regime_drain_power_override_enabled_uniforms: Array[bool] = []
 	var regime_obstacle_override_enabled_uniforms: Array[bool] = []
@@ -1912,6 +1954,9 @@ func runtime_summary() -> Dictionary:
 		))
 		regime_reservoir_override_enabled_uniforms.append(bool(
 			process_material.get_shader_parameter(&"regime_reservoir_override_enabled")
+		))
+		regime_reservoir_present_uniforms.append(bool(
+			process_material.get_shader_parameter(&"regime_reservoir_present")
 		))
 		regime_drain_override_enabled_uniforms.append(bool(
 			process_material.get_shader_parameter(&"regime_drain_override_enabled")
@@ -2083,6 +2128,7 @@ func runtime_summary() -> Dictionary:
 		},
 		"regime_applied_feature_overrides": {
 			"reservoir": _regime_reservoir_override_enabled,
+			"reservoir_count": _regime_reservoir_count_override_enabled,
 			"drain_area": _regime_drain_override_enabled,
 			"drain_power": _regime_drain_power_override_enabled,
 			"obstacle_area": _regime_obstacle_override_enabled,
@@ -2090,19 +2136,14 @@ func runtime_summary() -> Dictionary:
 			"source": _regime_source_override_enabled,
 			"reservoir_gate": _regime_gate_override_enabled,
 		},
+		"regime_feature_presence": {
+			"reservoir": _regime_reservoir_present,
+			"drain": _regime_drain_present,
+			"obstacle": _regime_obstacle_present,
+		},
 		"regime_gate_open_fraction": _regime_gate_open_fraction,
 		"regime_reservoir_count_desired_raw": _regime_reservoir_count,
-		"regime_reservoir_count_rendered": (
-			0
-			if (
-				_regime_reservoir_override_enabled
-				and (
-					_regime_reservoir_weight <= 0.000001
-					or _regime_reservoir_count <= 0.000001
-				)
-			)
-			else 1
-		),
+		"regime_reservoir_count_rendered": 1 if _regime_reservoir_present else 0,
 		"regime_reservoir_renderer_capacity": 1,
 		"regime_salmon_activity": _regime_salmon_activity,
 		"regime_leaf_activity": _regime_leaf_activity,
@@ -2245,6 +2286,9 @@ func runtime_summary() -> Dictionary:
 		"regime_reservoir_override_enabled_uniforms": (
 			regime_reservoir_override_enabled_uniforms
 		),
+		"regime_reservoir_present_uniforms": (
+			regime_reservoir_present_uniforms
+		),
 		"regime_drain_override_enabled_uniforms": (
 			regime_drain_override_enabled_uniforms
 		),
@@ -2335,6 +2379,16 @@ func runtime_summary() -> Dictionary:
 			int(_overlay.call(&"get_interaction_polygon_count"))
 			if _overlay != null
 			else 0
+		),
+		"interaction_overlay_visible_count": (
+			int(_overlay.call(&"get_visible_interaction_polygon_count"))
+			if _overlay != null
+			else 0
+		),
+		"reservoir_overlay_visible": (
+			bool(_overlay.call(&"is_reservoir_visible"))
+			if _overlay != null
+			else false
 		),
 		"polygon_overlay_count": (
 			int(_overlay.call(&"get_interaction_polygon_count"))

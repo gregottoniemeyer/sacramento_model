@@ -1432,8 +1432,36 @@ func _check_regime_panel(
 		errors,
 	)
 	_check_delta_regime_profile_contracts(stage, errors)
-	stage.call(&"set_active_regime_names", ["Kinship"])
+	var control_bus := get_node_or_null("/root/FlowControlBus") as Node
+	if control_bus == null:
+		errors.append("FlowControlBus is unavailable for the Kinship packet check")
+	else:
+		var packet_applied := bool(control_bus.call(
+			&"submit_packet",
+			{
+				"protocol": "ink-flow/1",
+				"target": "*",
+				"changes": {"regimes.active_indices": [0]},
+			},
+			"smoke-test",
+			0,
+		))
+		if not packet_applied:
+			errors.append("FlowControlBus rejected the Kinship regime packet")
 	var kinship_summary: Dictionary = stage.call(&"runtime_summary")
+	if Array(kinship_summary.get("active_regime_indices", [])) != [0]:
+		errors.append("Kinship packet did not update the stage regime state")
+	var kinship_label := stage.get_node_or_null(
+		"StageTitleLayer/ActiveRegimes/Regime1"
+	) as Label
+	if (
+		kinship_label == null
+		or not is_equal_approx(
+			kinship_label.get_theme_color(&"font_color").a,
+			1.0,
+		)
+	):
+		errors.append("Kinship packet did not highlight the Delta regime label")
 	var kinship_features: Dictionary = kinship_summary.get(
 		"regime_effective_features",
 		{}
@@ -1466,6 +1494,26 @@ func _check_regime_panel(
 		and String(kinship_schedule.get("leaf_interval_days", "")) == "2"
 	):
 		errors.append("Kinship seasonal schedule was not loaded from the profile table")
+	var kinship_presence: Dictionary = kinship_summary.get(
+		"regime_feature_presence",
+		{},
+	)
+	if (
+		bool(kinship_presence.get("reservoir", true))
+		or bool(kinship_presence.get("drain", true))
+		or bool(kinship_presence.get("obstacle", true))
+	):
+		errors.append("Kinship did not remove reservoirs, drains, and obstacles")
+	if bool(kinship_summary.get("reservoir_overlay_visible", true)):
+		errors.append("Kinship did not hide the reservoir diagnostic overlay")
+	if int(kinship_summary.get("interaction_overlay_visible_count", -1)) != 0:
+		errors.append("Kinship did not hide drain and obstacle diagnostic overlays")
+	for reservoir_present: Variant in Array(
+		kinship_summary.get("regime_reservoir_present_uniforms", [])
+	):
+		if bool(reservoir_present):
+			errors.append("Kinship reservoir removal did not reach every water shader")
+			break
 	stage.call(&"set_active_regime_names", [])
 	var cleared_summary: Dictionary = stage.call(&"runtime_summary")
 	if not is_zero_approx(float(cleared_summary.get("shoreline_randomness", -1.0))):
@@ -1477,12 +1525,36 @@ func _check_regime_panel(
 		Vector2.ZERO,
 	)) != Vector2(28.0, 1052.0):
 		errors.append("clearing shoreline force did not restore the full inlet range")
+	var cleared_presence: Dictionary = cleared_summary.get(
+		"regime_feature_presence",
+		{},
+	)
+	if (
+		not bool(cleared_presence.get("reservoir", false))
+		or not bool(cleared_presence.get("drain", false))
+		or not bool(cleared_presence.get("obstacle", false))
+		or not bool(cleared_summary.get("reservoir_overlay_visible", false))
+		or int(cleared_summary.get("interaction_overlay_visible_count", -1)) != 2
+	):
+		errors.append("clearing regimes did not restore authored feature visibility")
 
 
 func _check_delta_regime_profile_contracts(
 	stage: Node,
 	errors: PackedStringArray
 ) -> void:
+	stage.call(&"set_active_regime_names", ["Gold Rush"])
+	var gold_rush: Dictionary = stage.call(&"runtime_summary")
+	var gold_rush_presence: Dictionary = gold_rush.get(
+		"regime_feature_presence",
+		{},
+	)
+	if (
+		not bool(gold_rush_presence.get("reservoir", false))
+		or int(gold_rush.get("regime_reservoir_count_rendered", 0)) != 1
+	):
+		errors.append("Gold Rush blank reservoir_count did not preserve its area reservoir")
+
 	stage.call(&"set_active_regime_names", ["Hydropower"])
 	var hydropower: Dictionary = stage.call(&"runtime_summary")
 	_expect_regime_feature_values(
@@ -1630,6 +1702,16 @@ func _check_delta_regime_profile_contracts(
 		and not is_zero_approx(float(watershed.get("shoreline_randomness", -1.0)))
 	):
 		errors.append("undefined Watershed shoreline did not retain the baseline")
+	var watershed_presence: Dictionary = watershed.get(
+		"regime_feature_presence",
+		{},
+	)
+	if (
+		not bool(watershed_presence.get("reservoir", false))
+		or not bool(watershed_presence.get("drain", false))
+		or not bool(watershed_presence.get("obstacle", false))
+	):
+		errors.append("undefined Watershed features did not restore authored presence")
 	stage.call(&"set_active_regime_names", [])
 
 

@@ -9,6 +9,8 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -46,8 +48,12 @@ COMPUTERS = {
 }
 GODOT_BIN = "/Applications/Godot.app/Contents/MacOS/Godot"
 SSH_TIMEOUT_SECONDS = 8
+PROCESS_STOP_TIMEOUT_SECONDS = 6.0
 FLOW_CONTROL_PORT = 5005
 REGIME_TARGET = "*"
+REGIME_ACK_PROTOCOL = "ink-flow/1-ack"
+REGIME_ACK_ATTEMPTS = 12
+REGIME_ACK_WAIT_SECONDS = 0.75
 REGIME_STATE_PATH = os.path.expanduser("~/.water_council_regime_state.json")
 REGIMES = (
     ("kinship", "Kinship"),
@@ -58,6 +64,15 @@ REGIMES = (
     ("tech", "Tech"),
     ("watershed", "Watershed"),
 )
+STAGE_SCREEN_IDS = {
+    1: "mount_shasta",
+    2: "mccloud_pit",
+    3: "cottonwood_creek",
+    4: "mill_creek",
+    5: "feather_river",
+    6: "american_river",
+    7: "delta",
+}
 
 
 def run_local(command: list[str], timeout: int = SSH_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
@@ -88,6 +103,63 @@ def ssh(computer: dict, remote_command: str) -> subprocess.CompletedProcess:
 def process_pattern(computer: dict) -> str:
     # The bracket prevents pgrep/pkill from matching their own command line.
     return f"[/]Applications/Godot.app/Contents/MacOS/Godot.*--path {computer['project']}"
+
+
+def all_godot_process_pattern() -> str:
+    # Fleet Macs are dedicated render nodes. A Godot process from another
+    # checkout can still own UDP 5005, so clean launch must stop every Godot.
+    return "[/]Applications/Godot.app/Contents/MacOS/Godot"
+
+
+def stop_godot_processes(computer: dict) -> subprocess.CompletedProcess:
+    """Stop every Godot process on one fleet Mac and wait for exit."""
+    pattern = all_godot_process_pattern()
+    if computer["local"]:
+        terminate = run_local(["pkill", "-TERM", "-f", pattern])
+        if terminate.returncode not in {0, 1}:
+            return terminate
+        deadline = time.monotonic() + PROCESS_STOP_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            status = run_local(["pgrep", "-f", pattern])
+            if status.returncode == 1:
+                return subprocess.CompletedProcess(status.args, 0, "", "")
+            if status.returncode not in {0, 1}:
+                return status
+            time.sleep(0.1)
+        force = run_local(["pkill", "-KILL", "-f", pattern])
+        if force.returncode not in {0, 1}:
+            return force
+        force_deadline = time.monotonic() + 1.0
+        while time.monotonic() < force_deadline:
+            status = run_local(["pgrep", "-f", pattern])
+            if status.returncode == 1:
+                return subprocess.CompletedProcess(status.args, 0, "", "")
+            if status.returncode not in {0, 1}:
+                return status
+            time.sleep(0.05)
+        return subprocess.CompletedProcess(
+            status.args,
+            14,
+            status.stdout,
+            "Godot process did not exit after TERM and KILL",
+        )
+
+    poll_count = max(int(PROCESS_STOP_TIMEOUT_SECONDS * 10), 1)
+    polls = " ".join(str(index) for index in range(poll_count))
+    remote_command = (
+        f"pkill -TERM -f {shlex.quote(pattern)}; _stop_status=$?; "
+        "if test $_stop_status -ne 0 && test $_stop_status -ne 1; then "
+        "exit $_stop_status; fi; "
+        f"for _poll in {polls}; do "
+        f"if ! pgrep -f {shlex.quote(pattern)} >/dev/null; then exit 0; fi; "
+        "sleep 0.1; done; "
+        f"pkill -KILL -f {shlex.quote(pattern)}; _kill_status=$?; "
+        "if test $_kill_status -ne 0 && test $_kill_status -ne 1; then "
+        "exit $_kill_status; fi; "
+        f"if pgrep -f {shlex.quote(pattern)} >/dev/null; then "
+        "echo 'Godot process did not exit after TERM and KILL'; exit 14; fi"
+    )
+    return ssh(computer, remote_command)
 
 
 def perform(target: str, action: str) -> tuple[str, bool, str]:
@@ -168,16 +240,16 @@ def perform(target: str, action: str) -> tuple[str, bool, str]:
         return ip_address, False, error_message(result)
 
     if action == "stop":
-        if computer["local"]:
-            result = run_local(["pkill", "-TERM", "-f", process_pattern(computer)])
-            if result.returncode == 1:
-                result = subprocess.CompletedProcess(result.args, 0, result.stdout, result.stderr)
-        else:
-            command = f"pkill -TERM -f {shlex.quote(process_pattern(computer))} || test $? -eq 1"
-            result = ssh(computer, command)
+        result = stop_godot_processes(computer)
         return ip_address, result.returncode == 0, "stopped" if result.returncode == 0 else error_message(result)
 
     if action in {"start", "editor"}:
+        # A clean launch is mandatory: duplicate project processes compete for UDP
+        # 5005, so the controller can update a hidden copy while the visible screens
+        # remain unchanged. Stop and reap every matching process before launching.
+        stop_result = stop_godot_processes(computer)
+        if stop_result.returncode != 0:
+            return ip_address, False, error_message(stop_result)
         editor_flag = " --editor" if action == "editor" else ""
         stage_argument = "--stages=" + ",".join(str(stage) for stage in computer["stages"])
         if computer["local"]:
@@ -223,16 +295,32 @@ def error_message(result: subprocess.CompletedProcess) -> str:
     return (result.stderr or result.stdout or f"exit code {result.returncode}").strip()
 
 
-def regime_destinations() -> list[str]:
-    """Return one UDP destination for every configured Godot process."""
-    destinations: list[str] = []
-    for computer in COMPUTERS.values():
+def regime_destination_specs(target_names=None) -> list[tuple[str, list[str]]]:
+    """Return UDP destinations and the exact screens each process must host."""
+    selected_names = list(COMPUTERS) if target_names is None else list(target_names)
+    specifications: list[tuple[str, list[str]]] = []
+    seen_destinations: set[str] = set()
+    for target_name in selected_names:
+        if target_name not in COMPUTERS:
+            raise ValueError(f"unknown fleet target: {target_name}")
+        computer = COMPUTERS[target_name]
         destination = "127.0.0.1" if computer["local"] else computer["ip"]
-        if destination not in destinations:
-            destinations.append(destination)
-    if not destinations:
+        if destination in seen_destinations:
+            raise ValueError(f"duplicate regime destination: {destination}")
+        expected_screens: list[str] = []
+        for stage in computer["stages"]:
+            if stage not in STAGE_SCREEN_IDS:
+                raise ValueError(f"unknown configured stage number: {stage}")
+            expected_screens.append(STAGE_SCREEN_IDS[stage])
+        specifications.append((destination, sorted(expected_screens)))
+        seen_destinations.add(destination)
+    if not specifications:
         raise ValueError("no fleet computers are configured")
-    return destinations
+    return specifications
+
+
+def regime_destinations() -> list[str]:
+    return [destination for destination, _screens in regime_destination_specs()]
 
 
 def regime_indices(regime_ids: list[str]) -> list[int]:
@@ -245,37 +333,112 @@ def regime_indices(regime_ids: list[str]) -> list[int]:
     return sorted(known_ids.index(regime_id) for regime_id in regime_ids)
 
 
-def send_fleet_regimes(regime_ids: list[str], command: str) -> list[tuple[str, int]]:
+def send_fleet_regimes(
+    regime_ids: list[str],
+    command: str,
+    target_names=None,
+) -> list[tuple[str, int, int]]:
     indices = regime_indices(regime_ids)
+    request_id = uuid.uuid4().hex
     payload = {
         "protocol": "ink-flow/1",
         "target": REGIME_TARGET,
         "changes": {"regimes.active_indices": indices},
         "geometry_ops": [],
         "actions": [],
-        "metadata": {"source": "governator", "command": command},
+        "metadata": {
+            "source": "governator",
+            "command": command,
+            "request_id": request_id,
+        },
     }
     encoded = json.dumps(
         payload,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    results: list[tuple[str, int]] = []
+    destination_specs = regime_destination_specs(target_names)
+    destinations = [destination for destination, _screens in destination_specs]
+    expected_screens_by_destination = dict(destination_specs)
+    pending = set(destinations)
+    acknowledgements: dict[str, int] = {}
+    last_seen_screens: dict[str, list[str]] = {}
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
-        for destination in regime_destinations():
-            sent = udp_socket.sendto(encoded, (destination, FLOW_CONTROL_PORT))
-            if sent != len(encoded):
-                raise OSError(
-                    f"sent only {sent} of {len(encoded)} UDP bytes to {destination}"
+        udp_socket.bind(("", 0))
+        for _attempt in range(REGIME_ACK_ATTEMPTS):
+            for destination in list(pending):
+                sent = udp_socket.sendto(encoded, (destination, FLOW_CONTROL_PORT))
+                if sent != len(encoded):
+                    raise OSError(
+                        f"sent only {sent} of {len(encoded)} UDP bytes to {destination}"
+                    )
+            deadline = time.monotonic() + REGIME_ACK_WAIT_SECONDS
+            while pending and time.monotonic() < deadline:
+                udp_socket.settimeout(max(deadline - time.monotonic(), 0.01))
+                try:
+                    raw_ack, sender = udp_socket.recvfrom(4096)
+                except socket.timeout:
+                    break
+                try:
+                    acknowledgement = json.loads(raw_ack.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(acknowledgement, dict):
+                    continue
+                if acknowledgement.get("protocol") != REGIME_ACK_PROTOCOL:
+                    continue
+                if acknowledgement.get("request_id") != request_id:
+                    continue
+                sender_ip = sender[0]
+                if sender_ip not in pending:
+                    continue
+                if acknowledgement.get("accepted") is not True:
+                    raise OSError(f"Godot at {sender_ip} rejected the regime state")
+                active_indices = acknowledgement.get("regime_active_indices")
+                if active_indices != indices:
+                    raise OSError(
+                        f"Godot at {sender_ip} acknowledged active indices "
+                        f"{active_indices!r}, expected {indices!r}"
+                    )
+                received_screens = sorted(
+                    str(screen_id)
+                    for screen_id in acknowledgement.get("recipient_screen_ids", [])
                 )
-            results.append((destination, sent))
-    return results
+                last_seen_screens[sender_ip] = received_screens
+                recipient_count = int(acknowledgement.get("recipient_count", 0))
+                if (
+                    received_screens != expected_screens_by_destination[sender_ip]
+                    or recipient_count != len(expected_screens_by_destination[sender_ip])
+                ):
+                    # The process may still be loading its assigned stages. Leave
+                    # it pending so the absolute packet is retried until ready.
+                    continue
+                acknowledgements[sender_ip] = recipient_count
+                pending.remove(sender_ip)
+            if not pending:
+                break
+    if pending:
+        readiness = "; ".join(
+            f"{destination} expected {expected_screens_by_destination[destination]!r}, "
+            f"saw {last_seen_screens.get(destination, [])!r}"
+            for destination in sorted(pending)
+        )
+        raise OSError(
+            "no ready regime acknowledgement: "
+            + readiness
+            + "; verify exactly one updated Godot owns UDP 5005 per fleet Mac"
+        )
+    return [
+        (destination, len(encoded), acknowledgements[destination])
+        for destination in destinations
+    ]
 
 
-def format_regime_send(results: list[tuple[str, int]]) -> str:
+def format_regime_send(results: list[tuple[str, int, int]]) -> str:
     return ", ".join(
-        f"{destination}:{FLOW_CONTROL_PORT} ({sent} bytes)"
-        for destination, sent in results
+        f"{destination}:{FLOW_CONTROL_PORT} "
+        f"({sent} bytes, {recipient_count} stage(s))"
+        for destination, sent, recipient_count in results
     )
 
 
@@ -355,7 +518,7 @@ def run_regime_console() -> None:
     ]
     sends = send_fleet_regimes(ordered_start, "regime-console-sync")
     initial_state = ", ".join(ordered_start) if ordered_start else "none"
-    print(f"SENT to {format_regime_send(sends)}: active={initial_state}")
+    print(f"APPLIED to {format_regime_send(sends)}: active={initial_state}")
     try:
         tty.setcbreak(file_descriptor)
         while True:
@@ -384,7 +547,7 @@ def run_regime_console() -> None:
             ordered = [regime_id for regime_id, _name in REGIMES if regime_id in active_ids]
             save_controller_regime_state(ordered)
             state = ", ".join(ordered) if ordered else "none"
-            print(f"\rSENT to {format_regime_send(sends)}: active={state}          ")
+            print(f"\rAPPLIED to {format_regime_send(sends)}: active={state}          ")
     finally:
         termios.tcsetattr(file_descriptor, termios.TCSADRAIN, original_terminal)
 
@@ -402,7 +565,7 @@ def main() -> None:
             "stop",
             "restart",
             "list",
-            "regime-set",
+            "set",
             "regime-clear",
             "regime-console",
         ],
@@ -419,11 +582,11 @@ def main() -> None:
         action="append",
         default=[],
         choices=[regime_id for regime_id, _display_name in REGIMES],
-        help="regime ID for regime-set; repeat to activate several regimes",
+        help="regime ID for set; repeat to activate several regimes",
     )
     args = parser.parse_args()
 
-    regime_actions = {"list", "regime-set", "regime-clear", "regime-console"}
+    regime_actions = {"list", "set", "regime-clear", "regime-console"}
     if args.action in regime_actions:
         if args.targets:
             parser.error(f"{args.action} does not accept machine targets")
@@ -432,20 +595,20 @@ def main() -> None:
                 parser.error("list does not accept --regime")
             print_regime_catalog()
             return
-        if args.action == "regime-set" and not args.regime:
-            parser.error("regime-set requires at least one --regime")
-        if args.action != "regime-set" and args.regime:
+        if args.action == "set" and not args.regime:
+            parser.error("set requires at least one --regime")
+        if args.action != "set" and args.regime:
             parser.error(f"{args.action} does not accept --regime")
         try:
             if args.action == "regime-console":
                 run_regime_console()
                 return
-            regime_ids = args.regime if args.action == "regime-set" else []
-            command = "regime-set" if regime_ids else "regime-clear"
+            regime_ids = args.regime if args.action == "set" else []
+            command = "set" if regime_ids else "regime-clear"
             sends = send_fleet_regimes(regime_ids, command)
             save_controller_regime_state(regime_ids)
             active = ", ".join(regime_ids) if regime_ids else "none"
-            print(f"SENT  {format_regime_send(sends)}; active={active}")
+            print(f"APPLIED  {format_regime_send(sends)}; active={active}")
             return
         except (OSError, ValueError) as error:
             parser.error(str(error))
@@ -478,6 +641,34 @@ def main() -> None:
     for ip_address, ok, message in results:
         print(f"{'OK' if ok else 'ERROR':5} {ip_address}: {message}")
         failed = failed or not ok
+    if args.action in {"start", "restart"}:
+        successful_ips = {ip_address for ip_address, ok, _message in results if ok}
+        successful_targets = [
+            target
+            for target in targets
+            if COMPUTERS[target]["ip"] in successful_ips
+        ]
+        if successful_targets:
+            try:
+                active_ids = load_controller_regime_state()
+                ordered_active = [
+                    regime_id
+                    for regime_id, _name in REGIMES
+                    if regime_id in active_ids
+                ]
+                sends = send_fleet_regimes(
+                    ordered_active,
+                    "startup-sync",
+                    successful_targets,
+                )
+                active = ", ".join(ordered_active) if ordered_active else "none"
+                print(
+                    f"APPLIED  {format_regime_send(sends)}; "
+                    f"startup active={active}"
+                )
+            except (OSError, ValueError) as error:
+                print(f"ERROR startup regime verification: {error}")
+                failed = True
     raise SystemExit(1 if failed else 0)
 
 

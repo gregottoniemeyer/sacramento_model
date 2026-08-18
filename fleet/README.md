@@ -46,8 +46,8 @@ Terminal window instead:
 ```bash
 python3 fleet/godot_controller.py list
 python3 fleet/godot_controller.py regime-clear
-python3 fleet/godot_controller.py regime-set --regime kinship
-python3 fleet/godot_controller.py regime-set --regime kinship --regime tech
+python3 fleet/godot_controller.py set --regime kinship
+python3 fleet/godot_controller.py set --regime kinship --regime tech
 python3 fleet/godot_controller.py regime-console
 ```
 
@@ -56,16 +56,24 @@ Gold Rush, Water Projects, Hydropower, Tech, and Watershed. Press `c` to clear
 the active set, and `q` or Escape to leave the console. Exiting leaves the last
 sent regime state active. The controller persists its authoritative set in
 `~/.water_council_regime_state.json` and resends that absolute state when the
-console opens, so reopening the console does not accidentally discard an
-earlier command.
+console opens. `start` and `restart` also reapply it automatically after launch,
+so reopening the console or relaunching the fleet does not accidentally discard
+an earlier command.
 
 Each change sends the same modern `ink-flow/1` absolute-state packet on UDP
 port `5005` once to every configured Godot process, with target `*`. A dual-screen
-process applies that process-global regime state once and each hosted stage then
-consumes its own river row. Regime commands deliberately reject machine suffix
-arguments because partial-fleet regime state would make the installation
-incoherent. UDP send success is reported as `SENT`, not `APPLIED`; the current
-receivers have no acknowledgement channel.
+process applies the packet directly to its persistent `ModelRegimes` authority
+before stage routing, even when the selector is visible or a stage is still
+starting. The consumed regime paths are then removed from the stage-routed copy,
+so the global change is applied exactly once; every active or subsequently loaded
+stage consumes its own river row. Regime commands deliberately reject machine
+suffix arguments because partial-fleet regime state would make the installation
+incoherent. Each receiver returns an `ink-flow/1-ack` containing the accepted
+active indices, recipient count, and recipient screen IDs. The controller retries
+until every process reports the exact screen IDs and count configured for that
+Mac, and prints `APPLIED` only after every process also acknowledges the exact
+regime state. A missing or mismatched acknowledgement is an error rather than a
+successful send.
 
 All seven production wrappers consume their own screen row for the first six
 regimes. The master
@@ -80,8 +88,11 @@ authored behavior.
 
 The operator-level matrix is:
 
-- Kinship defines zero reservoir/drain/obstacle, source `.10`, full shoreline,
-  salmon `11/01–01/31` daily, and leaves `10/01–10/31` every 2 days on all seven.
+- Kinship removes the reservoir, drain/field, and obstacle constraints and their
+  debug guides, defines source `.10`, and applies the full irregular shoreline,
+  with salmon `11/01–01/31` daily and leaves `10/01–10/31` every 2 days on all
+  seven. Water already retained by a reservoir is released downstream while its
+  existing trail fades normally.
 - Agriculture defines reservoir `.20` except Cottonwood `0` (counts 1 on
   Shasta/Mill/Feather/American, 2 on McCloud/Delta), drain `.75` everywhere,
   shoreline `.30` on Shasta/McCloud/Cottonwood and `0` elsewhere, with positive
@@ -101,9 +112,12 @@ The operator-level matrix is:
   current no-op with no linked per-river file.
 
 The `*_area_fraction` values are deterministic particle admission/encounter
-budgets, not literal geometric coverage. The renderer currently has one
-physical reservoir; `reservoir_count=2` is retained desired-state data awaiting
-a two-slot renderer. Agriculture and Hydropower gate schedules blend by
+budgets, not literal geometric coverage. An explicit zero area removes that
+feature's runtime constraint and hides its debug geometry; a zero reservoir
+count also removes the reservoir. The Delta panel immediately renders active
+regime names at full alpha and leaves inactive names dim. The renderer currently
+has one physical reservoir; `reservoir_count=2` is retained desired-state data
+awaiting a two-slot renderer. Agriculture and Hydropower gate schedules blend by
 scheduled reservoir area, then multiply the effective aperture. With both
 active on a non-Cottonwood screen, aperture is `.33` during June–August and
 `.33 * .50 / (.50 + .20)` outside that season. A shoreline value of zero turns
@@ -113,6 +127,15 @@ The startup selector still accepts `1` through `7` before a stage launches.
 Manual `S` and `L` ecology checks remain available in a running stage. A later
 ESP32 adapter belongs in this controller and should call the same absolute-state
 send path; Godot remains the state consumer rather than reading the USB device.
+
+`start`, `restart`, and `editor` are clean launches: before opening Godot, the
+controller stops and reaps every existing Godot instance on each targeted fleet
+Mac, regardless of its project path. These Macs are treated as dedicated render
+nodes; `stop` uses the same all-instance cleanup. This prevents a hidden instance
+from owning UDP port `5005` and acknowledging or consuming regime packets
+intended for the visible stages. Once `start` or `restart` sees the exact
+configured screens, it reapplies the saved
+regime set and treats any failed acknowledgement as startup failure.
 
 The current addresses, login names, project paths, and stage assignments live in
 the `COMPUTERS` dictionary near the top of `godot_controller.py`. Keep them in

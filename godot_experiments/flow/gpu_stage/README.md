@@ -134,6 +134,10 @@ The initial active set is empty. Any number of regimes may be active
 simultaneously, and changing scenes or passing through the selector preserves
 that set. A separate Godot process has a separate `ModelRegimes` authority, so
 an installation controller must synchronize separate executables explicitly.
+Incoming regime paths are applied to that persistent authority by
+`FlowControlBus` before the packet is routed to stages. This keeps packets sent
+on the selector or during startup and prevents a dual-stage process from applying
+the same global change once per hosted stage.
 
 ### First-six per-river regime pilot
 
@@ -174,7 +178,11 @@ desired reservoir count and `p` is interaction power.
 The four `*_area_fraction` physics values are deterministic admission or
 encounter budgets over particle lifecycles. They do not resize geometry or
 promise literal screen-area coverage. Drain and obstacle `power` are separate
-from those budgets and control response strength for admitted encounters. The
+from those budgets and control response strength for admitted encounters. A
+defined zero reservoir area or count removes the reservoir constraint and debug
+guide; a defined zero drain or obstacle area removes its constraint and guide.
+If a regime removes a live reservoir, retained heads resume downstream flow and
+their existing orbit trails fade over the normal trail lifetime. The
 GPU renderer also still has one physical `reservoir_main`; a profile value such
 as `reservoir_count=2` is retained desired-state data for a future two-slot
 renderer and does not create a second reservoir today.
@@ -227,6 +235,8 @@ The main-canvas presentation stack is fixed around the animated content:
   `Regime` heading is centered on X `1360`, and seven 60-pixel names begin on
   X `1420` with 72-pixel centerline spacing.
   Active names are opaque and inactive names are shown at `0.25` alpha.
+  The panel follows the shared `ModelRegimes` state, so matching active names
+  highlight immediately even when that state arrived before Delta was loaded.
 - Water, salmon, and leaves render at absolute Z `0` or higher, so active
   features can pass visibly over the grid and text.
 
@@ -390,7 +400,8 @@ Profile fields are `regime_profile_path`, `regime_profiles_loaded`,
 `regime_active_schedules_by_screen`, and the current screen's
 `regime_effective_feature_state`. Applied-physics fields include
 `regime_profile_physics_enabled`, `regime_applied_feature_budgets`,
-`regime_applied_feature_overrides`, `regime_gate_open_fraction`,
+`regime_applied_feature_overrides`, `regime_feature_presence`,
+`regime_gate_open_fraction`,
 `regime_reservoir_count_desired_raw`, `regime_reservoir_count_rendered`, and
 `regime_reservoir_renderer_capacity`. Shoreline fields are
 `shoreline_randomness`, `shoreline_count`, `shoreline_vertex_count`,

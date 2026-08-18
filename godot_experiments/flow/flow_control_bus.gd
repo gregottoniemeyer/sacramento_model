@@ -16,12 +16,26 @@ signal packet_error(reason: String, sender_ip: String, sender_port: int)
 signal transport_error(reason: String)
 
 const PROTOCOL := "ink-flow/1"
+const ACK_PROTOCOL := "ink-flow/1-ack"
 const FLOW_MODELS_GROUP := &"flow_models"
 const DEFAULT_UDP_PORT := 5005
 const DEFAULT_BIND_ADDRESS := "0.0.0.0"
 const UDP_PORT_SETTING := "flow_control/udp_port"
 const BIND_ADDRESS_SETTING := "flow_control/bind_address"
 const MAX_PACKETS_PER_FRAME := 256
+const PROCESS_GLOBAL_REGIME_PATHS: Array[String] = [
+	"regimes.active_indices",
+	"regimes.active_names",
+	"active_regimes",
+	"regimes.kinship",
+	"regimes.agriculture",
+	"regimes.ranch",
+	"regimes.gold_rush",
+	"regimes.water_projects",
+	"regimes.hydropower",
+	"regimes.tech",
+	"regimes.watershed",
+]
 
 # These fields describe meaningful legacy controller state. Diagnostic values
 # such as timestamp, temperature, and confidence can change continuously, so
@@ -57,6 +71,7 @@ var listen_address: String = DEFAULT_BIND_ADDRESS
 var _udp: PacketPeerUDP
 var _legacy_revision: int = 0
 var _protocol_revision: int = 0
+var _last_global_regime_revision: int = -1
 var _last_legacy_signature_by_route: Dictionary = {}
 var _latest_legacy_message_by_route: Dictionary = {}
 var _last_legacy_recipients_by_route: Dictionary = {}
@@ -224,7 +239,21 @@ func _handle_packet(
 		)
 		if normalized.is_empty():
 			return false
-		route_control_message(normalized)
+		var global_result := _apply_process_global_regime_changes(
+			normalized,
+			sender_ip,
+			sender_port,
+		)
+		if not bool(global_result.get("ok", false)):
+			return false
+		normalized = Dictionary(global_result.get("message", normalized))
+		var recipient_count := route_control_message(normalized)
+		_send_protocol_ack(
+			normalized,
+			sender_ip,
+			sender_port,
+			recipient_count,
+		)
 		return true
 
 	if packet.has("speed"):
@@ -315,6 +344,160 @@ func _normalize_protocol_packet(
 	normalized["geometry_ops"] = (geometry_value as Array).duplicate(true)
 	normalized["actions"] = (actions_value as Array).duplicate(true)
 	return normalized
+
+
+func _apply_process_global_regime_changes(
+	message: Dictionary,
+	sender_ip: String,
+	sender_port: int,
+) -> Dictionary:
+	## Regime state belongs to the process-wide ModelRegimes autoload, not to an
+	## individual stage. Apply it here so an absolute controller packet remains
+	## effective even while the selector is visible or stages are still loading.
+	## Remove consumed paths before stage routing to avoid applying one global
+	## state once per hosted screen in a dual-window process.
+	var model_regimes := get_node_or_null("/root/ModelRegimes")
+	if model_regimes == null:
+		return {"ok": true, "message": message}
+	var changes_variant: Variant = message.get("changes", {})
+	if not changes_variant is Dictionary:
+		return {"ok": true, "message": message}
+	var routed_changes: Dictionary = Dictionary(changes_variant).duplicate(true)
+	var handled_paths: Array[String] = []
+	for path_variant: Variant in Dictionary(changes_variant):
+		var path := String(path_variant)
+		if path in PROCESS_GLOBAL_REGIME_PATHS:
+			handled_paths.append(path)
+	if handled_paths.is_empty():
+		return {"ok": true, "message": message}
+	if handled_paths.size() > 1:
+		_emit_packet_error(
+			"A packet may contain only one process-global regime change path.",
+			sender_ip,
+			sender_port,
+		)
+		return {"ok": false, "message": {}}
+	var revision := int(message.get("revision", 0))
+	if revision < _last_global_regime_revision:
+		_emit_packet_error(
+			"Stale process-global regime revision %d; latest is %d." % [
+				revision,
+				_last_global_regime_revision,
+			],
+			sender_ip,
+			sender_port,
+		)
+		return {"ok": false, "message": {}}
+	var path := handled_paths[0]
+	if revision > _last_global_regime_revision:
+		var value: Variant = Dictionary(changes_variant)[path]
+		var apply_ok := false
+		match path:
+			"regimes.active_indices":
+				apply_ok = value is Array and bool(
+					model_regimes.call(&"set_active_indices", value)
+				)
+			"regimes.active_names", "active_regimes":
+				apply_ok = value is Array and bool(
+					model_regimes.call(&"set_active_names", value)
+				)
+			"regimes.kinship":
+				apply_ok = bool(model_regimes.call(&"set_regime_active", 0, bool(value)))
+			"regimes.agriculture", "regimes.ranch":
+				apply_ok = bool(model_regimes.call(&"set_regime_active", 1, bool(value)))
+			"regimes.gold_rush":
+				apply_ok = bool(model_regimes.call(&"set_regime_active", 2, bool(value)))
+			"regimes.water_projects":
+				apply_ok = bool(model_regimes.call(&"set_regime_active", 3, bool(value)))
+			"regimes.hydropower":
+				apply_ok = bool(model_regimes.call(&"set_regime_active", 4, bool(value)))
+			"regimes.tech":
+				apply_ok = bool(model_regimes.call(&"set_regime_active", 5, bool(value)))
+			"regimes.watershed":
+				apply_ok = bool(model_regimes.call(&"set_regime_active", 6, bool(value)))
+		if not apply_ok:
+			_emit_packet_error(
+				"Invalid process-global regime change for path '%s'." % path,
+				sender_ip,
+				sender_port,
+			)
+			return {"ok": false, "message": {}}
+		_last_global_regime_revision = revision
+	routed_changes.erase(path)
+	var routed_message := message.duplicate(true)
+	routed_message["changes"] = routed_changes
+	return {"ok": true, "message": routed_message}
+
+
+func _send_protocol_ack(
+	message: Dictionary,
+	sender_ip: String,
+	sender_port: int,
+	recipient_count: int,
+) -> void:
+	if _udp == null or sender_port <= 0 or sender_ip.is_empty():
+		return
+	var active_indices: Array = []
+	var regime_revision := 0
+	var model_regimes := get_node_or_null("/root/ModelRegimes")
+	if model_regimes != null:
+		var snapshot: Dictionary = model_regimes.call(&"snapshot")
+		active_indices = Array(snapshot.get("active_indices", [])).duplicate()
+		regime_revision = int(snapshot.get("revision", 0))
+	var metadata_variant: Variant = message.get("metadata", {})
+	var request_id := ""
+	if metadata_variant is Dictionary:
+		request_id = String(Dictionary(metadata_variant).get("request_id", ""))
+	var acknowledgement := {
+		"protocol": ACK_PROTOCOL,
+		"accepted": true,
+		"revision": int(message.get("revision", 0)),
+		"request_id": request_id,
+		"recipient_count": recipient_count,
+		"recipient_screen_ids": _recipient_screen_ids(message.get("target", "*")),
+		"regime_active_indices": active_indices,
+		"regime_revision": regime_revision,
+	}
+	var destination_error := _udp.set_dest_address(sender_ip, sender_port)
+	if destination_error != OK:
+		var destination_reason := (
+			"FlowControlBus could not address acknowledgement to %s:%d (error %d)."
+			% [sender_ip, sender_port, destination_error]
+		)
+		push_warning(destination_reason)
+		transport_error.emit(destination_reason)
+		return
+	var send_error := _udp.put_packet(JSON.stringify(acknowledgement).to_utf8_buffer())
+	if send_error != OK:
+		var send_reason := (
+			"FlowControlBus could not send acknowledgement to %s:%d (error %d)."
+			% [sender_ip, sender_port, send_error]
+		)
+		push_warning(send_reason)
+		transport_error.emit(send_reason)
+
+
+func _recipient_screen_ids(target: Variant) -> Array[String]:
+	var screen_ids: Array[String] = []
+	for candidate in get_tree().get_nodes_in_group(FLOW_MODELS_GROUP):
+		var model := candidate as Node
+		if (
+			model == null
+			or not is_instance_valid(model)
+			or not _target_matches_model(target, model)
+		):
+			continue
+		var screen_id := ""
+		if model.has_method(&"get_screen_id"):
+			screen_id = String(model.call(&"get_screen_id"))
+		else:
+			var screen_variant: Variant = _property_value(model, "screen_id")
+			if screen_variant != null:
+				screen_id = String(screen_variant)
+		if not screen_id.is_empty():
+			screen_ids.append(screen_id)
+	screen_ids.sort()
+	return screen_ids
 
 
 func _handle_legacy_packet(
