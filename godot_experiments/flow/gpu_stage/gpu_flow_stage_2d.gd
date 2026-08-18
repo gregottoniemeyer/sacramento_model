@@ -186,6 +186,9 @@ const DEFAULT_GRID_COLOR := Color(
 		regime_panel_visible = value
 		_apply_regime_panel()
 
+@export_group("Regime Modulation")
+@export var regime_profile_physics_enabled: bool = false
+
 @export_group("Presentation")
 @export var stage_grid_visible: bool = true:
 	set(value):
@@ -360,6 +363,28 @@ var _interaction_data_texture: ImageTexture
 var _shoreline_data_texture: ImageTexture
 var _shoreline_obstacles: Array[Dictionary] = []
 var _shoreline_randomness: float = 0.0
+var _regime_feature_state_for_screen: Dictionary = {}
+var _regime_reservoir_override_enabled: bool = false
+var _regime_drain_override_enabled: bool = false
+var _regime_drain_power_override_enabled: bool = false
+var _regime_obstacle_override_enabled: bool = false
+var _regime_obstacle_power_override_enabled: bool = false
+var _regime_source_override_enabled: bool = false
+var _regime_reservoir_weight: float = 1.0
+var _regime_drain_weight: float = 1.0
+var _regime_drain_power: float = 1.0
+var _regime_obstacle_weight: float = 1.0
+var _regime_obstacle_power: float = 1.0
+var _regime_source_weight: float = 1.0
+var _regime_reservoir_count: float = 0.0
+var _regime_gate_override_enabled: bool = false
+var _regime_gate_open_fraction: float = 1.0
+var _regime_gate_aperture_override_enabled: bool = false
+var _regime_gate_aperture_fraction: float = 0.0
+var _regime_salmon_activity: float = 0.0
+var _regime_leaf_activity: float = 0.0
+var _last_regime_salmon_release_day: int = -1
+var _last_regime_leaf_release_day: int = -1
 var _source_texture_packer: GPUFlowSourceTexturePacker
 var _source_data_texture: ImageTexture
 var _source_geometry_batch_depth: int = 0
@@ -388,7 +413,7 @@ func _ready() -> void:
 	_bind_model_timeline()
 	_bind_model_regimes()
 	_build_shoreline_obstacles()
-	_apply_shoreline_randomness_from_regime_state(_regime_snapshot)
+	_apply_regime_features_from_state(_regime_snapshot)
 	_install_default_interaction_polygons_if_needed()
 	_install_default_source_polygons_if_needed()
 	_source_texture_packer = SOURCE_TEXTURE_PACKER_SCRIPT.new(
@@ -416,6 +441,7 @@ func _ready() -> void:
 	_apply_gate()
 	_apply_debug_visibility()
 	_apply_stage_title()
+	_apply_regime_ecology_schedule()
 	if _model_timeline == null:
 		_reset_model_calendar()
 		_apply_local_paused(not auto_start)
@@ -460,8 +486,6 @@ func _unhandled_input(event: InputEvent) -> void:
 	if key_event == null or not key_event.pressed or key_event.echo:
 		return
 	match key_event.keycode:
-		KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7:
-			toggle_regime(int(key_event.keycode - KEY_1))
 		KEY_0, KEY_8, KEY_9:
 			set_flow_rate(float(key_event.keycode - KEY_0) / 9.0)
 		KEY_G:
@@ -587,9 +611,34 @@ func get_gate_aperture_fraction() -> float:
 
 
 func get_effective_gate_release_probability() -> float:
-	if not gate_open:
+	if not _effective_gate_open():
 		return 0.0
-	return get_gate_aperture_fraction()
+	return _effective_gate_aperture_fraction()
+
+
+func _effective_gate_open() -> bool:
+	return (
+		gate_open
+		and (
+			not _regime_gate_override_enabled
+			or _regime_gate_open_fraction > 0.000001
+		)
+	)
+
+
+func _effective_gate_aperture_fraction() -> float:
+	var aperture := (
+		clampf(_regime_gate_aperture_fraction, 0.0, 1.0)
+		if _regime_gate_aperture_override_enabled
+		else get_gate_aperture_fraction()
+	)
+	if _regime_gate_override_enabled:
+		aperture *= clampf(_regime_gate_open_fraction, 0.0, 1.0)
+	return aperture
+
+
+func _effective_gate_half_width_pixels() -> float:
+	return reservoir_radius_pixels * _effective_gate_aperture_fraction()
 
 
 func toggle_gate(_reservoir_id: StringName = RESERVOIR_ID) -> void:
@@ -741,8 +790,9 @@ func _bind_model_regimes() -> void:
 
 func _on_model_regimes_changed(state: Dictionary) -> void:
 	_regime_snapshot = state.duplicate(true)
-	_apply_shoreline_randomness_from_regime_state(_regime_snapshot)
+	_apply_regime_features_from_state(_regime_snapshot)
 	_apply_regime_panel()
+	_apply_regime_ecology_schedule()
 	if is_node_ready():
 		regimes_changed.emit(
 			screen_id,
@@ -752,20 +802,467 @@ func _on_model_regimes_changed(state: Dictionary) -> void:
 		)
 
 
-func _apply_shoreline_randomness_from_regime_state(state: Dictionary) -> void:
-	var features_variant: Variant = state.get("effective_features", {})
-	if not features_variant is Dictionary:
+func _apply_regime_features_from_state(state: Dictionary) -> void:
+	_regime_feature_state_for_screen = _regime_screen_feature_state(state)
+	# The renderer remains opt-in so reusable/legacy stages preserve their authored
+	# physics. Production wrappers opt in and then consume only their own screen row.
+	if not regime_profile_physics_enabled:
+		_regime_reservoir_override_enabled = false
+		_regime_drain_override_enabled = false
+		_regime_drain_power_override_enabled = false
+		_regime_obstacle_override_enabled = false
+		_regime_obstacle_power_override_enabled = false
+		_regime_source_override_enabled = false
+		_regime_gate_aperture_override_enabled = false
+		_regime_reservoir_weight = 1.0
+		_regime_drain_weight = 1.0
+		_regime_drain_power = 1.0
+		_regime_obstacle_weight = 1.0
+		_regime_obstacle_power = 1.0
+		_regime_source_weight = 1.0
+		_regime_reservoir_count = 0.0
+		set_shoreline_randomness(0.0)
+		_apply_regime_shader_parameters()
 		return
-	var features: Dictionary = features_variant
-	if not features.has("shoreline_randomness"):
-		return
-	var value: Variant = features["shoreline_randomness"]
+	_regime_reservoir_override_enabled = _regime_feature_is_defined(
+		_regime_feature_state_for_screen,
+		"reservoir_area_fraction",
+	)
+	_regime_drain_override_enabled = _regime_feature_is_defined(
+		_regime_feature_state_for_screen,
+		"drain_area_fraction",
+	)
+	_regime_drain_power_override_enabled = _regime_feature_is_defined(
+		_regime_feature_state_for_screen,
+		"drain_power",
+	)
+	_regime_obstacle_override_enabled = _regime_feature_is_defined(
+		_regime_feature_state_for_screen,
+		"obstacle_area_fraction",
+	)
+	_regime_obstacle_power_override_enabled = _regime_feature_is_defined(
+		_regime_feature_state_for_screen,
+		"obstacle_power",
+	)
+	_regime_source_override_enabled = _regime_feature_is_defined(
+		_regime_feature_state_for_screen,
+		"source_area_fraction",
+	)
+	_regime_reservoir_weight = _regime_screen_fraction(
+		_regime_feature_state_for_screen,
+		"reservoir_area_fraction",
+		1.0,
+	)
+	_regime_drain_weight = _regime_screen_fraction(
+		_regime_feature_state_for_screen,
+		"drain_area_fraction",
+		1.0,
+	)
+	_regime_drain_power = _regime_screen_fraction(
+		_regime_feature_state_for_screen,
+		"drain_power",
+		1.0,
+	)
+	_regime_obstacle_weight = _regime_screen_fraction(
+		_regime_feature_state_for_screen,
+		"obstacle_area_fraction",
+		1.0,
+	)
+	_regime_obstacle_power = _regime_screen_fraction(
+		_regime_feature_state_for_screen,
+		"obstacle_power",
+		1.0,
+	)
+	_regime_source_weight = _regime_screen_fraction(
+		_regime_feature_state_for_screen,
+		"source_area_fraction",
+		1.0,
+	)
+	_regime_reservoir_count = _regime_screen_number(
+		_regime_feature_state_for_screen,
+		"reservoir_count",
+		0.0,
+		0.0,
+		2.0,
+	)
+	_regime_gate_aperture_override_enabled = _regime_feature_is_defined(
+		_regime_feature_state_for_screen,
+		"reservoir_gate_aperture_fraction",
+	)
+	_regime_gate_aperture_fraction = _regime_screen_fraction(
+		_regime_feature_state_for_screen,
+		"reservoir_gate_aperture_fraction",
+		0.0,
+	)
+	set_shoreline_randomness(_regime_screen_fraction(
+		_regime_feature_state_for_screen,
+		"shoreline_randomness",
+		0.0,
+	))
+	_apply_regime_shader_parameters()
+	_apply_regime_reservoir_gate_schedule()
+
+
+func _regime_screen_feature_state(state: Dictionary) -> Dictionary:
+	var all_screens_variant: Variant = state.get(
+		"effective_feature_state_by_screen",
+		{},
+	)
+	if not all_screens_variant is Dictionary:
+		return {}
+	var screen_variant: Variant = Dictionary(all_screens_variant).get(
+		String(screen_id),
+		{},
+	)
+	return screen_variant if screen_variant is Dictionary else {}
+
+
+func _regime_feature_is_defined(features: Dictionary, feature_name: String) -> bool:
+	var state_variant: Variant = features.get(feature_name, {})
+	return state_variant is Dictionary and bool(state_variant.get("defined", false))
+
+
+func _regime_screen_fraction(
+	features: Dictionary,
+	feature_name: String,
+	fallback: float,
+) -> float:
+	return _regime_screen_number(features, feature_name, fallback, 0.0, 1.0)
+
+
+func _regime_screen_number(
+	features: Dictionary,
+	feature_name: String,
+	fallback: float,
+	minimum: float,
+	maximum: float,
+) -> float:
+	var state_variant: Variant = features.get(feature_name, {})
+	if not state_variant is Dictionary or not bool(state_variant.get("defined", false)):
+		return fallback
+	var value: Variant = state_variant.get("value", fallback)
 	if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
-		return
+		return fallback
 	var numeric_value := float(value)
 	if not is_finite(numeric_value):
+		return fallback
+	return clampf(numeric_value, minimum, maximum)
+
+
+func _regime_fraction(features: Dictionary, feature_name: String) -> float:
+	var value: Variant = features.get(feature_name, 0.0)
+	if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
+		return 0.0
+	var numeric_value := float(value)
+	if not is_finite(numeric_value):
+		return 0.0
+	return clampf(numeric_value, 0.0, 1.0)
+
+
+func _apply_regime_shader_parameters() -> void:
+	for process_material in _process_material_layers:
+		process_material.set_shader_parameter(
+			&"regime_profile_physics_enabled",
+			regime_profile_physics_enabled
+		)
+		process_material.set_shader_parameter(
+			&"regime_reservoir_override_enabled",
+			_regime_reservoir_override_enabled
+		)
+		process_material.set_shader_parameter(
+			&"regime_drain_override_enabled",
+			_regime_drain_override_enabled
+		)
+		process_material.set_shader_parameter(
+			&"regime_drain_power_override_enabled",
+			_regime_drain_power_override_enabled
+		)
+		process_material.set_shader_parameter(
+			&"regime_obstacle_override_enabled",
+			_regime_obstacle_override_enabled
+		)
+		process_material.set_shader_parameter(
+			&"regime_obstacle_power_override_enabled",
+			_regime_obstacle_power_override_enabled
+		)
+		process_material.set_shader_parameter(
+			&"regime_source_override_enabled",
+			_regime_source_override_enabled
+		)
+		process_material.set_shader_parameter(
+			&"regime_reservoir_weight",
+			_regime_reservoir_weight
+		)
+		process_material.set_shader_parameter(
+			&"regime_drain_weight",
+			_regime_drain_weight
+		)
+		process_material.set_shader_parameter(
+			&"regime_drain_power",
+			_regime_drain_power
+		)
+		process_material.set_shader_parameter(
+			&"regime_obstacle_weight",
+			_regime_obstacle_weight
+		)
+		process_material.set_shader_parameter(
+			&"regime_obstacle_power",
+			_regime_obstacle_power
+		)
+		process_material.set_shader_parameter(
+			&"regime_source_weight",
+			_regime_source_weight
+		)
+
+
+func _regime_schedules_for_screen() -> Dictionary:
+	var all_screens_variant: Variant = _regime_snapshot.get(
+		"active_schedules_by_screen",
+		{},
+	)
+	if not all_screens_variant is Dictionary:
+		return {}
+	var screen_variant: Variant = Dictionary(all_screens_variant).get(
+		String(screen_id),
+		{},
+	)
+	return screen_variant if screen_variant is Dictionary else {}
+
+
+func _apply_regime_reservoir_gate_schedule() -> void:
+	if not regime_profile_physics_enabled:
+		_regime_gate_override_enabled = false
+		_regime_gate_open_fraction = 1.0
+		_apply_gate()
 		return
-	set_shoreline_randomness(numeric_value)
+	var active_profiles_variant: Variant = _regime_snapshot.get(
+		"active_profiles",
+		{},
+	)
+	if not active_profiles_variant is Dictionary:
+		_regime_gate_override_enabled = false
+		_regime_gate_open_fraction = 1.0
+		_apply_gate()
+		return
+	var total_scheduled_area := 0.0
+	var open_scheduled_area := 0.0
+	for profile_variant: Variant in Dictionary(active_profiles_variant).values():
+		if not profile_variant is Dictionary:
+			continue
+		var resolved := _resolved_active_profile_for_screen(profile_variant)
+		var features: Dictionary = resolved.get("features", {})
+		var schedule: Dictionary = resolved.get("schedule", {})
+		if not features.has("reservoir_area_fraction"):
+			continue
+		var area := clampf(float(features["reservoir_area_fraction"]), 0.0, 1.0)
+		if area <= 0.000001:
+			continue
+		var open_start := _schedule_day_index(
+			schedule,
+			"reservoir_gate_open_start_mm_dd",
+		)
+		var open_end := _schedule_day_index(
+			schedule,
+			"reservoir_gate_open_end_mm_dd",
+		)
+		if open_start < 0 or open_end < 0:
+			continue
+		total_scheduled_area += area
+		if _day_is_in_wrapped_schedule(
+			_model_day_index,
+			open_start,
+			open_end,
+		):
+			open_scheduled_area += area
+	_regime_gate_override_enabled = total_scheduled_area > 0.000001
+	_regime_gate_open_fraction = (
+		open_scheduled_area / total_scheduled_area
+		if _regime_gate_override_enabled
+		else 1.0
+	)
+	_apply_gate()
+
+
+func _resolved_active_profile_for_screen(profile: Dictionary) -> Dictionary:
+	var defaults_variant: Variant = profile.get("defaults", {})
+	var defaults: Dictionary = (
+		defaults_variant if defaults_variant is Dictionary else {}
+	)
+	var features_variant: Variant = defaults.get("features", {})
+	var schedule_variant: Variant = defaults.get("schedule", {})
+	var features: Dictionary = (
+		Dictionary(features_variant).duplicate(true)
+		if features_variant is Dictionary
+		else {}
+	)
+	var schedule: Dictionary = (
+		Dictionary(schedule_variant).duplicate(true)
+		if schedule_variant is Dictionary
+		else {}
+	)
+	var overrides_variant: Variant = profile.get("river_overrides", {})
+	if overrides_variant is Dictionary:
+		var override_variant: Variant = Dictionary(overrides_variant).get(
+			String(screen_id),
+			{},
+		)
+		if override_variant is Dictionary:
+			var override: Dictionary = override_variant
+			var override_features_variant: Variant = override.get("features", {})
+			if override_features_variant is Dictionary:
+				var override_features: Dictionary = override_features_variant
+				for key: Variant in override_features:
+					features[key] = override_features[key]
+			var override_schedule_variant: Variant = override.get("schedule", {})
+			if override_schedule_variant is Dictionary:
+				var override_schedule: Dictionary = override_schedule_variant
+				for key: Variant in override_schedule:
+					schedule[key] = override_schedule[key]
+	return {"features": features, "schedule": schedule}
+
+
+func _apply_regime_ecology_schedule() -> void:
+	_apply_regime_reservoir_gate_schedule()
+	_regime_salmon_activity = 0.0
+	_regime_leaf_activity = 0.0
+	if not regime_profile_physics_enabled:
+		return
+	var schedules := _regime_schedules_for_screen()
+	if schedules.is_empty():
+		_rearm_regime_release_days_after_date_change()
+		return
+	var features := _regime_screen_feature_state(_regime_snapshot)
+	var salmon_in_season := false
+	var salmon_due_today := false
+	var leaf_in_season := false
+	var leaf_due_today := false
+	for schedule_variant: Variant in schedules.values():
+		if not schedule_variant is Dictionary:
+			continue
+		var schedule: Dictionary = schedule_variant
+		var salmon_start := _schedule_day_index(schedule, "salmon_start_mm_dd")
+		var salmon_end := _schedule_day_index(schedule, "salmon_end_mm_dd")
+		if (
+			salmon_start >= 0
+			and salmon_end >= 0
+			and _day_is_in_wrapped_schedule(
+				_model_day_index,
+				salmon_start,
+				salmon_end,
+			)
+		):
+			salmon_in_season = true
+			var salmon_interval := _schedule_interval_days(
+				schedule,
+				"salmon_interval_days",
+			)
+			salmon_due_today = (
+				salmon_due_today
+				or posmod(
+					_model_day_index - salmon_start,
+					MODEL_CALENDAR_DAY_COUNT,
+				) % salmon_interval == 0
+			)
+		var leaf_start := _schedule_day_index(schedule, "leaf_start_mm_dd")
+		var leaf_end := _schedule_day_index(schedule, "leaf_end_mm_dd")
+		if (
+			leaf_start >= 0
+			and leaf_end >= 0
+			and _day_is_in_wrapped_schedule(
+				_model_day_index,
+				leaf_start,
+				leaf_end,
+			)
+		):
+			leaf_in_season = true
+			var leaf_interval := _schedule_interval_days(
+				schedule,
+				"leaf_interval_days",
+			)
+			leaf_due_today = (
+				leaf_due_today
+				or posmod(
+					_model_day_index - leaf_start,
+					MODEL_CALENDAR_DAY_COUNT,
+				) % leaf_interval == 0
+			)
+	if salmon_in_season:
+		_regime_salmon_activity = _regime_screen_fraction(
+			features,
+			"salmon_activity",
+			0.0,
+		)
+		if (
+			_regime_salmon_activity > 0.0
+			and salmon_due_today
+			and _last_regime_salmon_release_day != _model_day_index
+		):
+			var salmon_count := _scaled_regime_release_count(
+				salmon_per_release,
+				_regime_salmon_activity,
+			)
+			if salmon_count > 0 and release_salmon(salmon_count) > 0:
+				_last_regime_salmon_release_day = _model_day_index
+	else:
+		_rearm_regime_release_days_after_date_change()
+	if leaf_in_season:
+		_regime_leaf_activity = _regime_screen_fraction(
+			features,
+			"leaf_activity",
+			0.0,
+		)
+		if (
+			_regime_leaf_activity > 0.0
+			and leaf_due_today
+			and _last_regime_leaf_release_day != _model_day_index
+		):
+			var leaf_count_per_side := _scaled_regime_release_count(
+				leaves_per_side,
+				_regime_leaf_activity,
+			)
+			if leaf_count_per_side > 0 and release_leaves(leaf_count_per_side) > 0:
+				_last_regime_leaf_release_day = _model_day_index
+	else:
+		_rearm_regime_release_days_after_date_change()
+
+
+func _scaled_regime_release_count(base_count: int, activity: float) -> int:
+	var safe_base := maxi(base_count, 0)
+	var safe_activity := clampf(activity, 0.0, 1.0)
+	return clampi(
+		floori(float(safe_base) * safe_activity + 0.5),
+		0,
+		safe_base,
+	)
+
+
+func _rearm_regime_release_days_after_date_change() -> void:
+	# A same-day off/on toggle must not look like a second daily event. Once the
+	# model date advances, clearing the marker lets a later valid season fire.
+	if _last_regime_salmon_release_day != _model_day_index:
+		_last_regime_salmon_release_day = -1
+	if _last_regime_leaf_release_day != _model_day_index:
+		_last_regime_leaf_release_day = -1
+
+
+func _schedule_day_index(schedule: Dictionary, key: String) -> int:
+	var date_text := String(schedule.get(key, "")).strip_edges()
+	if date_text.is_empty():
+		return -1
+	return _parse_model_date_time(date_text).x
+
+
+func _schedule_interval_days(schedule: Dictionary, key: String) -> int:
+	var interval_text := String(schedule.get(key, "1")).strip_edges()
+	if not interval_text.is_valid_int():
+		return 1
+	return maxi(int(interval_text), 1)
+
+
+func _day_is_in_wrapped_schedule(day: int, start_day: int, end_day: int) -> bool:
+	if start_day <= end_day:
+		return day >= start_day and day <= end_day
+	return day >= start_day or day <= end_day
 
 
 func _bind_model_timeline() -> void:
@@ -823,6 +1320,7 @@ func _sync_from_model_timeline(emit_date_signal: bool = true) -> void:
 		emit_date_signal and previous_day_index != _model_day_index
 	)
 	_update_watershed_timeline()
+	_apply_regime_ecology_schedule()
 
 
 func set_model_date_mm_dd(model_date_time: String) -> bool:
@@ -846,6 +1344,7 @@ func set_model_date_mm_dd(model_date_time: String) -> bool:
 	_align_model_elapsed_to_current_day()
 	_apply_model_date()
 	_update_watershed_timeline()
+	_apply_regime_ecology_schedule()
 	return true
 
 
@@ -1330,6 +1829,19 @@ func runtime_summary() -> Dictionary:
 	var reservoir_center_uniforms: Array[Vector2] = []
 	var reservoir_radius_uniforms: Array[float] = []
 	var reservoir_admission_enabled_uniforms: Array[bool] = []
+	var regime_profile_physics_enabled_uniforms: Array[bool] = []
+	var regime_reservoir_override_enabled_uniforms: Array[bool] = []
+	var regime_drain_override_enabled_uniforms: Array[bool] = []
+	var regime_drain_power_override_enabled_uniforms: Array[bool] = []
+	var regime_obstacle_override_enabled_uniforms: Array[bool] = []
+	var regime_obstacle_power_override_enabled_uniforms: Array[bool] = []
+	var regime_source_override_enabled_uniforms: Array[bool] = []
+	var regime_reservoir_weight_uniforms: Array[float] = []
+	var regime_drain_weight_uniforms: Array[float] = []
+	var regime_drain_power_uniforms: Array[float] = []
+	var regime_obstacle_weight_uniforms: Array[float] = []
+	var regime_obstacle_power_uniforms: Array[float] = []
+	var regime_source_weight_uniforms: Array[float] = []
 	var interaction_admission_enabled_uniforms: Array[bool] = []
 	var interaction_count_uniforms: Array[int] = []
 	var interaction_texture_bound_uniforms: Array[bool] = []
@@ -1394,6 +1906,45 @@ func runtime_summary() -> Dictionary:
 		))
 		reservoir_admission_enabled_uniforms.append(bool(
 			process_material.get_shader_parameter(&"reservoir_admission_enabled")
+		))
+		regime_profile_physics_enabled_uniforms.append(bool(
+			process_material.get_shader_parameter(&"regime_profile_physics_enabled")
+		))
+		regime_reservoir_override_enabled_uniforms.append(bool(
+			process_material.get_shader_parameter(&"regime_reservoir_override_enabled")
+		))
+		regime_drain_override_enabled_uniforms.append(bool(
+			process_material.get_shader_parameter(&"regime_drain_override_enabled")
+		))
+		regime_drain_power_override_enabled_uniforms.append(bool(
+			process_material.get_shader_parameter(&"regime_drain_power_override_enabled")
+		))
+		regime_obstacle_override_enabled_uniforms.append(bool(
+			process_material.get_shader_parameter(&"regime_obstacle_override_enabled")
+		))
+		regime_obstacle_power_override_enabled_uniforms.append(bool(
+			process_material.get_shader_parameter(&"regime_obstacle_power_override_enabled")
+		))
+		regime_source_override_enabled_uniforms.append(bool(
+			process_material.get_shader_parameter(&"regime_source_override_enabled")
+		))
+		regime_reservoir_weight_uniforms.append(float(
+			process_material.get_shader_parameter(&"regime_reservoir_weight")
+		))
+		regime_drain_weight_uniforms.append(float(
+			process_material.get_shader_parameter(&"regime_drain_weight")
+		))
+		regime_drain_power_uniforms.append(float(
+			process_material.get_shader_parameter(&"regime_drain_power")
+		))
+		regime_obstacle_weight_uniforms.append(float(
+			process_material.get_shader_parameter(&"regime_obstacle_weight")
+		))
+		regime_obstacle_power_uniforms.append(float(
+			process_material.get_shader_parameter(&"regime_obstacle_power")
+		))
+		regime_source_weight_uniforms.append(float(
+			process_material.get_shader_parameter(&"regime_source_weight")
 		))
 		interaction_admission_enabled_uniforms.append(bool(
 			process_material.get_shader_parameter(&"interaction_admission_enabled")
@@ -1503,6 +2054,60 @@ func runtime_summary() -> Dictionary:
 		"regime_effective_features": Dictionary(
 			regime_state.get("effective_features", {})
 		).duplicate(true),
+		"regime_active_schedules": Dictionary(
+			regime_state.get("active_schedules", {})
+		).duplicate(true),
+		"regime_effective_feature_state_by_screen": Dictionary(
+			regime_state.get("effective_feature_state_by_screen", {})
+		).duplicate(true),
+		"regime_active_schedules_by_screen": Dictionary(
+			regime_state.get("active_schedules_by_screen", {})
+		).duplicate(true),
+		"regime_effective_feature_state": (
+			_regime_feature_state_for_screen.duplicate(true)
+		),
+		"regime_profile_physics_enabled": regime_profile_physics_enabled,
+		"regime_feature_budget_semantics": "PER_RIVER_DEFINED_CONTRIBUTOR_MEAN",
+		"regime_applied_feature_budgets": {
+			"reservoir_area_fraction": _regime_reservoir_weight,
+			"reservoir_count_raw": _regime_reservoir_count,
+			"reservoir_gate_aperture_fraction": (
+				_effective_gate_aperture_fraction()
+			),
+			"drain_area_fraction": _regime_drain_weight,
+			"drain_power": _regime_drain_power,
+			"obstacle_area_fraction": _regime_obstacle_weight,
+			"obstacle_power": _regime_obstacle_power,
+			"source_area_fraction": _regime_source_weight,
+			"shoreline_randomness": _shoreline_randomness,
+		},
+		"regime_applied_feature_overrides": {
+			"reservoir": _regime_reservoir_override_enabled,
+			"drain_area": _regime_drain_override_enabled,
+			"drain_power": _regime_drain_power_override_enabled,
+			"obstacle_area": _regime_obstacle_override_enabled,
+			"obstacle_power": _regime_obstacle_power_override_enabled,
+			"source": _regime_source_override_enabled,
+			"reservoir_gate": _regime_gate_override_enabled,
+		},
+		"regime_gate_open_fraction": _regime_gate_open_fraction,
+		"regime_reservoir_count_desired_raw": _regime_reservoir_count,
+		"regime_reservoir_count_rendered": (
+			0
+			if (
+				_regime_reservoir_override_enabled
+				and (
+					_regime_reservoir_weight <= 0.000001
+					or _regime_reservoir_count <= 0.000001
+				)
+			)
+			else 1
+		),
+		"regime_reservoir_renderer_capacity": 1,
+		"regime_salmon_activity": _regime_salmon_activity,
+		"regime_leaf_activity": _regime_leaf_activity,
+		"regime_last_salmon_release_day_index": _last_regime_salmon_release_day,
+		"regime_last_leaf_release_day_index": _last_regime_leaf_release_day,
 		"regime_panel_visible": (
 			_regime_panel.visible if _regime_panel != null else false
 		),
@@ -1634,6 +2239,33 @@ func runtime_summary() -> Dictionary:
 		"reservoir_admission_enabled_uniforms": (
 			reservoir_admission_enabled_uniforms
 		),
+		"regime_profile_physics_enabled_uniforms": (
+			regime_profile_physics_enabled_uniforms
+		),
+		"regime_reservoir_override_enabled_uniforms": (
+			regime_reservoir_override_enabled_uniforms
+		),
+		"regime_drain_override_enabled_uniforms": (
+			regime_drain_override_enabled_uniforms
+		),
+		"regime_drain_power_override_enabled_uniforms": (
+			regime_drain_power_override_enabled_uniforms
+		),
+		"regime_obstacle_override_enabled_uniforms": (
+			regime_obstacle_override_enabled_uniforms
+		),
+		"regime_obstacle_power_override_enabled_uniforms": (
+			regime_obstacle_power_override_enabled_uniforms
+		),
+		"regime_source_override_enabled_uniforms": (
+			regime_source_override_enabled_uniforms
+		),
+		"regime_reservoir_weight_uniforms": regime_reservoir_weight_uniforms,
+		"regime_drain_weight_uniforms": regime_drain_weight_uniforms,
+		"regime_drain_power_uniforms": regime_drain_power_uniforms,
+		"regime_obstacle_weight_uniforms": regime_obstacle_weight_uniforms,
+		"regime_obstacle_power_uniforms": regime_obstacle_power_uniforms,
+		"regime_source_weight_uniforms": regime_source_weight_uniforms,
 		"interaction_admission_enabled_uniforms": (
 			interaction_admission_enabled_uniforms
 		),
@@ -1764,15 +2396,23 @@ func runtime_summary() -> Dictionary:
 			else Vector2.ZERO
 		),
 		"trail_lifetime": trail_lifetime,
-		"gate_open": gate_open,
+		"gate_open": _effective_gate_open(),
+		"gate_open_authored": gate_open,
+		"gate_open_regime_override_enabled": _regime_gate_override_enabled,
+		"gate_open_regime_fraction": _regime_gate_open_fraction,
 		"gate_width": gate_width,
 		"gate_width_requested": _requested_gate_width,
 		"gate_full_width": get_full_gate_width_world_units(),
-		"gate_half_width": get_gate_half_width_pixels(),
-		"gate_half_width_pixels": get_gate_half_width_pixels(),
-		"gate_aperture_fraction": get_gate_aperture_fraction(),
+		"gate_half_width": _effective_gate_half_width_pixels(),
+		"gate_half_width_pixels": _effective_gate_half_width_pixels(),
+		"gate_half_width_pixels_authored": get_gate_half_width_pixels(),
+		"gate_aperture_fraction": _effective_gate_aperture_fraction(),
+		"gate_aperture_fraction_authored": get_gate_aperture_fraction(),
+		"gate_aperture_regime_override_enabled": (
+			_regime_gate_aperture_override_enabled
+		),
 		"gate_fully_open": (
-			gate_open && get_gate_aperture_fraction() >= 0.999
+			_effective_gate_open() && _effective_gate_aperture_fraction() >= 0.999
 		),
 		"gate_release_probability_effective": (
 			get_effective_gate_release_probability()
@@ -2595,6 +3235,7 @@ func _apply_runtime_parameters() -> void:
 			&"reservoir_gate_staging_radius_ratio",
 			reservoir_gate_staging_radius_ratio
 		)
+	_apply_regime_shader_parameters()
 	_apply_trail_draw_parameters()
 	if _overlay != null:
 		_overlay.call(
@@ -2763,17 +3404,18 @@ func _active_layer_slot_count(layer_index: int) -> int:
 
 
 func _apply_gate() -> void:
-	var gate_half_width_pixels: float = get_gate_half_width_pixels()
+	var gate_half_width_pixels: float = _effective_gate_half_width_pixels()
+	var effective_gate_open := _effective_gate_open()
 	for process_material in _process_material_layers:
-		process_material.set_shader_parameter(&"gate_open", gate_open)
+		process_material.set_shader_parameter(&"gate_open", effective_gate_open)
 		process_material.set_shader_parameter(
 			&"gate_half_width", gate_half_width_pixels
 		)
 	if _overlay != null:
-		_overlay.call(&"set_gate_open", gate_open)
+		_overlay.call(&"set_gate_open", effective_gate_open)
 		_overlay.call(&"set_gate_half_width", gate_half_width_pixels)
 	if is_node_ready():
-		gate_changed.emit(screen_id, RESERVOIR_ID, gate_open, gate_width)
+		gate_changed.emit(screen_id, RESERVOIR_ID, effective_gate_open, gate_width)
 
 
 func _build_shoreline_obstacles() -> void:
@@ -3854,6 +4496,7 @@ func _advance_model_calendar(delta: float) -> void:
 	if time_changed:
 		_apply_model_date(day_changed)
 	_update_watershed_timeline()
+	_apply_regime_ecology_schedule()
 
 
 func _reset_model_calendar() -> void:
@@ -3873,6 +4516,7 @@ func _reset_model_calendar() -> void:
 		_model_date_source = &"manual_hold"
 	_apply_model_date()
 	_update_watershed_timeline()
+	_apply_regime_ecology_schedule()
 
 
 func _set_model_day_index(day_index: int) -> void:
@@ -3888,6 +4532,7 @@ func _set_model_day_index(day_index: int) -> void:
 	_model_minute_of_day = 0
 	_apply_model_date()
 	_update_watershed_timeline()
+	_apply_regime_ecology_schedule()
 
 
 func _align_model_elapsed_to_current_day() -> void:

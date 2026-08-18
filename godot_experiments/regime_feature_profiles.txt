@@ -1,8 +1,8 @@
-schema_version,profile_status,regime_id,regime_name,reservoir_area_fraction,reservoir_season,drain_area_fraction,drain_season,obstacle_area_fraction,obstacle_season,source_area_fraction,source_season,shoreline_randomness,allocation_policy,transition_policy,notes
-1,draft,kinship,Kinship,0,all_year,0,all_year,0.1,salmon_spawning,0.1,all_year,1.0,stable_even_area,immediate,Field is an alias for drain.
-1,not_defined,ranch,Agriculture,0.2,all_year,0.75,seasonal,,,,,0.3,stable_even_area,immediate,To be defined.
-1,draft,gold_rush,Gold Rush,0.1,all_year,0.25,all_year,0.75,all_year,,,0.5,stable_even_area,immediate,Source budget is not yet defined.
-1,not_defined,water_projects,Water Projects,0.33,seasonal,0.5,,,,,,0.1,stable_even_area,immediate,To be defined.
-1,not_defined,hydropower,Hydropower,0.5,all_year,0.25,,,,,,0.2,stable_even_area,immediate,To be defined.
-1,not_defined,tech,Tech,0.75,seasonal,0.25,,,,,,0.0,stable_even_area,immediate,To be defined.
-1,not_defined,watershed,Watershed,Based on amount of water,seasonal,,,,,,,0.1,stable_even_area,immediate,To be defined.
+schema_version,profile_status,regime_id,regime_name,river_profile_path,reservoir_area_fraction,reservoir_season,drain_area_fraction,drain_season,obstacle_area_fraction,obstacle_season,source_area_fraction,source_season,shoreline_randomness,allocation_policy,transition_policy,salmon_activity,salmon_start_mm_dd,salmon_end_mm_dd,salmon_interval_days,leaf_activity,leaf_start_mm_dd,leaf_end_mm_dd,leaf_interval_days,notes
+1,draft,kinship,Kinship,res://flow/data/regimes/kinship.txt,0,all_year,0,all_year,0,all_year,0.1,all_year,1.0,stable_even_area,immediate,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Field is an alias for drain. Salmon dates use Russian River and Lagunitas Creek adult spawning seasons.
+1,draft,ranch,Agriculture,res://flow/data/regimes/ranch.txt,0.2,all_year,0.75,seasonal,,,,,0.3,stable_even_area,immediate,,,,,,,,,Per-river reservoir gate drain and shoreline pilot values are defined; remaining fields are blank.
+1,draft,gold_rush,Gold Rush,res://flow/data/regimes/gold_rush.txt,,,,,,,,,,stable_even_area,immediate,,,,,,,,,Physical values are defined only by reviewed river overrides.
+1,draft,water_projects,Water Projects,res://flow/data/regimes/water_projects.txt,,,,,,,,,,stable_even_area,immediate,,,,,,,,,Physical values are defined explicitly per river; remaining fields are still under review.
+1,draft,hydropower,Hydropower,res://flow/data/regimes/hydropower.txt,0.5,all_year,0.25,,,,,,0.2,stable_even_area,immediate,,,,,,,,,Per-river reservoir gate and shoreline values are defined; remaining fields are still under review.
+1,draft,tech,Tech,res://flow/data/regimes/tech.txt,,,,,,,,,,stable_even_area,immediate,,,,,,,,,Physical values are defined explicitly per river; gate and ecology fields remain under review.
+1,not_defined,watershed,Watershed,,,,,,,,,,,stable_even_area,immediate,,,,,,,,,Reserved for the future AI watershed model; no runtime effects are defined yet.

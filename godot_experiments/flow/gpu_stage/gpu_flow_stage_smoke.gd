@@ -48,10 +48,12 @@ func _ready() -> void:
 		return
 	stage.set(&"stage_index", 3)
 	stage.set(&"model_id", &"smoke_model")
-	stage.set(&"screen_id", &"smoke_screen")
+	stage.set(&"screen_id", &"delta")
 	stage.set(&"control_target", &"smoke_target")
 	stage.set(&"stage_title", "Smoke River")
 	stage.set(&"regime_panel_visible", true)
+	stage.set(&"regime_profile_physics_enabled", true)
+	stage.set(&"model_start_day_index", 181)
 	add_child(stage)
 	var startup_summary: Dictionary = stage.call(&"runtime_summary")
 	for admission_enabled: Variant in Array(
@@ -383,8 +385,8 @@ func _ready() -> void:
 		if leaf_field.get_node_or_null("GPULeafTrailSegments") != null:
 			errors.append("leaf field still contains the removed trail segment pool")
 
-	# 1-7 toggle the shared regimes; 0/8/9 retain the water-rate test shortcuts.
-	# Neither input path may rebuild, retune, or release either ecology pool.
+	# The Governator now owns regime keys 1-7. Godot retains only 0/8/9 as
+	# water-rate shortcuts, and neither path may retune or release ecology pools.
 	var salmon_before_digits: Dictionary = summary.get("salmon_summary", {}).duplicate(true)
 	var leaves_before_digits: Dictionary = summary.get("leaf_summary", {}).duplicate(true)
 	var zero_key := InputEventKey.new()
@@ -401,23 +403,24 @@ func _ready() -> void:
 	var nine_summary: Dictionary = stage.call(&"runtime_summary")
 	if not is_equal_approx(float(nine_summary.get("flow_rate", -1.0)), 1.0):
 		errors.append("9 key did not set the water flow rate to one")
-	var flow_before_regime_toggle := float(nine_summary.get("flow_rate", -1.0))
+	var flow_before_ignored_regime_key := float(nine_summary.get("flow_rate", -1.0))
+	var active_before_ignored_regime_key := Array(
+		nine_summary.get("active_regime_names", [])
+	).duplicate()
 	var one_key := InputEventKey.new()
 	one_key.pressed = true
 	one_key.keycode = KEY_1
 	stage.call(&"_unhandled_input", one_key)
 	var one_summary: Dictionary = stage.call(&"runtime_summary")
-	if Array(one_summary.get("active_regime_names", [])) != ["Kinship"]:
-		errors.append("1 key did not toggle Kinship on")
+	if Array(one_summary.get("active_regime_names", [])) != (
+		active_before_ignored_regime_key
+	):
+		errors.append("Godot still handles the Governator-owned regime keys")
 	if not is_equal_approx(
 		float(one_summary.get("flow_rate", -1.0)),
-		flow_before_regime_toggle,
+		flow_before_ignored_regime_key,
 	):
-		errors.append("regime key unexpectedly changed the water flow rate")
-	stage.call(&"_unhandled_input", one_key)
-	var one_off_summary: Dictionary = stage.call(&"runtime_summary")
-	if not Array(one_off_summary.get("active_regime_names", [])).is_empty():
-		errors.append("1 key did not toggle Kinship back off")
+		errors.append("ignored regime key unexpectedly changed the water flow rate")
 	var salmon_after_digits: Dictionary = nine_summary.get("salmon_summary", {})
 	for key: String in [
 		"upstream_speed_pixels",
@@ -611,7 +614,7 @@ func _ready() -> void:
 			break
 	if Vector2(summary.get("stage_size", Vector2.ZERO)) != Vector2(1920.0, 1080.0):
 		errors.append("stage is not native 1920 x 1080")
-	if not bool(stage.call(&"accepts_control_target", "smoke_screen")):
+	if not bool(stage.call(&"accepts_control_target", "delta")):
 		errors.append("screen identity does not address stage")
 	if not bool(stage.call(&"accepts_control_target", "smoke_model")):
 		errors.append("model identity does not address stage")
@@ -1254,6 +1257,7 @@ func _ready() -> void:
 		errors.append("large runtime reservoir could not send a full-width gate")
 	if not bool(summary.get("gate_fully_open", false)):
 		errors.append("large runtime reservoir could not reach hard-drain state")
+	_check_kinship_ecology_schedule(stage, errors)
 	await _check_stage_title_reset_independence(stage, errors)
 
 	if errors.is_empty():
@@ -1288,6 +1292,11 @@ func _check_regime_panel(
 		errors.append("inactive shoreline unexpectedly narrowed the water inlet")
 	if not bool(summary.get("regime_state_shared", false)):
 		errors.append("stage is not bound to the persistent ModelRegimes autoload")
+	if not (
+		bool(summary.get("regime_profiles_loaded", false))
+		and int(summary.get("regime_profile_count", 0)) == 7
+	):
+		errors.append("stage did not load all seven regime profiles")
 	if Array(summary.get("regime_names", [])) != EXPECTED_REGIME_NAMES:
 		errors.append("regime names are not in the required historical order")
 	if regime_panel == null:
@@ -1337,21 +1346,51 @@ func _check_regime_panel(
 		errors.append("absolute active-regime set did not reach shared state")
 	if not is_equal_approx(
 		float(active_summary.get("shoreline_randomness", -1.0)),
-		0.15,
+		0.0,
 	):
-		errors.append("Agriculture + Tech shoreline weights were not normalized to 0.15")
+		errors.append("Delta Agriculture + Tech shoreline was not explicitly straight")
+	if not bool(active_summary.get("regime_profile_physics_enabled", false)):
+		errors.append("per-river regime physics is not enabled")
+	var active_budgets: Dictionary = active_summary.get(
+		"regime_applied_feature_budgets",
+		{}
+	)
+	for budget_spec: Array in [
+		["reservoir_area_fraction", 0.475],
+		["reservoir_count_raw", 2.0],
+		["drain_area_fraction", 0.75],
+		["drain_power", 1.0],
+		["obstacle_area_fraction", 1.0],
+		["source_area_fraction", 1.0],
+	]:
+		if not is_equal_approx(
+			float(active_budgets.get(String(budget_spec[0]), -1.0)),
+			float(budget_spec[1])
+		):
+			errors.append("normalized regime feature budget is incorrect: %s" % budget_spec[0])
+	for uniform_spec: Array in [
+		["regime_reservoir_weight_uniforms", 0.475],
+		["regime_drain_weight_uniforms", 0.75],
+		["regime_drain_power_uniforms", 1.0],
+		["regime_obstacle_weight_uniforms", 1.0],
+		["regime_source_weight_uniforms", 1.0],
+	]:
+		var uniform_values := Array(active_summary.get(String(uniform_spec[0]), []))
+		if uniform_values.size() != 7:
+			errors.append("regime budget did not reach all seven water shaders")
+			continue
+		for uniform_value: Variant in uniform_values:
+			if not is_equal_approx(float(uniform_value), float(uniform_spec[1])):
+				errors.append("regime budget shader uniform is inconsistent")
+				break
 	if _shoreline_geometry_from_summary(active_summary) != shoreline_geometry:
 		errors.append("regime activation regenerated the fixed shoreline geometry")
 	var active_inlet_range := Vector2(active_summary.get(
 		"shoreline_inlet_y_range_pixels",
 		Vector2.ZERO,
 	))
-	if (
-		active_inlet_range.x <= 28.0
-		or active_inlet_range.y >= 1052.0
-		or active_inlet_range.x >= active_inlet_range.y
-	):
-		errors.append("active shoreline did not constrain inlet lanes to open water")
+	if active_inlet_range != Vector2(28.0, 1052.0):
+		errors.append("straight/disabled shoreline did not retain the full inlet range")
 	for inlet_uniform: Variant in Array(active_summary.get(
 		"shoreline_inlet_y_range_uniforms",
 		[],
@@ -1371,6 +1410,62 @@ func _check_regime_panel(
 			expected_alpha,
 		):
 			errors.append("active/inactive regime alpha did not refresh")
+	_expect_regime_feature_values(
+		active_summary,
+		"Agriculture + Tech",
+		[
+			["reservoir_area_fraction", 0.475],
+			["reservoir_count", 2.0],
+			["drain_area_fraction", 0.75],
+			["drain_power", 1.0],
+			["shoreline_randomness", 0.0],
+		],
+		errors,
+	)
+	_expect_undefined_regime_fallbacks(
+		active_summary,
+		"Agriculture + Tech",
+		[
+			["obstacle_area_fraction", "obstacle_area", "obstacle_area_fraction"],
+			["source_area_fraction", "source", "source_area_fraction"],
+		],
+		errors,
+	)
+	_check_delta_regime_profile_contracts(stage, errors)
+	stage.call(&"set_active_regime_names", ["Kinship"])
+	var kinship_summary: Dictionary = stage.call(&"runtime_summary")
+	var kinship_features: Dictionary = kinship_summary.get(
+		"regime_effective_features",
+		{}
+	)
+	for kinship_spec: Array in [
+		["reservoir_area_fraction", 0.0],
+		["drain_area_fraction", 0.0],
+		["obstacle_area_fraction", 0.0],
+		["source_area_fraction", 0.1],
+		["shoreline_randomness", 1.0],
+		["salmon_activity", 1.0],
+		["leaf_activity", 1.0],
+	]:
+		if not is_equal_approx(
+			float(kinship_features.get(String(kinship_spec[0]), -1.0)),
+			float(kinship_spec[1])
+		):
+			errors.append("Kinship profile value is incorrect: %s" % kinship_spec[0])
+	var active_schedules: Dictionary = kinship_summary.get(
+		"regime_active_schedules",
+		{}
+	)
+	var kinship_schedule: Dictionary = active_schedules.get("kinship", {})
+	if not (
+		String(kinship_schedule.get("salmon_start_mm_dd", "")) == "11/01"
+		and String(kinship_schedule.get("salmon_end_mm_dd", "")) == "01/31"
+		and String(kinship_schedule.get("salmon_interval_days", "")) == "1"
+		and String(kinship_schedule.get("leaf_start_mm_dd", "")) == "10/01"
+		and String(kinship_schedule.get("leaf_end_mm_dd", "")) == "10/31"
+		and String(kinship_schedule.get("leaf_interval_days", "")) == "2"
+	):
+		errors.append("Kinship seasonal schedule was not loaded from the profile table")
 	stage.call(&"set_active_regime_names", [])
 	var cleared_summary: Dictionary = stage.call(&"runtime_summary")
 	if not is_zero_approx(float(cleared_summary.get("shoreline_randomness", -1.0))):
@@ -1382,6 +1477,218 @@ func _check_regime_panel(
 		Vector2.ZERO,
 	)) != Vector2(28.0, 1052.0):
 		errors.append("clearing shoreline force did not restore the full inlet range")
+
+
+func _check_delta_regime_profile_contracts(
+	stage: Node,
+	errors: PackedStringArray
+) -> void:
+	stage.call(&"set_active_regime_names", ["Hydropower"])
+	var hydropower: Dictionary = stage.call(&"runtime_summary")
+	_expect_regime_feature_values(
+		hydropower,
+		"Hydropower Delta",
+		[
+			["reservoir_area_fraction", 0.50],
+			["reservoir_count", 2.0],
+			["reservoir_gate_aperture_fraction", 0.33],
+			["shoreline_randomness", 0.0],
+		],
+		errors,
+	)
+	_expect_applied_regime_values(
+		hydropower,
+		"Hydropower Delta",
+		[
+			["reservoir_area_fraction", 0.50],
+			["reservoir_count_raw", 2.0],
+			["reservoir_gate_aperture_fraction", 0.33],
+			["shoreline_randomness", 0.0],
+		],
+		errors,
+	)
+	var schedules_by_screen: Dictionary = hydropower.get(
+		"regime_active_schedules_by_screen",
+		{},
+	)
+	var delta_schedules: Dictionary = schedules_by_screen.get("delta", {})
+	var hydropower_schedule: Dictionary = delta_schedules.get("hydropower", {})
+	if not (
+		String(hydropower_schedule.get(
+			"reservoir_gate_open_start_mm_dd",
+			"",
+		)) == "01/01"
+		and String(hydropower_schedule.get(
+			"reservoir_gate_open_end_mm_dd",
+			"",
+		)) == "12/31"
+	):
+		errors.append("Hydropower Delta gate is not scheduled year-round")
+	if not (
+		bool(hydropower.get("gate_open", false))
+		and bool(hydropower.get("gate_open_regime_override_enabled", false))
+		and is_equal_approx(
+			float(hydropower.get("gate_aperture_fraction", -1.0)),
+			0.33,
+		)
+		and is_equal_approx(
+			float(hydropower.get("gate_release_probability_effective", -1.0)),
+			0.33,
+		)
+	):
+		errors.append("Hydropower Delta gate did not apply its year-round 0.33 aperture")
+
+	stage.call(&"set_active_regime_names", ["Water Projects"])
+	var water_projects: Dictionary = stage.call(&"runtime_summary")
+	_expect_regime_feature_values(
+		water_projects,
+		"Water Projects Delta",
+		[
+			["reservoir_area_fraction", 0.33],
+			["reservoir_count", 1.0],
+			["drain_area_fraction", 0.50],
+			["shoreline_randomness", 0.0],
+			["leaf_activity", 0.0],
+		],
+		errors,
+	)
+	_expect_applied_regime_values(
+		water_projects,
+		"Water Projects Delta",
+		[
+			["reservoir_area_fraction", 0.33],
+			["reservoir_count_raw", 1.0],
+			["drain_area_fraction", 0.50],
+			["shoreline_randomness", 0.0],
+		],
+		errors,
+	)
+	if not is_zero_approx(float(water_projects.get("regime_leaf_activity", -1.0))):
+		errors.append("Water Projects Delta did not keep leaf activity disabled")
+
+	stage.call(&"set_active_regime_names", ["Tech"])
+	var tech: Dictionary = stage.call(&"runtime_summary")
+	_expect_regime_feature_values(
+		tech,
+		"Tech Delta",
+		[
+			["reservoir_area_fraction", 0.75],
+			["reservoir_count", 2.0],
+			["drain_area_fraction", 0.75],
+			["drain_power", 1.0],
+			["shoreline_randomness", 0.0],
+		],
+		errors,
+	)
+	_expect_applied_regime_values(
+		tech,
+		"Tech Delta",
+		[
+			["reservoir_area_fraction", 0.75],
+			["reservoir_count_raw", 2.0],
+			["drain_area_fraction", 0.75],
+			["drain_power", 1.0],
+			["shoreline_randomness", 0.0],
+		],
+		errors,
+	)
+	_expect_undefined_regime_fallbacks(
+		tech,
+		"Tech Delta",
+		[
+			["obstacle_area_fraction", "obstacle_area", "obstacle_area_fraction"],
+			["source_area_fraction", "source", "source_area_fraction"],
+		],
+		errors,
+	)
+
+	stage.call(&"set_active_regime_names", ["Watershed"])
+	var watershed: Dictionary = stage.call(&"runtime_summary")
+	_expect_undefined_regime_fallbacks(
+		watershed,
+		"Watershed Delta",
+		[
+			["reservoir_area_fraction", "reservoir", "reservoir_area_fraction"],
+			["drain_area_fraction", "drain_area", "drain_area_fraction"],
+			["drain_power", "drain_power", "drain_power"],
+			["obstacle_area_fraction", "obstacle_area", "obstacle_area_fraction"],
+			["obstacle_power", "obstacle_power", "obstacle_power"],
+			["source_area_fraction", "source", "source_area_fraction"],
+		],
+		errors,
+	)
+	var watershed_features: Dictionary = watershed.get(
+		"regime_effective_feature_state",
+		{},
+	)
+	var watershed_shoreline: Dictionary = watershed_features.get(
+		"shoreline_randomness",
+		{},
+	)
+	if (
+		not bool(watershed_shoreline.get("defined", false))
+		and not is_zero_approx(float(watershed.get("shoreline_randomness", -1.0)))
+	):
+		errors.append("undefined Watershed shoreline did not retain the baseline")
+	stage.call(&"set_active_regime_names", [])
+
+
+func _expect_regime_feature_values(
+	summary: Dictionary,
+	label: String,
+	expected: Array,
+	errors: PackedStringArray
+) -> void:
+	var features: Dictionary = summary.get("regime_effective_feature_state", {})
+	for spec: Array in expected:
+		var feature_name := String(spec[0])
+		var feature_state: Dictionary = features.get(feature_name, {})
+		if not (
+			bool(feature_state.get("defined", false))
+			and is_equal_approx(
+				float(feature_state.get("value", -1.0)),
+				float(spec[1]),
+			)
+		):
+			errors.append("%s feature is incorrect: %s" % [label, feature_name])
+
+
+func _expect_applied_regime_values(
+	summary: Dictionary,
+	label: String,
+	expected: Array,
+	errors: PackedStringArray
+) -> void:
+	var budgets: Dictionary = summary.get("regime_applied_feature_budgets", {})
+	for spec: Array in expected:
+		var feature_name := String(spec[0])
+		if not is_equal_approx(
+			float(budgets.get(feature_name, -1.0)),
+			float(spec[1]),
+		):
+			errors.append("%s applied budget is incorrect: %s" % [label, feature_name])
+
+
+func _expect_undefined_regime_fallbacks(
+	summary: Dictionary,
+	label: String,
+	specs: Array,
+	errors: PackedStringArray
+) -> void:
+	var features: Dictionary = summary.get("regime_effective_feature_state", {})
+	var overrides: Dictionary = summary.get("regime_applied_feature_overrides", {})
+	var budgets: Dictionary = summary.get("regime_applied_feature_budgets", {})
+	for spec: Array in specs:
+		var feature_name := String(spec[0])
+		var override_name := String(spec[1])
+		var budget_name := String(spec[2])
+		var feature_state: Dictionary = features.get(feature_name, {})
+		if bool(feature_state.get("defined", false)):
+			errors.append("%s unexpectedly defines %s" % [label, feature_name])
+		if bool(overrides.get(override_name, false)):
+			errors.append("%s unexpectedly overrides %s" % [label, feature_name])
+		if not is_equal_approx(float(budgets.get(budget_name, -1.0)), 1.0):
+			errors.append("%s did not preserve the %s fallback" % [label, feature_name])
 
 
 func _shoreline_geometry_from_summary(summary: Dictionary) -> Array:
@@ -1399,6 +1706,111 @@ func _shoreline_geometry_from_summary(summary: Dictionary) -> Array:
 			var vertices: PackedVector2Array = vertices_variant
 			geometry.append(vertices.duplicate())
 	return geometry
+
+
+func _check_kinship_ecology_schedule(
+	stage: Node,
+	errors: PackedStringArray
+) -> void:
+	for scale_spec: Array in [
+		[25, 0.0, 0],
+		[25, 0.5, 13],
+		[25, 1.0, 25],
+		[15, 0.5, 8],
+	]:
+		if int(stage.call(
+			&"_scaled_regime_release_count",
+			int(scale_spec[0]),
+			float(scale_spec[1]),
+		)) != int(scale_spec[2]):
+			errors.append("0-1 regime activity did not scale an ecology batch")
+	stage.call(&"set_model_date_mm_dd", "09/30-00:00")
+	stage.call(&"set_active_regime_names", ["Kinship"])
+	var before: Dictionary = stage.call(&"runtime_summary")
+	var salmon_before: Dictionary = before.get("salmon_summary", {})
+	var leaves_before: Dictionary = before.get("leaf_summary", {})
+
+	stage.call(&"set_model_date_mm_dd", "10/01-00:00")
+	var october_first: Dictionary = stage.call(&"runtime_summary")
+	var october_first_leaves: Dictionary = october_first.get("leaf_summary", {})
+	if int(october_first_leaves.get("total_scheduled", 0)) != (
+		int(leaves_before.get("total_scheduled", 0)) + 30
+	):
+		errors.append("Kinship did not release 15 leaves per bank on October 1")
+	if not is_equal_approx(float(october_first.get("regime_leaf_activity", 0.0)), 1.0):
+		errors.append("Kinship leaf activity did not follow the profile weight")
+
+	stage.call(&"set_model_date_mm_dd", "10/02-00:00")
+	var october_second: Dictionary = stage.call(&"runtime_summary")
+	if int(Dictionary(october_second.get("leaf_summary", {})).get(
+		"total_scheduled",
+		0
+	)) != int(october_first_leaves.get("total_scheduled", 0)):
+		errors.append("Kinship leaves released on the off day of the two-day interval")
+
+	stage.call(&"set_model_date_mm_dd", "10/03-00:00")
+	var october_third: Dictionary = stage.call(&"runtime_summary")
+	if int(Dictionary(october_third.get("leaf_summary", {})).get(
+		"total_scheduled",
+		0
+	)) != int(october_first_leaves.get("total_scheduled", 0)) + 30:
+		errors.append("Kinship leaves did not release again on October 3")
+
+	stage.call(&"set_model_date_mm_dd", "11/01-00:00")
+	var november_first: Dictionary = stage.call(&"runtime_summary")
+	var november_salmon: Dictionary = november_first.get("salmon_summary", {})
+	if int(november_salmon.get("total_scheduled", 0)) != (
+		int(salmon_before.get("total_scheduled", 0)) + 25
+	):
+		errors.append("Kinship did not perform one salmon release on November 1")
+	if not is_equal_approx(float(november_first.get("regime_salmon_activity", 0.0)), 1.0):
+		errors.append("Kinship salmon activity did not follow the profile weight")
+
+	stage.call(&"set_model_date_mm_dd", "11/01-12:00")
+	var same_day: Dictionary = stage.call(&"runtime_summary")
+	if int(Dictionary(same_day.get("salmon_summary", {})).get(
+		"total_scheduled",
+		0
+	)) != int(november_salmon.get("total_scheduled", 0)):
+		errors.append("Kinship salmon released more than once on the same model day")
+	stage.call(&"set_active_regime_names", [])
+	stage.call(&"set_active_regime_names", ["Kinship"])
+	var same_day_reactivated: Dictionary = stage.call(&"runtime_summary")
+	if int(Dictionary(same_day_reactivated.get("salmon_summary", {})).get(
+		"total_scheduled",
+		0
+	)) != int(november_salmon.get("total_scheduled", 0)):
+		errors.append("same-day Kinship off/on toggle duplicated a salmon release")
+
+	stage.call(&"set_model_date_mm_dd", "11/02-00:00")
+	var next_day: Dictionary = stage.call(&"runtime_summary")
+	if not (
+		int(next_day.get("model_day_index", -1)) == 305
+		and int(next_day.get("model_minute_of_day", -1)) == 0
+		and String(next_day.get("stage_date_text", "")) == "11/02-00:00"
+	):
+		errors.append("ModelTimeline did not reconstruct November 2 midnight exactly")
+	if int(Dictionary(next_day.get("salmon_summary", {})).get(
+		"total_scheduled",
+		0
+	)) != int(november_salmon.get("total_scheduled", 0)) + 25:
+		errors.append("Kinship daily salmon release did not repeat on November 2")
+
+	stage.call(&"set_model_date_mm_dd", "02/01-00:00")
+	var outside_season: Dictionary = stage.call(&"runtime_summary")
+	if not is_zero_approx(float(outside_season.get("regime_salmon_activity", -1.0))):
+		errors.append("Kinship salmon activity did not stop after January 31")
+	stage.call(&"set_model_date_mm_dd", "11/01-00:00")
+	var next_year: Dictionary = stage.call(&"runtime_summary")
+	if int(Dictionary(next_year.get("salmon_summary", {})).get(
+		"total_scheduled",
+		0
+	)) != int(Dictionary(next_day.get("salmon_summary", {})).get(
+		"total_scheduled",
+		0
+	)) + 25:
+		errors.append("Kinship salmon schedule did not re-arm for the next model year")
+	stage.call(&"set_active_regime_names", [])
 
 
 func _check_stage_title_runtime_independence(

@@ -14,6 +14,7 @@ const DEFAULT_YEAR_DURATION_SECONDS: float = 720.0
 const DEFAULT_START_DAY_INDEX: int = 181
 const MIN_YEAR_DURATION_SECONDS: float = 1.0
 const MAX_YEAR_DURATION_SECONDS: float = 86400.0
+const CALENDAR_MINUTE_SNAP_EPSILON: float = 0.000001
 
 var _initialized: bool = false
 var _elapsed_seconds: float = 0.0
@@ -225,8 +226,19 @@ func _year_progress() -> float:
 
 
 func _calendar_position() -> Vector2i:
+	# set_date() starts with an exact integer model minute, but the round trip
+	# through elapsed seconds can land a few ulps below that minute. Snap only
+	# those near-integer values so midnight never reconstructs as 23:59.
+	var relative_model_minute_float := (
+		_year_progress() * float(YEAR_MINUTE_COUNT)
+	)
+	var nearest_model_minute := roundi(relative_model_minute_float)
+	if absf(
+		relative_model_minute_float - float(nearest_model_minute)
+	) <= CALENDAR_MINUTE_SNAP_EPSILON:
+		relative_model_minute_float = float(nearest_model_minute)
 	var relative_model_minute := mini(
-		floori(_year_progress() * float(YEAR_MINUTE_COUNT)),
+		floori(relative_model_minute_float),
 		YEAR_MINUTE_COUNT - 1
 	)
 	var relative_day: int = relative_model_minute / MINUTES_PER_DAY

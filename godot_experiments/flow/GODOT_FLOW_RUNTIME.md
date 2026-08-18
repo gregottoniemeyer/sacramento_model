@@ -86,10 +86,11 @@ On a one-monitor machine, both selected stages remain independent but render
 into two 1920 x 1080 `SubViewport` instances shown side by side. Clicking a
 preview selects which stage receives local keyboard controls. Keyboard `V` is
 the exception: from the selected preview it applies one synchronized absolute
-debug-visibility state to every active stage. Shared regime keys therefore
-toggle once, while the timeline and controller remain common. Escape or either
-native close request returns the whole host to the selector. The selector also
-retains a Display-A-only button and direct number-key launch for maintenance.
+debug-visibility state to every active stage. Running previews do not consume
+`1`–`7`; the Governator controller owns regime test input. The timeline and
+controller remain common. Escape or either native close request returns the
+whole host to the selector. The selector also retains a Display-A-only button
+and direct number-key launch for maintenance.
 
 `FlowModel2D` runs from `_physics_process`, but it uses a custom flow solver
 rather than rigid-body collision responses. The soft influence fields,
@@ -145,31 +146,71 @@ regimes, allows any combination to be active simultaneously, and survives
 persistence ends at the process boundary; a multi-process installation must
 send the authoritative active set to every process.
 
-`ModelRegimes` loads the comma-delimited
-`res://regime_feature_profiles.txt` table by header name.
-`profile_status` remains descriptive metadata and never suppresses an
-otherwise populated row. Blank and nonnumeric feature cells are reported as
-undefined instead of being coerced to zero. For each numeric feature, active
-regime contributions are normalized to an equal-weight mean; no active regime
-produces an explicit zero feature state. Every snapshot publishes
-`reservoir_area_fraction`, `drain_area_fraction`,
-`obstacle_area_fraction`, `source_area_fraction`, and
-`shoreline_randomness` under `effective_features`. The Governator can later
-replace boolean equal weights with explicit weights without changing this
-text-table feature schema.
+### First-six per-river regime profiles
 
-`shoreline_randomness` is the first profile column connected to production
-physics. Each river owns two fixed deterministic chains named
+`ModelRegimes` loads the comma-delimited master table at
+`res://regime_feature_profiles.txt` by header name. The first six master rows
+link through `river_profile_path` to exact seven-screen tables at
+`res://flow/data/regimes/kinship.txt`, `ranch.txt` (Agriculture),
+`gold_rush.txt`, `water_projects.txt`, `hydropower.txt`, and `tech.txt`.
+`profile_status` is descriptive metadata and never suppresses populated data.
+
+A populated river cell overrides its master value. A blank river cell inherits
+a populated master value; if both are blank, the feature is undefined. An
+explicit numeric `0` is defined and participates in blending. For every screen
+and feature, active defined contributors are combined with an equal mean.
+Undefined active regimes are excluded from that feature's denominator. With no
+defined contributor, an opted-in GPU stage preserves its authored baseline
+instead of applying a zero override. All seven production scene wrappers now
+opt in; the active-regime panel remains Delta-only presentation.
+
+Screen abbreviations below are S = Mount Shasta, Mc = McCloud/Pit, C =
+Cottonwood Creek, Mi = Mill Creek, F = Feather River, A = American River, and
+D = Delta. `R`, `Dr`, `Ob`, `So`, and `Sh` mean reservoir area, drain area,
+obstacle area, source area, and shoreline randomness; `c` is desired reservoir
+count and `p` is interaction power.
+
+| Regime | Current per-river matrix and schedule |
+|---|---|
+| Kinship | All: `R 0/c0`, `Dr 0/p0`, `Ob 0/p0`, `So .10`, `Sh 1`; salmon `11/01–01/31` daily, leaves `10/01–10/31` every 2 days. |
+| Agriculture (`ranch`) | `R .20/c1` S/Mi/F/A, `.20/c2` Mc/D, `0/c0` C; `Dr .75` all; `Sh .30` S/Mc/C, `0` elsewhere. Positive-area gates open `06/01–08/31`; aperture blank. |
+| Gold Rush | F/A/D only: `R .10` with count blank, `Dr .30/p1`, `Ob .30/p1`, `Sh 1`, and the Kinship salmon/leaf seasons. S/Mc/C/Mi are blank. |
+| Water Projects | S/Mc/F/A/D: `R .33/c1`, `Dr .50`; C/Mi: explicit `R 0/c0`, `Dr 0`; five of seven whole-river stages is the nearest discrete allocation to 75%; all: `Sh 0`, leaves `0`; no gate schedule. |
+| Hydropower | S/Mc/Mi/F/A/D: `R .50/c2`, aperture `.33`, open `01/01–12/31`; C: `R 0/c0`, no gate. `Dr .25` all; `Sh .20` Mc/C and `0` elsewhere. |
+| Tech | All: `R .75/c2`, `Dr .75/p1`, `Sh 0`; gate, obstacle, source, salmon, and leaf fields blank. |
+| Watershed | Reserved for the future AI watershed model; no linked river table and no runtime effects yet. |
+
+Area fractions are deterministic admission/encounter budgets, not literal
+geometry or guaranteed screen-area coverage. Stable selectors decide which
+particle lifecycles encounter the authored reservoir, drain/field, obstacle, or
+source behavior. Drain and obstacle `power` independently set response strength
+for admitted encounters. The GPU stage has only one physical
+`reservoir_main`; `reservoir_count=2` is retained desired-state data awaiting a
+two-slot renderer and does not produce a second reservoir.
+
+Gate scheduling is an area-weighted layer over the feature mean. Each active
+profile with positive reservoir area and a complete schedule contributes its
+area to the denominator and its currently open area to the numerator. That open
+fraction multiplies the effective aperture, which is the equal mean of defined
+aperture contributors or the authored aperture if none is defined. Therefore,
+on a non-Cottonwood screen with Agriculture and Hydropower active, the aperture
+is `.33` during June–August and `.33 * .50 / (.50 + .20)` otherwise.
+Agriculture alone uses the authored aperture in season and closes it outside
+the season; Hydropower alone uses `.33` year-round. The authored/manual gate
+state remains an outer enable.
+
+Each river owns two fixed deterministic chains named
 `shoreline_obstacle_top` and `shoreline_obstacle_bottom`. Each water-facing
 chain has 17 ordered points at model X `0…16`; the stable `screen_id` and stage
 identity make the seven river shapes visibly different. The inlet and outlet
 samples are generated as part of each bank rather than pinned to Y `0` and `9`.
 Intrusion may reach `2.6` world units, with a per-column minimum open-channel
 height of `5.25`. Regime changes alter only the normalized repellent strength.
-Zero skips shoreline physics, while `1.0` applies the full field. Existing
-immutable water history is never rewritten. While the field is active, ordinary
-left-edge head lifecycles spawn only inside the generated inlet opening, with
-clearance from both banks; explicit interior source polygons are unchanged.
+Zero skips shoreline physics; it does not rebuild a straight geometric bank.
+`1.0` applies the full field. Existing immutable water history is never
+rewritten. While the field is active, ordinary left-edge head lifecycles spawn
+only inside the generated inlet opening, with clearance from both banks;
+explicit interior source polygons are unchanged.
 
 ### Production GPU interaction path
 
@@ -683,10 +724,16 @@ request before publishing it. The stage emits `regimes_changed` with its
 
 `ModelRegimes.snapshot()` additionally exposes `profile_path`,
 `profiles_loaded`, `profile_count`, `profile_reload_revision`,
-`profile_diagnostics`, and `effective_features`. The stage mirrors these as
-`regime_profile_path`, `regime_profiles_loaded`, `regime_profile_count`,
-`regime_profile_reload_revision`, `regime_profile_diagnostics`, and
-`regime_effective_features`. Shoreline diagnostics are
+`profile_diagnostics`, the legacy master-level `effective_features`, and the
+authoritative per-screen `effective_feature_state_by_screen` plus
+`active_schedules_by_screen`. Each per-screen feature state reports
+`defined`, `value`, `contributor_count`, and `contributor_ids`. The stage mirrors
+these and publishes its resolved `regime_effective_feature_state`,
+`regime_applied_feature_budgets`, `regime_applied_feature_overrides`,
+`regime_gate_open_fraction`, `regime_reservoir_count_desired_raw`,
+`regime_reservoir_count_rendered`, and `regime_reservoir_renderer_capacity`.
+These fields distinguish an undefined feature that preserves authored behavior
+from an explicit-zero override. Shoreline diagnostics are
 `shoreline_randomness`, `shoreline_count`, `shoreline_vertex_count`,
 `shoreline_ids`, `shoreline_obstacles`, `shoreline_data_texture_bound`,
 `shoreline_data_texture_size`, `shoreline_count_uniforms`,
@@ -1424,7 +1471,6 @@ When `accept_keyboard_input` is enabled on a model:
 
 | Key | Runtime effect |
 |---|---|
-| `1`–`7` | Production GPU: toggle Kinship, Agriculture, Gold Rush, Water Projects, Hydropower, Tech, or Watershed; other regimes remain unchanged |
 | `0`, `8`, `9` | Production GPU: set `flow_rate` to `0/9`, `8/9`, or `9/9` |
 | `V` | Apply one synchronized absolute obstacle, shoreline, absorber, source, and reservoir debug-visibility state to every active stage in the process |
 | `G` | Toggle the first reservoir's gate |
@@ -1438,16 +1484,18 @@ When `accept_keyboard_input` is enabled on a model:
 
 The first reservoir in the default profile is `reservoir_main`.
 
-Production GPU keyboard paths are isolated. Keys `1`–`7` toggle only the
-process-wide `ModelRegimes` state. Keys `0`, `8`, and `9` update only water
-`flow_rate`; neither path rebuilds, retunes, or releases the salmon/leaf systems
-or resizes their segment pools. `S` releases only salmon, and `L` releases only
+Running production stages intentionally do not consume `1`–`7`. The Governator
+controller's `regime-console` owns those keys for the pilot and sends an
+absolute active set once to every configured Godot process with target `*`; the startup selector still
+uses `1`–`7` before a stage launches. Keys `0`, `8`, and `9` update only water
+`flow_rate` and do not rebuild, retune, or release the salmon/leaf systems or
+resize their segment pools. `S` releases only salmon, and `L` releases only
 leaves. Every recognized stage key is marked handled so another scene node
-cannot process the same event a second time. Use absolute regime state,
-ecology runtime paths, and release actions when a controller changes those
-systems. Keyboard `V` is likewise process-wide: pressing it from either focused
-native window or the selected one-monitor preview updates every active stage.
-Controller-targeted debug actions remain target-specific.
+cannot process the same event a second time. Use absolute regime state, ecology
+runtime paths, and release actions when a controller changes those systems.
+Keyboard `V` is process-wide: pressing it from either focused native window or
+the selected one-monitor preview updates every active stage. Controller-targeted
+debug actions remain target-specific.
 
 In the production GPU host, `V` computes one absolute debug-visibility state and
 applies it to all active stages together: the reservoir guide is cyan,

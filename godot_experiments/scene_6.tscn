@@ -11,5 +11,6 @@ stage_index = 5
 model_id = &"american_river_flow"
 screen_id = &"american_river"
 stage_title = "American River"
+regime_profile_physics_enabled = true
 model_start_day_index = 181
 watershed_data_path = "res://flow/data/water_pipeline/american_720.txt"

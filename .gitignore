@@ -4,6 +4,8 @@
 
 # Local OS/editor/export artifacts
 .DS_Store
+__pycache__/
+*.py[cod]
 *.dmg
 *.pck
 

@@ -23,6 +23,23 @@ uniform float line_width_max = 5.0;
 uniform float particle_alpha = 0.94;
 uniform float trail_lifetime_seconds = 2.0;
 
+// Per-river regime controls. When disabled, authored resource values retain
+// their exact legacy meaning. When enabled, these 0..1 values become stable
+// encounter/admission budgets without rebuilding any geometry.
+uniform bool regime_profile_physics_enabled = false;
+uniform bool regime_reservoir_override_enabled = false;
+uniform bool regime_drain_override_enabled = false;
+uniform bool regime_drain_power_override_enabled = false;
+uniform bool regime_obstacle_override_enabled = false;
+uniform bool regime_obstacle_power_override_enabled = false;
+uniform bool regime_source_override_enabled = false;
+uniform float regime_reservoir_weight = 1.0;
+uniform float regime_drain_weight = 1.0;
+uniform float regime_drain_power = 1.0;
+uniform float regime_obstacle_weight = 1.0;
+uniform float regime_obstacle_power = 1.0;
+uniform float regime_source_weight = 1.0;
+
 uniform vec2 reservoir_center = vec2(1388.57, 771.43);
 uniform float reservoir_radius = 223.71;
 uniform float reservoir_influence = 86.0;
@@ -167,12 +184,21 @@ vec4 source_spawn(float particle_index, float lifecycle_generation) {
 	if (total_fraction <= 0.000001) {
 		return vec4(-1.0e20, 0.0, 1.0, 0.0);
 	}
+	float admission_probability = min(total_fraction, 1.0);
+	if (regime_profile_physics_enabled && regime_source_override_enabled) {
+		// The profile budget is the aggregate source share. Individual source
+		// fractions below continue to choose among several authored sources.
+		admission_probability = clamp(regime_source_weight, 0.0, 1.0);
+	}
+	if (admission_probability <= 0.000001) {
+		return vec4(-1.0e20, 0.0, 1.0, 0.0);
+	}
 	float admission_selector = hash11(
 		particle_index * 23.731
 		+ lifecycle_generation * 91.117
 		+ stage_phase * 13.0
 	);
-	if (admission_selector >= min(total_fraction, 1.0)) {
+	if (admission_selector >= admission_probability) {
 		return vec4(-1.0e20, 0.0, 1.0, 0.0);
 	}
 
@@ -638,6 +664,23 @@ void process() {
 			vec4 interaction_bounds = interaction_record(polygon_index, 2);
 			vec4 interaction_center_enabled = interaction_record(polygon_index, 3);
 			float repellent_strength = clamp(interaction_parameters.z, 0.0, 1.0);
+			if (regime_profile_physics_enabled && regime_obstacle_override_enabled) {
+				float obstacle_selector = hash11(
+					particle_index * 43.731
+					+ TRANSFORM[2].w * 71.117
+					+ interaction_metadata.z * 313.0
+					+ stage_phase * 11.0
+				);
+				if (obstacle_selector >= clamp(regime_obstacle_weight, 0.0, 1.0)) {
+					continue;
+				}
+			}
+			if (
+				regime_profile_physics_enabled
+				&& regime_obstacle_power_override_enabled
+			) {
+				repellent_strength = clamp(regime_obstacle_power, 0.0, 1.0);
+			}
 			bool repel_mode = interaction_parameters.x >= 0.5;
 			if (
 				!repel_mode
@@ -997,6 +1040,21 @@ void process() {
 		reached_entry_decision
 		&& abs(decision_y) <= entry_capture_limit_y
 	);
+	if (
+		head_on_upstream_entry
+		&& regime_profile_physics_enabled
+		&& regime_reservoir_override_enabled
+	) {
+		float reservoir_selector = hash11(
+			particle_index * 73.171
+			+ TRANSFORM[2].w * 37.717
+			+ stage_phase * 19.0
+			+ 0.271
+		);
+		head_on_upstream_entry = (
+			reservoir_selector < clamp(regime_reservoir_weight, 0.0, 1.0)
+		);
+	}
 	if (reached_entry_decision) {
 		CUSTOM.y = 0.0;
 		head_flowing = false;
@@ -1461,6 +1519,28 @@ void process() {
 				continue;
 			}
 			bool absorb_mode = interaction_parameters.x < 0.5;
+			if (absorb_mode && regime_profile_physics_enabled && regime_drain_override_enabled) {
+				float drain_selector = hash11(
+					particle_index * 29.731
+					+ TRANSFORM[2].w * 53.117
+					+ interaction_metadata.z * 419.0
+					+ stage_phase * 17.0
+				);
+				if (drain_selector >= clamp(regime_drain_weight, 0.0, 1.0)) {
+					continue;
+				}
+			}
+			if (!absorb_mode && regime_profile_physics_enabled && regime_obstacle_override_enabled) {
+				float obstacle_selector = hash11(
+					particle_index * 43.731
+					+ TRANSFORM[2].w * 71.117
+					+ interaction_metadata.z * 313.0
+					+ stage_phase * 11.0
+				);
+				if (obstacle_selector >= clamp(regime_obstacle_weight, 0.0, 1.0)) {
+					continue;
+				}
+			}
 			float earliest_crossing = 2.0;
 			vec2 crossing_outward = vec2(-1.0, 0.0);
 			for (
@@ -1512,6 +1592,16 @@ void process() {
 					0.0,
 					1.0
 				);
+				if (
+					regime_profile_physics_enabled
+					&& regime_drain_power_override_enabled
+				) {
+					absorption_probability = clamp(
+						regime_drain_power,
+						0.0,
+						1.0
+					);
+				}
 				float absorption_selector = hash11(
 					particle_index * 19.731
 					+ interaction_metadata.z * 811.0
@@ -1552,6 +1642,16 @@ void process() {
 					0.0,
 					1.0
 				);
+				if (
+					regime_profile_physics_enabled
+					&& regime_obstacle_power_override_enabled
+				) {
+					repellent_strength = clamp(
+						regime_obstacle_power,
+						0.0,
+						1.0
+					);
+				}
 				if (repellent_strength <= 0.0) {
 					continue;
 				}

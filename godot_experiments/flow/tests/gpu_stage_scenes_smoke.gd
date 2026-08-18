@@ -82,6 +82,7 @@ func _ready() -> void:
 func _run() -> void:
 	_check_project_configuration()
 	_prepare_shared_timeline()
+	_check_regime_profile_matrix()
 	for scene_spec in SCENES:
 		await _check_scene(scene_spec)
 	_expect(
@@ -140,11 +141,284 @@ func _prepare_shared_timeline() -> void:
 		return
 	timeline.call(&"configure_if_needed", 720.0, 181, true, false)
 	timeline.call(&"set_paused", true)
+	# Integer MM/DD boundaries must survive the elapsed-seconds round trip. Test
+	# both supported year origins before establishing the shared fixture date.
+	for start_day: int in [0, 181]:
+		_expect(
+			bool(timeline.call(&"set_start_day_index", start_day, true)),
+			"ModelTimeline must accept a valid model-year origin.",
+		)
+		for day_index in range(365):
+			_expect(
+				bool(timeline.call(&"set_date", day_index, 0, &"midnight_smoke")),
+				"ModelTimeline must accept every non-leap model day.",
+			)
+			var midnight_snapshot: Dictionary = timeline.call(&"snapshot")
+			if (
+				int(midnight_snapshot.get("day_index", -1)) != day_index
+				or int(midnight_snapshot.get("minute_of_day", -1)) != 0
+			):
+				_expect(
+					false,
+					"ModelTimeline midnight round trip failed at origin %d day %d."
+						% [start_day, day_index],
+				)
+				break
+	_expect(
+		bool(timeline.call(&"set_start_day_index", 181, true)),
+		"ModelTimeline must restore the production July 1 origin.",
+	)
 	_expect(
 		bool(timeline.call(&"set_date", 244, 615, &"scene_switch_smoke")),
 		"ModelTimeline must accept a deterministic scene-switch test date."
 	)
 	_expected_timeline_snapshot = timeline.call(&"snapshot")
+
+
+func _check_regime_profile_matrix() -> void:
+	var regimes := get_node_or_null("/root/ModelRegimes")
+	if regimes == null:
+		return
+	var loaded_snapshot: Dictionary = regimes.call(&"snapshot")
+	_expect(
+		bool(loaded_snapshot.get("profiles_loaded", false))
+		and int(loaded_snapshot.get("profile_count", 0)) == 7
+		and Array(loaded_snapshot.get("profile_diagnostics", [])).is_empty(),
+		"The seven regime profiles must load without diagnostics.",
+	)
+	for regime_spec: Dictionary in [
+		{"name": "Kinship", "id": "kinship"},
+		{"name": "Agriculture", "id": "ranch"},
+		{"name": "Gold Rush", "id": "gold_rush"},
+		{"name": "Water Projects", "id": "water_projects"},
+		{"name": "Hydropower", "id": "hydropower"},
+		{"name": "Tech", "id": "tech"},
+		{"name": "Watershed", "id": "watershed"},
+	]:
+		var regime_name := String(regime_spec["name"])
+		var regime_id := String(regime_spec["id"])
+		regimes.call(&"set_active_names", [regime_name])
+		var snapshot: Dictionary = regimes.call(&"snapshot")
+		_expect(
+			Array(snapshot.get("active_names", [])) == [regime_name],
+			"Regime matrix could not activate %s alone." % regime_name,
+		)
+		var features_by_screen: Dictionary = snapshot.get(
+			"effective_feature_state_by_screen",
+			{},
+		)
+		var schedules_by_screen: Dictionary = snapshot.get(
+			"active_schedules_by_screen",
+			{},
+		)
+		for scene_spec: Dictionary in SCENES:
+			var screen_id := String(scene_spec["id"])
+			var screen_features: Dictionary = features_by_screen.get(screen_id, {})
+			var expected_features := _regime_matrix_expected_features(
+				regime_id,
+				screen_id,
+			)
+			for feature_name: String in expected_features:
+				var expected_value: Variant = expected_features[feature_name]
+				var feature_state: Dictionary = screen_features.get(feature_name, {})
+				var expected_defined := expected_value != null
+				_expect(
+					bool(feature_state.get("defined", false)) == expected_defined
+					and is_equal_approx(
+						float(feature_state.get("value", -1.0)),
+						float(expected_value) if expected_defined else 0.0,
+					)
+					and int(feature_state.get("contributor_count", -1))
+						== (1 if expected_defined else 0)
+					and Array(feature_state.get("contributor_ids", []))
+						== ([regime_id] if expected_defined else []),
+					"%s has incorrect %s state for %s."
+						% [regime_name, feature_name, screen_id],
+				)
+			var expected_schedule := _regime_matrix_expected_schedule(
+				regime_id,
+				screen_id,
+			)
+			var screen_schedules: Dictionary = schedules_by_screen.get(screen_id, {})
+			var actual_schedule: Dictionary = screen_schedules.get(regime_id, {})
+			_expect(
+				actual_schedule.size() == expected_schedule.size(),
+				"%s has an unexpected schedule shape for %s."
+					% [regime_name, screen_id],
+			)
+			for schedule_name: String in expected_schedule:
+				_expect(
+					String(actual_schedule.get(schedule_name, ""))
+						== String(expected_schedule[schedule_name]),
+					"%s has incorrect %s for %s."
+						% [regime_name, schedule_name, screen_id],
+				)
+
+	# The seven instantiated scenes below intentionally share this mixed fixture.
+	regimes.call(&"set_active_names", ["Agriculture", "Tech"])
+	_expect(
+		Array(Dictionary(regimes.call(&"snapshot")).get("active_names", []))
+			== ["Agriculture", "Tech"],
+		"Regime matrix did not restore the Agriculture + Tech fixture.",
+	)
+
+
+func _regime_matrix_expected_features(
+	regime_id: String,
+	screen_id: String
+) -> Dictionary:
+	match regime_id:
+		"kinship":
+			return {
+				"reservoir_area_fraction": 0.0,
+				"reservoir_count": 0.0,
+				"reservoir_gate_aperture_fraction": null,
+				"drain_area_fraction": 0.0,
+				"drain_power": 0.0,
+				"obstacle_area_fraction": 0.0,
+				"obstacle_power": 0.0,
+				"source_area_fraction": 0.1,
+				"shoreline_randomness": 1.0,
+				"salmon_activity": 1.0,
+				"leaf_activity": 1.0,
+			}
+		"ranch":
+			var reservoir_counts := {
+				"mount_shasta": 1.0,
+				"mccloud_pit": 2.0,
+				"cottonwood_creek": 0.0,
+				"mill_creek": 1.0,
+				"feather_river": 1.0,
+				"american_river": 1.0,
+				"delta": 2.0,
+			}
+			return {
+				"reservoir_area_fraction": (
+					0.0 if screen_id == "cottonwood_creek" else 0.20
+				),
+				"reservoir_count": reservoir_counts[screen_id],
+				"drain_area_fraction": 0.75,
+				"obstacle_area_fraction": null,
+				"source_area_fraction": null,
+				"shoreline_randomness": (
+					0.30
+					if screen_id in [
+						"mount_shasta",
+						"mccloud_pit",
+						"cottonwood_creek",
+					]
+					else 0.0
+				),
+			}
+		"gold_rush":
+			var affected := screen_id in ["feather_river", "american_river", "delta"]
+			return {
+				"reservoir_area_fraction": 0.10 if affected else null,
+				"reservoir_count": null,
+				"drain_area_fraction": 0.30 if affected else null,
+				"drain_power": 1.0 if affected else null,
+				"obstacle_area_fraction": 0.30 if affected else null,
+				"obstacle_power": 1.0 if affected else null,
+				"source_area_fraction": null,
+				"shoreline_randomness": 1.0 if affected else null,
+				"salmon_activity": 1.0 if affected else null,
+				"leaf_activity": 1.0 if affected else null,
+			}
+		"water_projects":
+			var selected := screen_id in [
+				"mount_shasta",
+				"mccloud_pit",
+				"feather_river",
+				"american_river",
+				"delta",
+			]
+			return {
+				"reservoir_area_fraction": 0.33 if selected else 0.0,
+				"reservoir_count": 1.0 if selected else 0.0,
+				"drain_area_fraction": 0.50 if selected else 0.0,
+				"shoreline_randomness": 0.0,
+				"leaf_activity": 0.0,
+			}
+		"hydropower":
+			var has_reservoir := screen_id != "cottonwood_creek"
+			return {
+				"reservoir_area_fraction": 0.50 if has_reservoir else 0.0,
+				"reservoir_count": 2.0 if has_reservoir else 0.0,
+				"reservoir_gate_aperture_fraction": 0.33 if has_reservoir else null,
+				"drain_area_fraction": 0.25,
+				"shoreline_randomness": (
+					0.20
+					if screen_id in ["mccloud_pit", "cottonwood_creek"]
+					else 0.0
+				),
+			}
+		"tech":
+			return {
+				"reservoir_area_fraction": 0.75,
+				"reservoir_count": 2.0,
+				"drain_area_fraction": 0.75,
+				"drain_power": 1.0,
+				"obstacle_area_fraction": null,
+				"source_area_fraction": null,
+				"shoreline_randomness": 0.0,
+			}
+		"watershed":
+			var no_effects: Dictionary = {}
+			for feature_name: String in [
+				"reservoir_area_fraction",
+				"reservoir_count",
+				"reservoir_gate_aperture_fraction",
+				"drain_area_fraction",
+				"drain_power",
+				"obstacle_area_fraction",
+				"obstacle_power",
+				"source_area_fraction",
+				"shoreline_randomness",
+				"salmon_activity",
+				"leaf_activity",
+			]:
+				no_effects[feature_name] = null
+			return no_effects
+	return {}
+
+
+func _regime_matrix_expected_schedule(
+	regime_id: String,
+	screen_id: String
+) -> Dictionary:
+	if regime_id == "kinship":
+		return {
+			"salmon_start_mm_dd": "11/01",
+			"salmon_end_mm_dd": "01/31",
+			"salmon_interval_days": "1",
+			"leaf_start_mm_dd": "10/01",
+			"leaf_end_mm_dd": "10/31",
+			"leaf_interval_days": "2",
+		}
+	if regime_id == "ranch" and screen_id != "cottonwood_creek":
+		return {
+			"reservoir_gate_open_start_mm_dd": "06/01",
+			"reservoir_gate_open_end_mm_dd": "08/31",
+		}
+	if regime_id == "gold_rush" and screen_id in [
+		"feather_river",
+		"american_river",
+		"delta",
+	]:
+		return {
+			"salmon_start_mm_dd": "11/01",
+			"salmon_end_mm_dd": "01/31",
+			"salmon_interval_days": "1",
+			"leaf_start_mm_dd": "10/01",
+			"leaf_end_mm_dd": "10/31",
+			"leaf_interval_days": "2",
+		}
+	if regime_id == "hydropower" and screen_id != "cottonwood_creek":
+		return {
+			"reservoir_gate_open_start_mm_dd": "01/01",
+			"reservoir_gate_open_end_mm_dd": "12/31",
+		}
+	return {}
 
 
 func _check_two_stage_texture_isolation() -> void:
@@ -888,20 +1162,109 @@ func _check_shoreline(
 		and int(summary.get("regime_profile_count", 0)) == 7,
 		"%s must load all seven profiles from the root text table." % scene_path
 	)
-	var effective_features: Dictionary = summary.get(
-		"regime_effective_features", {}
+	var natural_agriculture_shoreline := expected_id in [
+		&"mount_shasta",
+		&"mccloud_pit",
+		&"cottonwood_creek",
+	]
+	var expected_shoreline_weight := (
+		0.15 if natural_agriculture_shoreline else 0.0
 	)
+	var expected_reservoir_weight := (
+		0.375 if expected_id == &"cottonwood_creek" else 0.475
+	)
+	var feature_state: Dictionary = summary.get(
+		"regime_effective_feature_state",
+		{},
+	)
+	var expected_feature_states := {
+		"reservoir_area_fraction": {
+			"defined": true,
+			"value": expected_reservoir_weight,
+			"contributors": ["ranch", "tech"],
+		},
+		"drain_area_fraction": {
+			"defined": true,
+			"value": 0.75,
+			"contributors": ["ranch", "tech"],
+		},
+		"obstacle_area_fraction": {
+			"defined": false,
+			"value": 0.0,
+			"contributors": [],
+		},
+		"source_area_fraction": {
+			"defined": false,
+			"value": 0.0,
+			"contributors": [],
+		},
+		"shoreline_randomness": {
+			"defined": true,
+			"value": expected_shoreline_weight,
+			"contributors": ["ranch", "tech"],
+		},
+	}
+	for feature_name: String in expected_feature_states:
+		var expected_state: Dictionary = expected_feature_states[feature_name]
+		var actual_state_variant: Variant = feature_state.get(feature_name, {})
+		var actual_state: Dictionary = (
+			actual_state_variant if actual_state_variant is Dictionary else {}
+		)
+		var expected_contributors: Array = expected_state["contributors"]
+		_expect(
+			bool(actual_state.get("defined", false))
+				== bool(expected_state["defined"])
+			and is_equal_approx(
+				float(actual_state.get("value", -1.0)),
+				float(expected_state["value"]),
+			)
+			and int(actual_state.get("contributor_count", -1))
+				== expected_contributors.size()
+			and Array(actual_state.get("contributor_ids", []))
+				== expected_contributors,
+			"%s has incorrect per-river Agriculture + Tech state for %s."
+				% [scene_path, feature_name]
+		)
 	_expect(
 		is_equal_approx(
-			float(effective_features.get("shoreline_randomness", -1.0)),
-			0.15,
-		)
-		and is_equal_approx(
 			float(summary.get("shoreline_randomness", -1.0)),
-			0.15,
+			expected_shoreline_weight,
 		),
-		"%s must normalize Agriculture 0.3 and Tech 0.0 to shoreline weight 0.15."
-			% scene_path
+		"%s did not apply its per-river Agriculture shoreline weight." % scene_path
+	)
+	_expect(
+		bool(summary.get("regime_profile_physics_enabled", false)),
+		"%s must opt into per-river regime physics." % scene_path
+	)
+	var applied_budgets: Dictionary = summary.get(
+		"regime_applied_feature_budgets",
+		{}
+	)
+	var expected_budget_values := [expected_reservoir_weight, 0.75, 1.0, 1.0]
+	var budget_names := [
+		"reservoir_area_fraction",
+		"drain_area_fraction",
+		"obstacle_area_fraction",
+		"source_area_fraction",
+	]
+	for budget_index in range(budget_names.size()):
+		_expect(
+			is_equal_approx(
+				float(applied_budgets.get(budget_names[budget_index], -1.0)),
+				float(expected_budget_values[budget_index]),
+			),
+			"%s has an incorrect applied regime feature budget." % scene_path
+		)
+	var applied_overrides: Dictionary = summary.get(
+		"regime_applied_feature_overrides",
+		{},
+	)
+	_expect(
+		bool(applied_overrides.get("reservoir", false))
+		and bool(applied_overrides.get("drain_area", false))
+		and not bool(applied_overrides.get("obstacle_area", true))
+		and not bool(applied_overrides.get("source", true)),
+		"%s must distinguish defined budgets from authored fallbacks." % scene_path
 	)
 	_expect(
 		int(summary.get("shoreline_count", 0)) == 2
@@ -1005,14 +1368,16 @@ func _check_shoreline(
 			"shoreline_inlet_y_range_pixels",
 			Vector2.ZERO,
 		))
-		var expected_clearance := 93.5
-		var expected_inlet_range := Vector2(
-			(9.0 - top_vertices[0].y) * 120.0 + expected_clearance,
-			(9.0 - bottom_vertices[0].y) * 120.0 - expected_clearance
-		)
+		var expected_inlet_range := Vector2(28.0, 1052.0)
+		if expected_shoreline_weight > 0.000001:
+			var expected_clearance := 93.5
+			expected_inlet_range = Vector2(
+				(9.0 - top_vertices[0].y) * 120.0 + expected_clearance,
+				(9.0 - bottom_vertices[0].y) * 120.0 - expected_clearance
+			)
 		_expect(
 			inlet_range.is_equal_approx(expected_inlet_range),
-			"%s water inlet lanes do not match the generated left bank opening."
+			"%s water inlet lanes do not match its per-river shoreline policy."
 				% scene_path
 		)
 	_shoreline_signature_by_screen[String(expected_id)] = (
@@ -1040,6 +1405,16 @@ func _shoreline_geometry_signature(summary: Dictionary) -> String:
 
 
 func _check_gate_roundtrip(stage: Node, scene_path: String) -> void:
+	# Direct gate helpers operate on the authored aperture. Isolate that API from
+	# the shared Agriculture winter schedule, which intentionally multiplies the
+	# effective aperture down to zero at this fixture date.
+	var regimes := get_node_or_null("/root/ModelRegimes")
+	var active_regime_names: Array = []
+	if regimes != null:
+		active_regime_names = Array(
+			Dictionary(regimes.call(&"snapshot")).get("active_names", [])
+		).duplicate()
+		regimes.call(&"clear_regimes")
 	var before: Dictionary = stage.call(&"runtime_summary")
 	var initial_gate_open: bool = bool(before.get("gate_open", true))
 	var initial_half_width: float = float(before.get("gate_half_width", 15.0))
@@ -1081,6 +1456,8 @@ func _check_gate_roundtrip(stage: Node, scene_path: String) -> void:
 
 	stage.call(&"set_gate_open", initial_gate_open)
 	stage.call(&"set_gate_half_width", initial_half_width)
+	if regimes != null:
+		regimes.call(&"set_active_names", active_regime_names)
 
 
 func _check_control_route(

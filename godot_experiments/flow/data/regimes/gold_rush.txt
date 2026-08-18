@@ -1,0 +1,8 @@
+schema_version,screen_id,reservoir_area_fraction,reservoir_count,reservoir_gate_aperture_fraction,reservoir_gate_open_start_mm_dd,reservoir_gate_open_end_mm_dd,drain_area_fraction,drain_power,obstacle_area_fraction,obstacle_power,source_area_fraction,shoreline_randomness,salmon_activity,salmon_start_mm_dd,salmon_end_mm_dd,salmon_interval_days,leaf_activity,leaf_start_mm_dd,leaf_end_mm_dd,leaf_interval_days,notes
+1,mount_shasta,,,,,,,,,,,,,,,,,,,,Historical review pending; blank overrides inherit master defaults.
+1,mccloud_pit,,,,,,,,,,,,,,,,,,,,Historical review pending; blank overrides inherit master defaults.
+1,cottonwood_creek,,,,,,,,,,,,,,,,,,,,Historical review pending; blank overrides inherit master defaults.
+1,mill_creek,,,,,,,,,,,,,,,,,,,,Historical review pending; blank overrides inherit master defaults.
+1,feather_river,0.1,,,,,0.30,1.0,0.30,1.0,,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Gold Rush pilot override; historical review pending.
+1,american_river,0.1,,,,,0.30,1.0,0.30,1.0,,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Gold Rush pilot override; historical review pending.
+1,delta,0.1,,,,,0.30,1.0,0.30,1.0,,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Gold Rush pilot override; historical review pending.

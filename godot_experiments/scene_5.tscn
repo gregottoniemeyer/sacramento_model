@@ -11,5 +11,6 @@ stage_index = 4
 model_id = &"feather_river_flow"
 screen_id = &"feather_river"
 stage_title = "Feather River"
+regime_profile_physics_enabled = true
 model_start_day_index = 181
 watershed_data_path = "res://flow/data/water_pipeline/feather_720.txt"
