@@ -15,9 +15,22 @@ const EXPECTED_LAYER_Z := [0, 1, 2, 3, 4, 5, 6]
 const EXPECTED_TITLE_FONT_PATH := (
 	"res://flow/assets/fonts/BarlowCondensed-Medium.ttf"
 )
-const EXPECTED_TITLE_POSITION := Vector2(40.0, 40.0)
+const EXPECTED_TITLE_POSITION := Vector2(60.0, 540.0)
+const EXPECTED_DATE_POSITION := Vector2(1860.0, 540.0)
 const EXPECTED_TITLE_COLOR := Color("4ab0e1")
-const EXPECTED_TITLE_FONT_SIZE := 40
+const EXPECTED_TITLE_FONT_SIZE := 60
+const EXPECTED_DATE_FONT_SIZE := 48
+const EXPECTED_DATE_OPENTYPE_FEATURE := "tnum"
+const EXPECTED_REGIME_PROFILE_PATH := "res://regime_feature_profiles.txt"
+const EXPECTED_REGIME_NAMES := [
+	"Kinship",
+	"Agriculture",
+	"Gold Rush",
+	"Water Projects",
+	"Hydropower",
+	"Tech",
+	"Watershed",
+]
 const SCENES: Array[Dictionary] = [
 	{
 		"path": "res://scene_1.tscn",
@@ -58,6 +71,8 @@ const SCENES: Array[Dictionary] = [
 
 var _failures := PackedStringArray()
 var _seen_ids: Dictionary = {}
+var _expected_timeline_snapshot: Dictionary = {}
+var _shoreline_signature_by_screen: Dictionary = {}
 
 
 func _ready() -> void:
@@ -66,11 +81,19 @@ func _ready() -> void:
 
 func _run() -> void:
 	_check_project_configuration()
+	_prepare_shared_timeline()
 	for scene_spec in SCENES:
 		await _check_scene(scene_spec)
 	_expect(
 		_seen_ids.size() == SCENES.size(),
 		"The seven scenes must expose seven unique screen/stage IDs."
+	)
+	var unique_shoreline_signatures: Dictionary = {}
+	for shoreline_signature: Variant in _shoreline_signature_by_screen.values():
+		unique_shoreline_signatures[String(shoreline_signature)] = true
+	_expect(
+		unique_shoreline_signatures.size() == SCENES.size(),
+		"The seven stages must generate seven distinct shoreline shapes."
 	)
 	await _check_two_stage_texture_isolation()
 	_finish()
@@ -93,6 +116,35 @@ func _check_project_configuration() -> void:
 		viewport_size == EXPECTED_VIEWPORT_SIZE,
 		"The project viewport must be 1920x1080; got %s." % viewport_size
 	)
+	_expect(
+		String(ProjectSettings.get_setting("autoload/ModelTimeline", ""))
+			== "*res://flow/model_timeline.gd",
+		"project.godot must install the persistent ModelTimeline autoload."
+	)
+	_expect(
+		String(ProjectSettings.get_setting("autoload/ModelRegimes", ""))
+			== "*res://flow/model_regimes.gd",
+		"project.godot must install the persistent ModelRegimes autoload."
+	)
+
+
+func _prepare_shared_timeline() -> void:
+	var regimes := get_node_or_null("/root/ModelRegimes")
+	_expect(regimes != null, "ModelRegimes autoload must exist at runtime.")
+	if regimes != null:
+		regimes.call(&"clear_regimes")
+		regimes.call(&"set_active_names", ["Agriculture", "Tech"])
+	var timeline := get_node_or_null("/root/ModelTimeline")
+	_expect(timeline != null, "ModelTimeline autoload must exist at runtime.")
+	if timeline == null:
+		return
+	timeline.call(&"configure_if_needed", 720.0, 181, true, false)
+	timeline.call(&"set_paused", true)
+	_expect(
+		bool(timeline.call(&"set_date", 244, 615, &"scene_switch_smoke")),
+		"ModelTimeline must accept a deterministic scene-switch test date."
+	)
+	_expected_timeline_snapshot = timeline.call(&"snapshot")
 
 
 func _check_two_stage_texture_isolation() -> void:
@@ -114,6 +166,61 @@ func _check_two_stage_texture_isolation() -> void:
 	if first_stages.size() == 1 and second_stages.size() == 1:
 		var first_stage := first_stages[0]
 		var second_stage := second_stages[0]
+		first_stage.call(&"set_debug_visible", true)
+		second_stage.call(&"set_debug_visible", true)
+		var v_key := InputEventKey.new()
+		v_key.pressed = true
+		v_key.keycode = KEY_V
+		first_stage.call(&"_unhandled_input", v_key)
+		_expect(
+			not bool(first_stage.call(&"runtime_summary").get(
+				"debug_visible", true
+			))
+			and not bool(second_stage.call(&"runtime_summary").get(
+				"debug_visible", true
+			)),
+			"V from stage A must hide debug geometry on both active stages."
+		)
+		second_stage.call(&"_unhandled_input", v_key)
+		_expect(
+			bool(first_stage.call(&"runtime_summary").get(
+				"debug_visible", false
+			))
+			and bool(second_stage.call(&"runtime_summary").get(
+				"debug_visible", false
+			)),
+			"V from stage B must reveal debug geometry on both active stages."
+		)
+		first_stage.call(&"queue_control_message", {
+			"actions": ["toggle_debug"],
+		})
+		await get_tree().process_frame
+		_expect(
+			not bool(first_stage.call(&"runtime_summary").get(
+				"debug_visible", true
+			))
+			and bool(second_stage.call(&"runtime_summary").get(
+				"debug_visible", false
+			)),
+			"A targeted debug action must remain local to its recipient stage."
+		)
+		first_stage.call(&"set_debug_visible", true)
+		var first_summary: Dictionary = first_stage.call(&"runtime_summary")
+		var second_summary: Dictionary = second_stage.call(&"runtime_summary")
+		_expect(
+			_shoreline_geometry_signature(first_summary)
+				== String(_shoreline_signature_by_screen.get(
+					String(SCENES[0]["id"]), ""
+				)),
+			"Reinstantiating a screen must reproduce its fixed shoreline."
+		)
+		_expect(
+			_shoreline_geometry_signature(second_summary)
+				== String(_shoreline_signature_by_screen.get(
+					String(SCENES[1]["id"]), ""
+				)),
+			"The second screen must reproduce its fixed shoreline."
+		)
 		var first_viewport := first_stage.get_node_or_null("WaterOnlyViewport") as SubViewport
 		var second_viewport := second_stage.get_node_or_null("WaterOnlyViewport") as SubViewport
 		_expect(
@@ -216,6 +323,9 @@ func _check_scene(scene_spec: Dictionary) -> void:
 		_check_stage_id(stage, expected_id, scene_path)
 		_check_stage_size(stage, scene_path)
 		_check_stage_title(stage, expected_title, scene_path)
+		_check_regime_panel(stage, expected_id == &"delta", scene_path)
+		_check_shoreline(stage, expected_id, scene_path)
+		_check_shared_timeline_state(stage, scene_path)
 		_check_palette_layers(stage, scene_path)
 		_check_ecology(stage, scene_path)
 		_check_gate_roundtrip(stage, scene_path)
@@ -223,6 +333,40 @@ func _check_scene(scene_spec: Dictionary) -> void:
 
 	scene_root.queue_free()
 	await get_tree().process_frame
+
+
+func _check_shared_timeline_state(stage: Node, scene_path: String) -> void:
+	if _expected_timeline_snapshot.is_empty():
+		return
+	var summary: Dictionary = stage.call(&"runtime_summary")
+	var expected_progress := float(_expected_timeline_snapshot.get(
+		"year_progress", 0.0
+	))
+	var expected_row := floori(expected_progress * 720.0)
+	_expect(
+		int(summary.get("model_day_index", -1))
+			== int(_expected_timeline_snapshot.get("day_index", -2))
+		and int(summary.get("model_minute_of_day", -1))
+			== int(_expected_timeline_snapshot.get("minute_of_day", -2))
+		and is_equal_approx(
+			float(summary.get("model_elapsed_seconds", -1.0)),
+			float(_expected_timeline_snapshot.get("elapsed_seconds", -2.0))
+		)
+		and int(summary.get("watershed_data_row_index", -1)) == expected_row,
+		"%s must inherit the shared date and watershed row without resetting."
+			% scene_path
+	)
+	_expect(
+		bool(stage.call(&"is_paused")),
+		"%s must inherit the shared paused clock state." % scene_path
+	)
+	_expect(
+		bool(summary.get("model_timeline_shared", false))
+		and String(summary.get("model_timeline_scope", ""))
+			== "GODOT_PROCESS"
+		and int(summary.get("model_timeline_revision", 0)) > 0,
+		"%s must report the process-persistent timeline authority." % scene_path
+	)
 
 
 func _collect_gpu_stages(node: Node, stages: Array[Node]) -> void:
@@ -368,8 +512,10 @@ func _check_stage_title(
 	var water_display := stage.get_node_or_null("WaterTextureDisplay") as Sprite2D
 	var title_layer := stage.get_node_or_null("StageTitleLayer") as Node2D
 	var title_label := stage.get_node_or_null("StageTitleLayer/StageTitle") as Label
+	var date_label := stage.get_node_or_null("StageTitleLayer/ModelDate") as Label
 	_expect(title_layer != null, "%s must expose StageTitleLayer." % scene_path)
 	_expect(title_label != null, "%s must expose StageTitleLayer/StageTitle." % scene_path)
+	_expect(date_label != null, "%s must expose StageTitleLayer/ModelDate." % scene_path)
 	_expect(background != null, "%s must expose its explicit Background." % scene_path)
 	_expect(water_display != null, "%s must expose WaterTextureDisplay." % scene_path)
 	if title_layer != null:
@@ -395,8 +541,14 @@ func _check_stage_title(
 			% [scene_path, expected_title, title_label.text]
 	)
 	_expect(
-		title_label.position == EXPECTED_TITLE_POSITION,
-		"%s title must be positioned at native (40, 40)." % scene_path
+		(title_label.position + title_label.pivot_offset).is_equal_approx(
+			EXPECTED_TITLE_POSITION
+		),
+		"%s title must be centered on the left-edge centerline." % scene_path
+	)
+	_expect(
+		is_equal_approx(title_label.rotation_degrees, -90.0),
+		"%s title must be rotated -90 degrees." % scene_path
 	)
 	_expect(
 		title_label.get_theme_color(&"font_color").is_equal_approx(
@@ -413,6 +565,38 @@ func _check_stage_title(
 		title_font != null and title_font.resource_path == EXPECTED_TITLE_FONT_PATH,
 		"%s title must use the bundled Barlow Condensed Medium font." % scene_path
 	)
+	if date_label != null:
+		_expect(
+			(date_label.position + date_label.pivot_offset).is_equal_approx(
+				EXPECTED_DATE_POSITION
+			),
+			"%s date must be centered on the right-edge centerline." % scene_path
+		)
+		_expect(
+			is_equal_approx(date_label.rotation_degrees, -90.0),
+			"%s date must be rotated -90 degrees." % scene_path
+		)
+		_expect(
+			date_label.get_theme_font_size(&"font_size") == EXPECTED_DATE_FONT_SIZE,
+			"%s date must be 48 px." % scene_path
+		)
+		var date_font := date_label.get_theme_font(&"font") as FontVariation
+		var tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
+			EXPECTED_DATE_OPENTYPE_FEATURE
+		)
+		_expect(
+			date_font != null
+			and date_font.base_font != null
+			and date_font.base_font.resource_path == EXPECTED_TITLE_FONT_PATH
+			and int(date_font.opentype_features.get(tnum_tag, 0)) == 1,
+			"%s date must use Barlow tabular numerals." % scene_path
+		)
+		_expect(
+			bool(summary.get("stage_date_tabular_numerals", false))
+			and String(summary.get("stage_date_opentype_feature", ""))
+				== EXPECTED_DATE_OPENTYPE_FEATURE,
+			"%s summary must report the date's tnum feature." % scene_path
+		)
 	_expect(
 		water_viewport != null
 		and title_layer != null
@@ -425,6 +609,11 @@ func _check_stage_title(
 		and bool(summary.get("stage_title_visible", false))
 		and Vector2(summary.get("stage_title_position", Vector2.ZERO))
 			== EXPECTED_TITLE_POSITION
+		and String(summary.get("stage_title_position_anchor", "")) == "CENTERLINE"
+		and is_equal_approx(
+			float(summary.get("stage_title_rotation_degrees", 0.0)),
+			-90.0
+		)
 		and Color(summary.get("stage_title_color", Color.TRANSPARENT)).is_equal_approx(
 			EXPECTED_TITLE_COLOR
 		)
@@ -444,12 +633,92 @@ func _check_stage_title(
 	stage.call(&"set_debug_visible", initial_debug_visible)
 
 
+func _check_regime_panel(
+	stage: Node,
+	expected_visible: bool,
+	scene_path: String
+) -> void:
+	var summary: Dictionary = stage.call(&"runtime_summary")
+	var panel := stage.get_node_or_null(
+		"StageTitleLayer/ActiveRegimes"
+	) as Node2D
+	var water_viewport := stage.get_node_or_null(
+		"WaterOnlyViewport"
+	) as SubViewport
+	_expect(panel != null, "%s must expose the shared regime panel." % scene_path)
+	if panel == null:
+		return
+	_expect(
+		panel.visible == expected_visible,
+		"%s regime panel visibility must be Delta-only." % scene_path
+	)
+	_expect(
+		panel.position == Vector2(1324.0, 1050.0),
+		"%s regime panel must match the reference position." % scene_path
+	)
+	_expect(
+		is_equal_approx(panel.rotation_degrees, -90.0),
+		"%s regime panel must be rotated -90 degrees." % scene_path
+	)
+	_expect(
+		String(summary.get("regime_heading_text", "")) == "Regime"
+		and int(summary.get("regime_heading_font_size", 0)) == 48
+		and int(summary.get("regime_name_font_size", 0)) == 60,
+		"%s regime typography does not match the rotated reference." % scene_path
+	)
+	_expect(
+		water_viewport == null or not water_viewport.is_ancestor_of(panel),
+		"%s regime panel must remain outside water occupancy." % scene_path
+	)
+	_expect(
+		bool(summary.get("regime_state_shared", false))
+		and String(summary.get("regime_state_scope", "")) == "GODOT_PROCESS",
+		"%s must consume the process-persistent regime state." % scene_path
+	)
+	_expect(
+		Array(summary.get("regime_names", [])) == EXPECTED_REGIME_NAMES,
+		"%s regime names must use the required historical order." % scene_path
+	)
+	_expect(
+		Array(summary.get("active_regime_names", [])) == ["Agriculture", "Tech"],
+		"%s must hydrate the shared active regime set." % scene_path
+	)
+	_expect(
+		bool(summary.get("water_texture_excludes_regime_panel", false)),
+		"%s water texture must exclude regime text." % scene_path
+	)
+	for index in range(EXPECTED_REGIME_NAMES.size()):
+		var label := stage.get_node_or_null(
+			"StageTitleLayer/ActiveRegimes/Regime%d" % (index + 1)
+		) as Label
+		_expect(label != null, "%s regime label %d is missing." % [
+			scene_path,
+			index + 1,
+		])
+		if label == null:
+			continue
+		_expect(
+			label.text == EXPECTED_REGIME_NAMES[index],
+			"%s regime label order is incorrect." % scene_path
+		)
+		var expected_alpha := 1.0 if index in [1, 5] else 0.25
+		_expect(
+			is_equal_approx(
+				label.get_theme_color(&"font_color").a,
+				expected_alpha,
+			),
+			"%s regime label alpha does not reflect active state." % scene_path
+		)
+
+
 func _check_ecology(stage: Node, scene_path: String) -> void:
 	var summary: Dictionary = stage.call(&"runtime_summary")
 	_expect(
 		int(summary.get("source_polygon_count", 0)) == 1,
 		"%s must contain one default addressable water source." % scene_path
 	)
+
+
 	var salmon_summary: Dictionary = summary.get("salmon_summary", {})
 	_expect(
 		int(salmon_summary.get("capacity", 0)) == 300,
@@ -604,6 +873,170 @@ func _check_ecology(stage: Node, scene_path: String) -> void:
 			not water_viewport.is_ancestor_of(leaf_field),
 			"%s leaves must stay outside its water occupancy render." % scene_path
 		)
+
+
+func _check_shoreline(
+	stage: Node,
+	expected_id: StringName,
+	scene_path: String
+) -> void:
+	var summary: Dictionary = stage.call(&"runtime_summary")
+	_expect(
+		String(summary.get("regime_profile_path", ""))
+			== EXPECTED_REGIME_PROFILE_PATH
+		and bool(summary.get("regime_profiles_loaded", false))
+		and int(summary.get("regime_profile_count", 0)) == 7,
+		"%s must load all seven profiles from the root text table." % scene_path
+	)
+	var effective_features: Dictionary = summary.get(
+		"regime_effective_features", {}
+	)
+	_expect(
+		is_equal_approx(
+			float(effective_features.get("shoreline_randomness", -1.0)),
+			0.15,
+		)
+		and is_equal_approx(
+			float(summary.get("shoreline_randomness", -1.0)),
+			0.15,
+		),
+		"%s must normalize Agriculture 0.3 and Tech 0.0 to shoreline weight 0.15."
+			% scene_path
+	)
+	_expect(
+		int(summary.get("shoreline_count", 0)) == 2
+		and int(summary.get("shoreline_vertex_count", 0)) == 17
+		and int(summary.get("shoreline_overlay_count", 0)) == 2,
+		"%s must expose two 17-point shoreline banks." % scene_path
+	)
+	_expect(
+		bool(summary.get("shoreline_data_texture_bound", false))
+		and Vector2(summary.get("shoreline_data_texture_size", Vector2.ZERO))
+			== Vector2(40.0, 1.0)
+		and bool(summary.get("shoreline_preserves_interaction_capacity", false)),
+		"%s must bind the dedicated shoreline texture without spending polygon slots."
+			% scene_path
+	)
+	var shoreline_ids := Array(summary.get("shoreline_ids", []))
+	_expect(
+		shoreline_ids.size() == 2
+		and shoreline_ids.has("shoreline_obstacle_top")
+		and shoreline_ids.has("shoreline_obstacle_bottom"),
+		"%s shoreline IDs are incomplete." % scene_path
+	)
+	var bottom_vertices := PackedVector2Array()
+	var top_vertices := PackedVector2Array()
+	for definition_variant: Variant in Array(
+		summary.get("shoreline_obstacles", [])
+	):
+		if not definition_variant is Dictionary:
+			continue
+		var definition: Dictionary = definition_variant
+		var vertices_variant: Variant = definition.get(
+			"vertices_world", PackedVector2Array()
+		)
+		if not vertices_variant is PackedVector2Array:
+			continue
+		var vertices: PackedVector2Array = vertices_variant
+		_expect(
+			vertices.size() == 17,
+			"%s shoreline chain does not have one point at every grid X."
+				% scene_path
+		)
+		for vertex_index in range(vertices.size()):
+			_expect(
+				is_equal_approx(vertices[vertex_index].x, float(vertex_index)),
+				"%s shoreline grid-X anchoring is incorrect." % scene_path
+			)
+		match String(definition.get("side", "")):
+			"bottom":
+				bottom_vertices = vertices
+			"top":
+				top_vertices = vertices
+	_expect(
+		bottom_vertices.size() == 17 and top_vertices.size() == 17,
+		"%s must expose both named bank chains." % scene_path
+	)
+	if bottom_vertices.size() == 17 and top_vertices.size() == 17:
+		var maximum_intrusion := 0.0
+		var endpoint_is_generated := false
+		for endpoint_index in [0, 16]:
+			var bottom_endpoint := bottom_vertices[endpoint_index].y
+			var top_endpoint := top_vertices[endpoint_index].y
+			_expect(
+				is_finite(bottom_endpoint)
+				and bottom_endpoint >= 0.0
+				and bottom_endpoint <= 2.60 + 0.0001
+				and is_finite(top_endpoint)
+				and top_endpoint >= 9.0 - 2.60 - 0.0001
+				and top_endpoint <= 9.0,
+				"%s shoreline endpoints fall outside the generated bank range."
+					% scene_path
+			)
+			endpoint_is_generated = (
+				endpoint_is_generated
+				or bottom_endpoint > 0.0001
+				or top_endpoint < 8.9999
+			)
+		_expect(
+			endpoint_is_generated,
+			"%s shoreline endpoints are still forced to the screen boundaries."
+				% scene_path
+		)
+		for vertex_index in range(17):
+			maximum_intrusion = maxf(
+				maximum_intrusion,
+				maxf(
+					bottom_vertices[vertex_index].y,
+					9.0 - top_vertices[vertex_index].y
+				)
+			)
+			_expect(
+				top_vertices[vertex_index].y - bottom_vertices[vertex_index].y
+					>= 5.25 - 0.0001,
+				"%s shoreline channel becomes narrower than its safety bound."
+					% scene_path
+			)
+		_expect(
+			maximum_intrusion > 1.45,
+			"%s shoreline still uses the old narrow variation range." % scene_path
+		)
+		var inlet_range := Vector2(summary.get(
+			"shoreline_inlet_y_range_pixels",
+			Vector2.ZERO,
+		))
+		var expected_clearance := 93.5
+		var expected_inlet_range := Vector2(
+			(9.0 - top_vertices[0].y) * 120.0 + expected_clearance,
+			(9.0 - bottom_vertices[0].y) * 120.0 - expected_clearance
+		)
+		_expect(
+			inlet_range.is_equal_approx(expected_inlet_range),
+			"%s water inlet lanes do not match the generated left bank opening."
+				% scene_path
+		)
+	_shoreline_signature_by_screen[String(expected_id)] = (
+		_shoreline_geometry_signature(summary)
+	)
+
+
+func _shoreline_geometry_signature(summary: Dictionary) -> String:
+	var parts := PackedStringArray()
+	for definition_variant: Variant in Array(
+		summary.get("shoreline_obstacles", [])
+	):
+		if not definition_variant is Dictionary:
+			continue
+		var definition: Dictionary = definition_variant
+		parts.append(String(definition.get("element_id", "")))
+		var vertices_variant: Variant = definition.get(
+			"vertices_world", PackedVector2Array()
+		)
+		if not vertices_variant is PackedVector2Array:
+			continue
+		for point: Vector2 in PackedVector2Array(vertices_variant):
+			parts.append("%.6f,%.6f" % [point.x, point.y])
+	return "|".join(parts)
 
 
 func _check_gate_roundtrip(stage: Node, scene_path: String) -> void:
@@ -869,7 +1302,8 @@ func _finish() -> void:
 		print(
 			"GPU_STAGE_SCENES_SMOKE: PASS "
 			+ "(7 scenes, unique IDs/titles, 1920x1080, Mobile, "
-			+ "gate + routed polygons/sources/salmon/leaves)"
+			+ "persistent timeline/regimes + gate + routed "
+			+ "polygons/sources/salmon/leaves)"
 		)
 		get_tree().quit(0)
 		return

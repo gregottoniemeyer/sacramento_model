@@ -1,0 +1,8 @@
+schema_version,profile_status,regime_id,regime_name,reservoir_area_fraction,reservoir_season,drain_area_fraction,drain_season,obstacle_area_fraction,obstacle_season,source_area_fraction,source_season,shoreline_randomness,allocation_policy,transition_policy,notes
+1,draft,kinship,Kinship,0,all_year,0,all_year,0.1,salmon_spawning,0.1,all_year,1.0,stable_even_area,immediate,Field is an alias for drain.
+1,not_defined,ranch,Agriculture,0.2,all_year,0.75,seasonal,,,,,0.3,stable_even_area,immediate,To be defined.
+1,draft,gold_rush,Gold Rush,0.1,all_year,0.25,all_year,0.75,all_year,,,0.5,stable_even_area,immediate,Source budget is not yet defined.
+1,not_defined,water_projects,Water Projects,0.33,seasonal,0.5,,,,,,0.1,stable_even_area,immediate,To be defined.
+1,not_defined,hydropower,Hydropower,0.5,all_year,0.25,,,,,,0.2,stable_even_area,immediate,To be defined.
+1,not_defined,tech,Tech,0.75,seasonal,0.25,,,,,,0.0,stable_even_area,immediate,To be defined.
+1,not_defined,watershed,Watershed,Based on amount of water,seasonal,,,,,,,0.1,stable_even_area,immediate,To be defined.

@@ -19,12 +19,15 @@ config/icon="res://img/icon.svg"
 [autoload]
 
 FlowControlBus="*res://flow/flow_control_bus.gd"
+ModelTimeline="*res://flow/model_timeline.gd"
+ModelRegimes="*res://flow/model_regimes.gd"
 
 [display]
 
 window/size/viewport_width=1920
 window/size/viewport_height=1080
 window/size/mode=4
+window/subwindows/embed_subwindows=false
 window/stretch/mode="canvas_items"
 
 [flow_control]

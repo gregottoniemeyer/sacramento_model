@@ -2,10 +2,33 @@
 
 ## Production deployment
 
-`scene_1.tscn` through `scene_7.tscn` each instance this component directly,
-so every selected scene is one full native screen rather than the prototype's
-two-up preview. The existing selector, Escape behavior, and stable screen IDs
-remain unchanged. The instances use stage indices 0–6 for independent seeds.
+`scene_1.tscn` through `scene_7.tscn` each instance this component directly.
+The startup selector offers two independent river pickers and rejects duplicate
+choices. **Launch Two Displays** hands both choices to `dual_stage_host.tscn`;
+**Launch Display A Only** and number keys `1…7` retain a direct single-stage
+path. Stable screen IDs remain unchanged, and stage indices `0…6` provide
+independent seeds.
+`ModelTimeline` is a project autoload, so replacing the current scene does not
+replace the model clock. Returning to the selector and choosing another river
+therefore preserves the current model date instead of starting a new year.
+
+With two or more monitors, the host keeps one Godot process and creates two
+native outputs: stage A renders in the root `Window`, and stage B renders in a
+non-transient native child `Window`. Each output uses a 1920 x 1080 logical
+canvas with aspect-preserving canvas scaling and is placed borderlessly over
+the exact `DisplayServer` rectangle of a different monitor. Windowed borderless
+placement avoids creating a separate macOS Space for each output. Closing
+either output or pressing Escape tears down the complete host and returns to
+the selector.
+
+With one monitor, the same host renders both independent 1920 x 1080 stages in
+side-by-side `SubViewport` previews. Click a preview to direct its local G/S/L
+and water controls. `V` is process-wide: pressing it from the selected preview
+applies one synchronized debug-visibility state to every active stage. Shared
+timeline and regime state still advance only once, and a regime key reaches
+only the selected preview. This fallback is for
+configuration and rehearsal; installation performance must still be checked
+with both native monitor windows visible.
 
 The project uses Mobile rendering, a 1920 x 1080 logical viewport, 4x 2D MSAA,
 and a project render cap of 30 FPS. An obscured or embedded macOS Metal window
@@ -56,7 +79,7 @@ this component is the one-screen production building block.
 `WaterOnlyViewport`. Its RGB and alpha contain only the original water
 head/segment renderer. The stage background, background grid, cyan reservoir
 guide, gold interaction outlines, violet source outlines, stage title, model
-date, salmon, and leaves are deliberately excluded.
+date, active-regime panel, salmon, and leaves are deliberately excluded.
 
 Salmon and leaves bind this exact texture and sample its alpha in their
 particle-process shaders. Salmon choose a full 2D upstream heading from their
@@ -78,13 +101,17 @@ Every instance exposes:
 - `control_target: StringName`: an optional controller alias.
 - `stage_title: String`: the human-readable river title shown on that screen.
 - `stage_title_visible: bool`: title visibility without changing screen identity.
+- `regime_panel_visible: bool`: visibility of the process-wide regime state on
+  this screen. Production enables it only for the Sacramento-San Joaquin Delta.
 - `stage_grid_visible: bool`: visibility of the screen-fixed model grid.
 - `stage_grid_spacing_pixels`, `stage_grid_line_width_pixels`, and
   `stage_grid_color`: native-pixel grid presentation controls.
 - `stage_date_visible: bool`: visibility of the screen-fixed
   `MM/DD-HH:MM` label.
 - `model_year_duration_seconds`, `model_start_day_index`, and
-  `model_calendar_auto_advance`: watershed-calendar timing and mode controls.
+  `model_calendar_auto_advance`: initial watershed-calendar configuration and
+  compatibility controls. In the production project they configure or mutate
+  the process-wide `ModelTimeline`, not an independent per-stage clock.
 - `watershed_data_path`, `watershed_data_drives_flow_rate`, and
   `watershed_interpolate_flow_rate`: the stage-specific 720-row data source and
   its flow-driving policy.
@@ -93,24 +120,75 @@ It joins the existing `flow_models` group and implements
 `accepts_control_target()` plus `queue_control_message()`, so the existing
 `FlowControlBus` can discover and address it.
 
+The `ModelTimeline` autoload is the single calendar authority within one Godot
+process. A stage keeps a synchronized local view only for its label, watershed
+interpolation, signals, and `runtime_summary()`. It never advances or resets the
+production clock independently.
+
+`ModelRegimes` is a second process-persistent autoload and is the single
+authority for the seven historical regime toggles. Its authoritative order is
+Kinship, Agriculture, Gold Rush, Water Projects, Hydropower, Tech, and
+Watershed. Agriculture keeps the stable internal ID `ranch`; the preferred UI
+path is `regimes.agriculture`, while `regimes.ranch` remains compatible.
+The initial active set is empty. Any number of regimes may be active
+simultaneously, and changing scenes or passing through the selector preserves
+that set. A separate Godot process has a separate `ModelRegimes` authority, so
+an installation controller must synchronize separate executables explicitly.
+
+`ModelRegimes` loads the user-authored comma-delimited text table from
+`res://regime_feature_profiles.txt`. Columns are addressed by header name, so
+their order is not significant. Blank or descriptive nonnumeric feature cells
+remain undefined rather than silently becoming zero; `profile_status` is
+informational and does not disable a populated row. For every numeric feature,
+the effective value is the normalized mean of the defined values belonging to
+the active regimes. With no active regimes the effective feature dictionary is
+zero. This makes two active keyboard toggles an equal blend today while leaving
+the text-table contract ready for unequal Governator weights later.
+
+The first profile-driven physical feature is `shoreline_randomness`. Every
+stage generates a visibly different but deterministic top and bottom bank once
+from its stable `screen_id` and stage identity. Each bank has one water-edge
+point at every model-grid X coordinate from `0` through `16`, for 17 ordered
+samples. All 17 samples—including the inlet and outlet—belong to the generated
+shape; they are not forced to the screen boundaries. Bank intrusion may reach
+`2.6` world units, while a per-column guard preserves at least `5.25` world
+units of open channel. Toggling regimes never regenerates those samples: it
+changes only the normalized repellent strength.
+A value of zero completely skips shoreline physics; values through `1.0`
+proportionally redirect future head motion. Existing immutable water history is
+left in place, providing the visible transition. When shoreline physics is
+active, ordinary left-edge water releases are limited to that stage's actual
+open inlet gap, with enough clearance to begin beyond both banks' complete
+influence field. Interior source polygons retain their own explicit spawning
+behavior.
+
 ### Stage presentation layers and model calendar
 
 The main-canvas presentation stack is fixed around the animated content:
 
 - `Background` is the explicit black `ColorRect` at absolute Z `-100`.
 - `BackgroundGrid` is a stage-owned `Node2D` at absolute Z `-75`. Its production
-  default is 1-native-pixel lines every 120 pixels in `#4AB0E1` at `0.75` alpha.
+  default is 1-native-pixel lines every 120 pixels in `#4AB0E1` at `0.25` alpha.
   Because one world unit is exactly 120 native pixels, the default grid describes
   the model's 16 x 9 coordinate system directly. Boundary lines are omitted, so
   the grid begins one interval inside each edge and never forms a screen frame.
-- `StageTitleLayer` is at absolute Z `-50` and owns both `StageTitle` and
-  `ModelDate`. The title is positioned at `(40, 40)`; the date is positioned at
-  `(40, 980)`. Both use the bundled Barlow Condensed Medium font at 40 native
-  pixels in opaque `#4AB0E1`.
+- `StageTitleLayer` is at absolute Z `-50` and owns `StageTitle`, `ModelDate`,
+  and the optional `ActiveRegimes` panel. All type reads bottom-to-top at
+  `-90` degrees. The 60-pixel title is centered on `(60, 540)` and the
+  48-pixel date is centered on `(1860, 540)`—the top and bottom centerlines
+  after the installation displays are mounted vertically. Both use bundled
+  Barlow Condensed Medium in opaque `#4AB0E1`. The date alone enables the
+  OpenType `tnum` feature (tabular figures), so its digits keep fixed widths;
+  the river title, regime heading, and regime names retain proportional glyph
+  spacing. Only the Delta wrapper enables the regime panel. Its text shares a
+  bottom anchor at Y `1050`: the 48-pixel
+  `Regime` heading is centered on X `1360`, and seven 60-pixel names begin on
+  X `1420` with 72-pixel centerline spacing.
+  Active names are opaque and inactive names are shown at `0.25` alpha.
 - Water, salmon, and leaves render at absolute Z `0` or higher, so active
   features can pass visibly over the grid and text.
 
-The grid and both text labels are outside `WaterOnlyViewport` and
+The grid and all presentation text are outside `WaterOnlyViewport` and
 `ReservoirAndStatusOverlay`. Their alpha can never be sampled as water by salmon
 or leaves, and the `V` debug toggle does not hide them. The bundled font is
 `res://flow/assets/fonts/BarlowCondensed-Medium.ttf`; the installation does not
@@ -119,11 +197,27 @@ depend on a matching system font.
 `ModelDate` displays a zero-padded `MM/DD-HH:MM` in a non-leap, 365-day model
 year. Every production wrapper sets `model_start_day_index = 181`, the zero-based
 index for `07/01`, so a cycle runs from July 1 through June 30 and then wraps.
-The internal clock defaults to one model year every 720 running seconds, which
-is 21,600 rendered frames at the project's 30 FPS cap. The date-time is derived
-from the continuous year fraction rather than accumulated integer frame counts,
-so it does not drift. Pausing the stage freezes the calendar, watershed data,
-water, and ecology together.
+The shared internal clock defaults to one model year every 720 running seconds,
+which is 21,600 rendered frames at the project's 30 FPS cap. The date-time is
+derived from the continuous year fraction rather than accumulated integer frame
+counts, so it does not drift. `ModelTimeline` survives both trips through
+`startup_selector.tscn` and direct stage-to-stage scene replacement. While
+automatic advancement is enabled and the timeline is not paused, it continues
+to run even while the selector is visible.
+
+A newly instantiated stage synchronizes from `ModelTimeline` immediately after
+loading its own watershed file and before building its water particles. Its
+date label, 720-row watershed position, interpolated flow rate, and runtime
+summary therefore begin at the current shared instant; they do not briefly
+fall back to `07/01-00:00` or row zero. Two stages hosted by the same Godot
+process consume the same authority and remain on exactly the same clock.
+
+Pause is also process-global in the production project. Calling
+`set_paused(true)` or pressing Space on any active stage pauses `ModelTimeline`
+and all active stages in that process; resume releases them together. This is
+deliberately different from a private per-screen pause. Automatic advancement
+and explicit pause are independent states: a manually held date can remain
+unpaused, and resuming simulation does not implicitly enable auto-advance.
 
 Each stage loads a 720-row `water_pipeline` text file. At the default 720-second
 year, one row spans exactly one running second and represents a uniform 730
@@ -135,10 +229,15 @@ the last-to-first wrap. The interpolated `norm` maps directly from `0.0…1.0` t
 water `flow_rate` `0.0…1.0`, or 0…100 percent; it is not multiplied by the raw or
 scaled columns.
 
-The stage's `reset` action returns the timeline to `07/01-00:00` and restarts
-water, salmon, and leaves without changing pause or auto-advance mode.
-`reset_model_calendar()` resets only calendar/data position and leaves particle
-state intact. A direct `set_flow_rate()`, digit-key, `flow_rate`, or
+The stage's `reset` action returns the process-wide timeline to
+`07/01-00:00` and restarts water, salmon, and leaves on every stage addressed by
+that action, without changing global pause or auto-advance mode. Consequently,
+a reset targeted at one river still resets the shared calendar for every active
+and subsequently loaded river, although only the addressed river's particles
+restart. Target `*` when the Governator intends a synchronized visual reset.
+`reset_model_calendar()` resets only the global calendar/data position and
+leaves particle state intact. A direct `set_flow_rate()`, water-rate digit
+shortcut (`0`, `8`, or `9`), `flow_rate`, or
 `active_ratio` change is an intentional manual override and disables watershed
 flow driving. Set `watershed.drives_flow_rate` back to `true` to apply the
 current interpolated data value immediately.
@@ -146,11 +245,20 @@ current interpolated data value immediately.
 For an external time handoff, `set_model_date_time("12/21-06:30")` (or the
 compatibility name `set_model_date_mm_dd`) and runtime paths `calendar.date` or
 `stage.date` validate the non-leap date and time, align the watershed row, and
-disable automatic advancement. Date-only `MM/DD` input remains accepted and
-means midnight, but output is always canonical `MM/DD-HH:MM`. Invalid values
+disable automatic advancement. This handoff is process-global even when the
+message was addressed through one stage: all active stages move to the same
+instant, and a later stage inherits it. Date-only `MM/DD` input remains accepted
+and means midnight, but output is always canonical `MM/DD-HH:MM`. Invalid values
 return `false` without changing state. Call
 `set_model_calendar_auto_advance(true)`, or set `calendar.auto_advance`, to
-resume the internal clock from the displayed time.
+resume the shared clock from the displayed time.
+
+An autoload is shared only inside its own Godot process. Two stages in one
+process are synchronized automatically; two Godot executables, two computers,
+or two separately launched display processes each have their own
+`ModelTimeline`. The Governator must send those processes the same authoritative
+date/phase and periodically resynchronize them if installation-wide phase lock
+matters. Scene-switch persistence is not a network clock.
 
 Each wrapper assigns its title explicitly. Display text is not a controller
 identity and may change without changing the stable `screen_id` or `model_id`.
@@ -173,29 +281,45 @@ full-year CFS series; its 720 normalized rows are nevertheless stretched over
 the display year. For that reason the runtime calls the pipeline's nominal
 `cfs` column `raw_value`, and Delta seasonality should be treated as provisional.
 
-The production presentation, calendar, and watershed paths are:
+The production presentation, regime, calendar, and watershed paths are:
 
 | Runtime path | Compatibility alias | Effect |
 |---|---|---|
 | `stage.title` | `stage_title` | River display text |
 | `stage.title_visible` | `stage_title_visible` | Title visibility |
+| `stage.regime_panel_visible` | `regime_panel_visible` | Active-regime panel visibility for this screen |
 | `stage.grid_visible` | `stage_grid_visible` | Grid visibility |
 | `stage.grid_spacing_pixels` | `stage_grid_spacing_pixels` | Grid spacing, clamped to `1…960` native pixels |
 | `stage.grid_line_width_pixels` | `stage_grid_line_width_pixels` | Grid width, clamped to `0.1…8` native pixels |
 | `stage.grid_color` | `stage_grid_color` | Grid color, including alpha |
 | `stage.date_visible` | `stage_date_visible` | Date-time-label visibility |
-| `calendar.date` or `stage.date` | `model_date` | Validated `MM/DD-HH:MM` (or date-only `MM/DD`); disables auto-advance |
-| `calendar.day_index` | `model_day_index` | Zero-based day `0…364`; disables auto-advance |
-| `calendar.auto_advance` | `model_calendar_auto_advance` | Select internal-clock or externally held mode |
-| `calendar.year_duration_seconds` | `model_year_duration_seconds` | Internal year duration, clamped to `1…86400` seconds |
-| `calendar.start_day_index` | `model_start_day_index` | Reset/start day `0…364`; changing it resets the calendar |
+| `calendar.date` or `stage.date` | `model_date` | Set the process-wide `MM/DD-HH:MM` (or date-only `MM/DD`); disables auto-advance |
+| `calendar.day_index` | `model_day_index` | Set the process-wide day `0…364`; disables auto-advance |
+| `calendar.auto_advance` | `model_calendar_auto_advance` | Select process-wide internal-clock or externally held mode |
+| `calendar.year_duration_seconds` | `model_year_duration_seconds` | Set the shared year duration, clamped to `1…86400` seconds while preserving phase |
+| `calendar.start_day_index` | `model_start_day_index` | Set the shared reset/start day `0…364` and reset the calendar |
 | `watershed.data_path` | `watershed_data_path` | Load a pipeline text file and align it to the current timeline |
 | `watershed.drives_flow_rate` | `watershed_data_drives_flow_rate` | Enable/disable data control of water `flow_rate` |
 | `watershed.interpolate_flow_rate` | `watershed_interpolate_flow_rate` | Lerp adjacent `norm` rows or hold each current row |
+| `regimes.active_names` | `active_regimes` | Replace the shared active set from regime names/IDs |
+| `regimes.active_indices` | none | Replace the shared active set from zero-based indices `0…6` |
+| `regimes.kinship` | none | Set Kinship active/inactive |
+| `regimes.agriculture` | `regimes.ranch` | Set Agriculture active/inactive |
+| `regimes.gold_rush` | none | Set Gold Rush active/inactive |
+| `regimes.water_projects` | none | Set Water Projects active/inactive |
+| `regimes.hydropower` | none | Set Hydropower active/inactive |
+| `regimes.tech` | none | Set Tech active/inactive |
+| `regimes.watershed` | none | Set Watershed active/inactive |
+| `shoreline.randomness` | `shoreline_randomness`, `shorelines.randomness` | Directly set this stage's shoreline force `0…1`; the next shared regime change reapplies the normalized profile value |
 
-Presentation and calendar paths do not change `screen_id`, `model_id`, debug
-visibility, or water occupancy. Watershed paths can change the water rate but do
-not rebuild particles or retune salmon/leaves. The date signal remains
+Presentation paths do not change `screen_id`, `model_id`, debug visibility, or
+water occupancy. Calendar paths mutate the shared `ModelTimeline` and are
+reflected by every active stage; they still do not rebuild particles or retune
+salmon/leaves. Regime paths mutate the process-wide `ModelRegimes` set and are
+reflected by every active or subsequently loaded stage. `regimes.active_names`
+and `regimes.active_indices` replace the complete set atomically; each
+`regimes.<id>` boolean changes one member without disturbing the others.
+Watershed paths can change the local river's water rate. The date signal remains
 `model_date_changed(screen_id, date_mm_dd, day_of_year)` and reports the
 date-only value when the day changes. Each data-row transition emits
 `watershed_data_row_changed` with row index/count, `raw_value`, `normalized_flow`,
@@ -206,7 +330,26 @@ date-only value when the day changes. Each data-row transition emits
 `stage_grid_line_width_pixels`, `stage_grid_color`, `stage_grid_z_index`, and
 `stage_grid_line_count`. Date fields are `stage_date_visible`,
 `stage_date_text`, `stage_date_format`, `stage_date_position`, `stage_date_color`,
-`stage_date_font_size`, `stage_date_font_resource`, and `stage_date_z_index`.
+`stage_date_font_size`, `stage_date_font_resource`, `stage_date_z_index`,
+`stage_date_position_anchor`, `stage_date_rotation_degrees`,
+`stage_date_tabular_numerals`, and `stage_date_opentype_feature`.
+Regime fields are `regime_state_shared`, `regime_state_scope`, `regime_names`,
+`regime_ids`, `regime_active_states`, `active_regime_indices`,
+`active_regime_names`, `active_regime_count`, `regime_revision`,
+`regime_panel_visible`, `regime_panel_position`,
+`regime_panel_rotation_degrees`, `regime_heading_text`,
+`regime_heading_font_size`, `regime_name_font_size`,
+`regime_name_row_height`, `regime_active_alpha`, `regime_inactive_alpha`, and
+`regime_panel_z_index`.
+Profile fields are `regime_profile_path`, `regime_profiles_loaded`,
+`regime_profile_count`, `regime_profile_reload_revision`,
+`regime_profile_diagnostics`, and `regime_effective_features`. Shoreline fields
+are `shoreline_randomness`, `shoreline_count`, `shoreline_vertex_count`,
+`shoreline_ids`, `shoreline_obstacles`, `shoreline_data_texture_bound`,
+`shoreline_data_texture_size`, `shoreline_count_uniforms`,
+`shoreline_texture_bound_uniforms`, `shoreline_inlet_y_range_pixels`,
+`shoreline_inlet_y_range_uniforms`, `shoreline_overlay_count`, and
+`shoreline_preserves_interaction_capacity`.
 Clock fields are `model_day_index`, `model_day_of_year`,
 `model_minute_of_day`, `model_elapsed_seconds`, `model_year_progress`,
 `model_year_duration_seconds`, `model_year_frames_at_30_fps`,
@@ -226,7 +369,8 @@ dictionary contains `row_index`, `row_count`, `raw_value`, `normalized_flow`,
 `stage_grid_above_background`, and `stage_text_above_grid`. The occupancy
 exclusion flags are `water_texture_excludes_background`,
 `water_texture_excludes_stage_grid`, `water_texture_excludes_debug_overlay`,
-`water_texture_excludes_stage_title`, and `water_texture_excludes_stage_date`.
+`water_texture_excludes_stage_title`, `water_texture_excludes_stage_date`, and
+`water_texture_excludes_regime_panel`.
 
 ## Runtime API
 
@@ -239,11 +383,19 @@ stage.set_debug_visible(false)
 stage.set_runtime_parameter(&"noise_strength", 60.0)
 stage.set_runtime_parameter(&"stage.title", "Mill Creek")
 stage.set_runtime_parameter(&"stage.title_visible", true)
+stage.set_runtime_parameter(&"stage.regime_panel_visible", true)
 stage.set_runtime_parameter(&"stage.grid_visible", true)
 stage.set_runtime_parameter(&"stage.date_visible", true)
-stage.set_model_date_time("12/21-06:30") # validates and disables auto-advance
-stage.set_model_calendar_auto_advance(true)
-stage.reset_model_calendar()         # calendar only; does not reset water
+stage.toggle_regime(0) # Kinship; all regime indices are zero-based
+stage.set_regime_active(1, true) # Agriculture; preserves the other toggles
+stage.set_active_regime_names(["Gold Rush", "Tech"]) # replaces the active set
+var regime_state := stage.get_regime_state()
+stage.set_runtime_parameter(&"regimes.active_indices", [0, 2, 6])
+stage.set_runtime_parameter(&"regimes.water_projects", true)
+stage.set_runtime_parameter(&"shoreline.randomness", 0.4) # direct diagnostic override
+stage.set_model_date_time("12/21-06:30") # global; disables auto-advance
+stage.set_model_calendar_auto_advance(true) # global; resumes shared clock
+stage.reset_model_calendar()         # global calendar only; no particle reset
 stage.set_runtime_parameter(&"watershed.drives_flow_rate", false)
 stage.set_flow_rate(0.75)            # manual override; also disables data drive
 stage.set_runtime_parameter(&"watershed.drives_flow_rate", true)
@@ -255,6 +407,16 @@ stage.release_leaves()       # schedules 15 top + 15 bottom; returns 30
 stage.release_leaves(8)      # schedules eight top + eight bottom; returns 16
 var occupancy := stage.get_water_texture()
 ```
+
+The stage API forwards regime changes to `ModelRegimes` through
+`toggle_regime(index)`, `set_regime_active(index, active)`,
+`set_active_regime_names(names)`, and `get_regime_state()`. Code that addresses
+the autoload directly may additionally call `set_regime_active_by_id(id,
+active)`, `set_active_indices(indices)`, `clear_regimes()`, or `snapshot()`.
+Both index APIs are zero-based and all replacement setters validate the entire
+input before publishing a change. `regimes_changed` carries the shared snapshot;
+the stage's forwarded signal adds its `screen_id`, active names, active indices,
+and revision.
 
 Gate width is the **full outlet width in the CPU model's 16 x 9 world units**.
 The default `0.25` is 30 native pixels wide. `set_gate_open(true)` and the
@@ -812,24 +974,35 @@ maximum speed at a flow rate of `1.0`.
 
 ## Local keyboard controls
 
-- `0`–`9`: set normalized flow rate from 0 to 1
+- `1`–`7`: toggle Kinship, Agriculture, Gold Rush, Water Projects, Hydropower, Tech,
+  and Watershed respectively; toggling one regime does not clear any other
+  active regime
+- `0`, `8`, `9`: retain the legacy normalized water-rate shortcuts (`0/9`,
+  `8/9`, and `9/9`)
 - `G`: open/close the gate
 - `[` / `]`: narrow/widen the full outlet by 0.1 world units, clamped at the
   live reservoir diameter
-- `Space`: pause/resume water, salmon, leaves, and the internal model calendar
+- `Space`: globally pause/resume the timeline and every active stage in this process
 - `S`: release 25 salmon
 - `L`: release 15 leaves from the top and 15 from the bottom (30 total)
-- `V`: show/hide the cyan reservoir guide, gold interaction-polygon outlines,
-  and violet source outlines/emission arrows; the grid, river title, and model
-  date remain visible
-- `Escape`: return to the seven-scene selector (handled by `stage_scene.gd`)
+- `V`: set one absolute, synchronized debug-visibility state on every active
+  stage in this Godot process, whether the key comes from either focused native
+  window or the selected one-monitor preview; this shows/hides the cyan
+  reservoir guide, gold interaction-polygon outlines, and violet source
+  outlines/emission arrows, while the grid, river title, and model date remain
+  visible
+- `Escape`: return to the seven-scene selector; the shared clock is preserved
 
-These keyboard paths are isolated. Digit keys update only the water
-`flow_rate`; they do not rebuild, retune, or release the salmon/leaf systems or
-resize their segment pools. `S` releases only salmon, and `L` releases only
-leaves. Every recognized stage key is marked handled so another scene node
-cannot process the same event a second time. Use the ecology runtime paths and
-release actions when a controller needs to change those systems.
+The `1`–`7` mapping above applies while a production stage is active. On
+`startup_selector.tscn`, the same keys retain their scene-selection role and do
+not toggle regimes. The active set starts empty, survives scene replacement,
+and can contain several regimes at once. The remaining digit shortcuts update
+only water `flow_rate`; no digit rebuilds, retunes, or releases the salmon/leaf
+systems or resizes their segment pools. `S` releases only salmon, and `L`
+releases only leaves. Every recognized stage key is marked handled so another
+scene node cannot process the same event a second time. Use the ecology runtime
+paths and release actions when a controller needs to change those systems.
+Unlike keyboard `V`, controller-targeted debug actions remain target-specific.
 
 Set `accept_keyboard_input = false` when a scene must respond only to the
 external controller.

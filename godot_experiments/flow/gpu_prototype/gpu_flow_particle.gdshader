@@ -52,6 +52,11 @@ uniform bool trail_recording_enabled = true;
 uniform sampler2D interaction_data_texture : filter_nearest, repeat_disable;
 uniform int interaction_count = 0;
 uniform bool interaction_admission_enabled = true;
+// The two generated riverbanks have their own compact texture and therefore do
+// not consume any of the eight runtime interaction-polygon records.
+uniform sampler2D shoreline_data_texture : filter_nearest, repeat_disable;
+uniform int shoreline_count = 0;
+uniform vec2 shoreline_inlet_y_range = vec2(28.0, 1052.0);
 // Source geometry uses an independent 128 x 1 RGBAF texture with the same
 // fixed 8 x 16 layout size as interactions. It affects logical head creation
 // only; immutable trail rendering remains completely geometry-agnostic.
@@ -74,6 +79,10 @@ const int MAX_INTERACTION_POLYGONS = 8;
 const int MAX_INTERACTION_VERTICES = 12;
 const int INTERACTION_TEXELS_PER_POLYGON = 16;
 const int INTERACTION_TEXTURE_WIDTH = 128;
+const int MAX_SHORELINE_OBSTACLES = 2;
+const int MAX_SHORELINE_EDGE_VERTICES = 17;
+const int SHORELINE_TEXELS_PER_OBSTACLE = 20;
+const int SHORELINE_TEXTURE_WIDTH = 40;
 const int MAX_SOURCE_POLYGONS = 8;
 const int MAX_SOURCE_VERTICES = 12;
 const int SOURCE_TEXELS_PER_POLYGON = 16;
@@ -93,6 +102,37 @@ vec4 interaction_record(int polygon_index, int record_offset) {
 
 vec2 interaction_vertex(int polygon_index, int vertex_index) {
 	return interaction_record(polygon_index, 4 + vertex_index).xy;
+}
+
+vec4 shoreline_record(int shoreline_index, int record_offset) {
+	float texture_x = (
+		float(shoreline_index * SHORELINE_TEXELS_PER_OBSTACLE + record_offset)
+		+ 0.5
+	) / float(SHORELINE_TEXTURE_WIDTH);
+	return textureLod(shoreline_data_texture, vec2(texture_x, 0.5), 0.0);
+}
+
+vec2 shoreline_vertex(int shoreline_index, int vertex_index) {
+	return shoreline_record(shoreline_index, 2 + vertex_index).xy;
+}
+
+vec2 shoreline_channel_normal(vec2 edge, float channel_y_sign) {
+	vec2 normal = normalize(vec2(edge.y, -edge.x) + vec2(0.000001, 0.0));
+	if (normal.y * channel_y_sign < 0.0) {
+		normal = -normal;
+	}
+	return normal;
+}
+
+vec2 shoreline_downstream_tangent(vec2 edge) {
+	vec2 tangent = normalize(edge + vec2(0.000001, 0.0));
+	if (tangent.x < 0.0) {
+		tangent = -tangent;
+	}
+	if (tangent.x < 0.08) {
+		tangent = normalize(vec2(0.08, tangent.y));
+	}
+	return tangent;
 }
 
 vec4 source_record(int source_index, int record_offset) {
@@ -436,9 +476,19 @@ void start() {
 				source_result.zw + vec2(0.000001, 0.0)
 			);
 		} else {
+			float inlet_min_y = clamp(
+				min(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
+				0.0,
+				stage_size.y
+			);
+			float inlet_max_y = clamp(
+				max(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
+				inlet_min_y,
+				stage_size.y
+			);
 			TRANSFORM[3].xy = vec2(
 				-18.0,
-				mix(28.0, stage_size.y - 28.0, lane_seed)
+				mix(inlet_min_y, inlet_max_y, lane_seed)
 			);
 		}
 		// TRANSFORM[2].xy is unused by 2D drawing. Keep the previous completed
@@ -677,6 +727,94 @@ void process() {
 				+ vec2(0.0, vertical_side * speed * 0.85)
 			) * active_strength;
 			// Even a maximum repeller redirects flow instead of reversing the river.
+			target_velocity.x = max(target_velocity.x, speed * 0.08);
+		}
+	}
+
+	// Shoreline obstacles are open water-facing chains, not closed generic
+	// polygons. Only their sixteen ordered segments can steer a head, so there
+	// are no artificial vertical seams or offscreen closure edges to hook flow.
+	if (head_flowing && shoreline_count > 0) {
+		for (
+			int shoreline_index = 0;
+			shoreline_index < MAX_SHORELINE_OBSTACLES;
+			shoreline_index++
+		) {
+			if (shoreline_index >= shoreline_count) {
+				break;
+			}
+			vec4 shoreline_policy = shoreline_record(shoreline_index, 0);
+			float shoreline_weight = clamp(shoreline_policy.x, 0.0, 1.0);
+			float channel_y_sign = shoreline_policy.y;
+			float shoreline_influence = max(shoreline_policy.z, 0.0);
+			int shoreline_vertex_count = int(shoreline_policy.w + 0.5);
+			if (shoreline_weight <= 0.0 || shoreline_vertex_count < 2) {
+				continue;
+			}
+			vec4 shoreline_bounds = shoreline_record(shoreline_index, 1);
+			// Do not let an offscreen inlet head feel a bank endpoint before it
+			// reaches the visible model. This preserves clean left-edge starts.
+			if (point.x < shoreline_bounds.x || point.x > shoreline_bounds.z) {
+				continue;
+			}
+			float closest_distance_squared = 1.0e20;
+			vec2 closest_channel_normal = vec2(0.0, channel_y_sign);
+			vec2 closest_downstream_tangent = vec2(1.0, 0.0);
+			vec2 closest_edge_point = point;
+			for (
+				int vertex_index = 0;
+				vertex_index < MAX_SHORELINE_EDGE_VERTICES - 1;
+				vertex_index++
+			) {
+				if (vertex_index + 1 >= shoreline_vertex_count) {
+					break;
+				}
+				vec2 edge_start = shoreline_vertex(shoreline_index, vertex_index);
+				vec2 edge_end = shoreline_vertex(shoreline_index, vertex_index + 1);
+				vec2 edge = edge_end - edge_start;
+				float edge_length_squared = max(dot(edge, edge), 0.000001);
+				float edge_fraction = clamp(
+					dot(point - edge_start, edge) / edge_length_squared,
+					0.0,
+					1.0
+				);
+				vec2 edge_point = edge_start + edge * edge_fraction;
+				vec2 edge_offset = point - edge_point;
+				float distance_squared = dot(edge_offset, edge_offset);
+				if (distance_squared < closest_distance_squared) {
+					closest_distance_squared = distance_squared;
+					closest_edge_point = edge_point;
+					closest_channel_normal = shoreline_channel_normal(
+						edge,
+						channel_y_sign
+					);
+					closest_downstream_tangent = shoreline_downstream_tangent(edge);
+				}
+			}
+			float closest_distance = sqrt(max(closest_distance_squared, 0.0));
+			float signed_channel_distance = dot(
+				point - closest_edge_point,
+				closest_channel_normal
+			);
+			bool point_on_land_side = signed_channel_distance < 0.0;
+			if (!point_on_land_side && closest_distance > shoreline_influence) {
+				continue;
+			}
+			float shoreline_proximity = (
+				point_on_land_side
+				? 1.0
+				: 1.0 - smoothstep(
+					0.0,
+					max(shoreline_influence, 0.001),
+					closest_distance
+				)
+			);
+			float active_shoreline_weight = shoreline_weight * shoreline_proximity;
+			target_velocity += (
+				closest_channel_normal * speed * 1.15
+				+ closest_downstream_tangent * speed * 0.20
+			) * active_shoreline_weight;
+			// A bank may slow or bend the river, but can never reverse it upstream.
 			target_velocity.x = max(target_velocity.x, speed * 0.08);
 		}
 	}
@@ -1198,6 +1336,87 @@ void process() {
 					* containment_radius
 				);
 			}
+		}
+	}
+
+	// Resolve only real crossings of the water-facing bank chains. The correction
+	// is local to the earliest crossing and never moves a head to an object center.
+	// A partial weight deliberately blends the correction, while weight zero skips
+	// the complete path.
+	if (CUSTOM.w < 0.5 && shoreline_count > 0) {
+		for (
+			int shoreline_index = 0;
+			shoreline_index < MAX_SHORELINE_OBSTACLES;
+			shoreline_index++
+		) {
+			if (shoreline_index >= shoreline_count) {
+				break;
+			}
+			vec4 shoreline_policy = shoreline_record(shoreline_index, 0);
+			float shoreline_weight = clamp(shoreline_policy.x, 0.0, 1.0);
+			float channel_y_sign = shoreline_policy.y;
+			int shoreline_vertex_count = int(shoreline_policy.w + 0.5);
+			if (shoreline_weight <= 0.0 || shoreline_vertex_count < 2) {
+				continue;
+			}
+			vec4 shoreline_bounds = shoreline_record(shoreline_index, 1);
+			float segment_min_x = min(point.x, next_point.x);
+			float segment_max_x = max(point.x, next_point.x);
+			if (
+				segment_max_x < shoreline_bounds.x
+				|| segment_min_x > shoreline_bounds.z
+			) {
+				continue;
+			}
+			vec2 motion_step = next_point - point;
+			float earliest_crossing = 2.0;
+			vec2 crossing_channel_normal = vec2(0.0, channel_y_sign);
+			vec2 crossing_downstream_tangent = vec2(1.0, 0.0);
+			for (
+				int vertex_index = 0;
+				vertex_index < MAX_SHORELINE_EDGE_VERTICES - 1;
+				vertex_index++
+			) {
+				if (vertex_index + 1 >= shoreline_vertex_count) {
+					break;
+				}
+				vec2 edge_start = shoreline_vertex(shoreline_index, vertex_index);
+				vec2 edge_end = shoreline_vertex(shoreline_index, vertex_index + 1);
+				vec2 edge = edge_end - edge_start;
+				vec2 channel_normal = shoreline_channel_normal(
+					edge,
+					channel_y_sign
+				);
+				if (dot(motion_step, channel_normal) >= 0.0) {
+					continue;
+				}
+				float crossing = segment_intersection_fraction(
+					point,
+					next_point,
+					edge_start,
+					edge_end
+				);
+				if (crossing >= 0.0 && crossing < earliest_crossing) {
+					earliest_crossing = crossing;
+					crossing_channel_normal = channel_normal;
+					crossing_downstream_tangent = shoreline_downstream_tangent(edge);
+				}
+			}
+			if (earliest_crossing > 1.0) {
+				continue;
+			}
+			vec2 crossing_point = mix(point, next_point, earliest_crossing);
+			float remaining_step = length(next_point - crossing_point);
+			vec2 redirected_endpoint = (
+				crossing_point
+				+ crossing_channel_normal * 1.5
+				+ crossing_downstream_tangent * remaining_step
+			);
+			next_point = mix(
+				next_point,
+				redirected_endpoint,
+				shoreline_weight
+			);
 		}
 	}
 

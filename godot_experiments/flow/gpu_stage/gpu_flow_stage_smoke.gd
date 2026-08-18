@@ -10,9 +10,22 @@ const EXPECTED_LAYER_Z := [0, 1, 2, 3, 4, 5, 6]
 const EXPECTED_TITLE_FONT_PATH := (
 	"res://flow/assets/fonts/BarlowCondensed-Medium.ttf"
 )
-const EXPECTED_TITLE_POSITION := Vector2(40.0, 40.0)
+const EXPECTED_TITLE_POSITION := Vector2(60.0, 540.0)
+const EXPECTED_DATE_POSITION := Vector2(1860.0, 540.0)
 const EXPECTED_TITLE_COLOR := Color("4ab0e1")
-const EXPECTED_TITLE_FONT_SIZE := 40
+const EXPECTED_TITLE_FONT_SIZE := 60
+const EXPECTED_DATE_FONT_SIZE := 48
+const EXPECTED_DATE_OPENTYPE_FEATURE := "tnum"
+const EXPECTED_REGIME_PANEL_POSITION := Vector2(1324.0, 1050.0)
+const EXPECTED_REGIME_NAMES := [
+	"Kinship",
+	"Agriculture",
+	"Gold Rush",
+	"Water Projects",
+	"Hydropower",
+	"Tech",
+	"Watershed",
+]
 const EXPECTED_PALETTE := [
 	Color(1.0, 1.0, 1.0, 1.0),
 	Color(0.918, 0.969, 0.933, 1.0),
@@ -25,6 +38,9 @@ const EXPECTED_PALETTE := [
 
 
 func _ready() -> void:
+	var model_regimes := get_node_or_null("/root/ModelRegimes")
+	if model_regimes != null:
+		model_regimes.call(&"clear_regimes")
 	var stage := STAGE_SCENE.instantiate()
 	if stage == null:
 		push_error("GPU_STAGE_SMOKE: reusable stage did not instantiate")
@@ -35,6 +51,7 @@ func _ready() -> void:
 	stage.set(&"screen_id", &"smoke_screen")
 	stage.set(&"control_target", &"smoke_target")
 	stage.set(&"stage_title", "Smoke River")
+	stage.set(&"regime_panel_visible", true)
 	add_child(stage)
 	var startup_summary: Dictionary = stage.call(&"runtime_summary")
 	for admission_enabled: Variant in Array(
@@ -62,6 +79,10 @@ func _ready() -> void:
 	var summary: Dictionary = stage.call(&"runtime_summary")
 	if summary.is_empty():
 		errors.append("runtime summary is empty")
+	if not bool(summary.get("model_timeline_shared", false)):
+		errors.append("stage is not bound to the persistent ModelTimeline autoload")
+	if String(summary.get("model_timeline_scope", "")) != "GODOT_PROCESS":
+		errors.append("shared model timeline does not report process scope")
 	var water_viewport := stage.get_node_or_null("WaterOnlyViewport") as SubViewport
 	var water_display := stage.get_node_or_null("WaterTextureDisplay") as Sprite2D
 	var salmon_school := stage.get_node_or_null("GPUSalmonSchool") as GPUSalmon2D
@@ -69,6 +90,13 @@ func _ready() -> void:
 	var background := stage.get_node_or_null("Background") as ColorRect
 	var title_layer := stage.get_node_or_null("StageTitleLayer") as Node2D
 	var title_label := stage.get_node_or_null("StageTitleLayer/StageTitle") as Label
+	var date_label := stage.get_node_or_null("StageTitleLayer/ModelDate") as Label
+	var regime_panel := stage.get_node_or_null(
+		"StageTitleLayer/ActiveRegimes"
+	) as Node2D
+	var regime_heading := stage.get_node_or_null(
+		"StageTitleLayer/ActiveRegimes/Heading"
+	) as Label
 	var water_canvas: Node2D = null
 	if water_viewport != null:
 		water_canvas = water_viewport.get_node_or_null("WaterOnlyCanvas") as Node2D
@@ -111,8 +139,12 @@ func _ready() -> void:
 	else:
 		if title_label.text != "Smoke River":
 			errors.append("stage title text did not use the exported title")
-		if title_label.position != EXPECTED_TITLE_POSITION:
-			errors.append("stage title is not positioned at native (40, 40)")
+		if not (title_label.position + title_label.pivot_offset).is_equal_approx(
+			EXPECTED_TITLE_POSITION
+		):
+			errors.append("stage title is not centered on the left-edge centerline")
+		if not is_equal_approx(title_label.rotation_degrees, -90.0):
+			errors.append("stage title is not rotated -90 degrees")
 		if not title_label.get_theme_color(&"font_color").is_equal_approx(
 			EXPECTED_TITLE_COLOR
 		):
@@ -122,6 +154,44 @@ func _ready() -> void:
 		var title_font := title_label.get_theme_font(&"font")
 		if title_font == null or title_font.resource_path != EXPECTED_TITLE_FONT_PATH:
 			errors.append("stage title does not use the bundled Barlow Condensed font")
+	if date_label == null:
+		errors.append("model date Label is missing")
+	else:
+		if not (date_label.position + date_label.pivot_offset).is_equal_approx(
+			EXPECTED_DATE_POSITION
+		):
+			errors.append("model date is not centered on the right-edge centerline")
+		if not is_equal_approx(date_label.rotation_degrees, -90.0):
+			errors.append("model date is not rotated -90 degrees")
+		if date_label.get_theme_font_size(&"font_size") != EXPECTED_DATE_FONT_SIZE:
+			errors.append("model date font size is not 48")
+		var date_font := date_label.get_theme_font(&"font") as FontVariation
+		if date_font == null:
+			errors.append("model date does not use a date-only font variation")
+		else:
+			var tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
+				EXPECTED_DATE_OPENTYPE_FEATURE
+			)
+			if int(date_font.opentype_features.get(tnum_tag, 0)) != 1:
+				errors.append("model date does not enable tabular numerals")
+			if (
+				date_font.base_font == null
+				or date_font.base_font.resource_path != EXPECTED_TITLE_FONT_PATH
+			):
+				errors.append("model date variation does not retain the Barlow base font")
+	if not (
+		bool(summary.get("stage_date_tabular_numerals", false))
+		and String(summary.get("stage_date_opentype_feature", ""))
+			== EXPECTED_DATE_OPENTYPE_FEATURE
+	):
+		errors.append("runtime summary does not report tabular date numerals")
+	_check_regime_panel(
+		stage,
+		water_viewport,
+		regime_panel,
+		regime_heading,
+		errors,
+	)
 	if (
 		water_viewport != null
 		and title_layer != null
@@ -136,6 +206,11 @@ func _ready() -> void:
 		and bool(summary.get("stage_title_visible", false))
 		and Vector2(summary.get("stage_title_position", Vector2.ZERO))
 			== EXPECTED_TITLE_POSITION
+		and String(summary.get("stage_title_position_anchor", "")) == "CENTERLINE"
+		and is_equal_approx(
+			float(summary.get("stage_title_rotation_degrees", 0.0)),
+			-90.0
+		)
 		and Color(summary.get("stage_title_color", Color.TRANSPARENT)).is_equal_approx(
 			EXPECTED_TITLE_COLOR
 		)
@@ -308,8 +383,8 @@ func _ready() -> void:
 		if leaf_field.get_node_or_null("GPULeafTrailSegments") != null:
 			errors.append("leaf field still contains the removed trail segment pool")
 
-	# Digit keys control only the water rate. They must not rebuild, retune, or
-	# release either ecology pool.
+	# 1-7 toggle the shared regimes; 0/8/9 retain the water-rate test shortcuts.
+	# Neither input path may rebuild, retune, or release either ecology pool.
 	var salmon_before_digits: Dictionary = summary.get("salmon_summary", {}).duplicate(true)
 	var leaves_before_digits: Dictionary = summary.get("leaf_summary", {}).duplicate(true)
 	var zero_key := InputEventKey.new()
@@ -326,6 +401,23 @@ func _ready() -> void:
 	var nine_summary: Dictionary = stage.call(&"runtime_summary")
 	if not is_equal_approx(float(nine_summary.get("flow_rate", -1.0)), 1.0):
 		errors.append("9 key did not set the water flow rate to one")
+	var flow_before_regime_toggle := float(nine_summary.get("flow_rate", -1.0))
+	var one_key := InputEventKey.new()
+	one_key.pressed = true
+	one_key.keycode = KEY_1
+	stage.call(&"_unhandled_input", one_key)
+	var one_summary: Dictionary = stage.call(&"runtime_summary")
+	if Array(one_summary.get("active_regime_names", [])) != ["Kinship"]:
+		errors.append("1 key did not toggle Kinship on")
+	if not is_equal_approx(
+		float(one_summary.get("flow_rate", -1.0)),
+		flow_before_regime_toggle,
+	):
+		errors.append("regime key unexpectedly changed the water flow rate")
+	stage.call(&"_unhandled_input", one_key)
+	var one_off_summary: Dictionary = stage.call(&"runtime_summary")
+	if not Array(one_off_summary.get("active_regime_names", [])).is_empty():
+		errors.append("1 key did not toggle Kinship back off")
 	var salmon_after_digits: Dictionary = nine_summary.get("salmon_summary", {})
 	for key: String in [
 		"upstream_speed_pixels",
@@ -466,6 +558,39 @@ func _ready() -> void:
 		128.0, 1.0
 	):
 		errors.append("polygon geometry texture is not the 128x1 production layout")
+	if int(summary.get("shoreline_count", 0)) != 2:
+		errors.append("expected dedicated top and bottom shoreline obstacles")
+	if int(summary.get("shoreline_vertex_count", 0)) != 17:
+		errors.append("shoreline obstacles do not span all 17 model-grid columns")
+	var shoreline_ids := Array(summary.get("shoreline_ids", []))
+	if (
+		shoreline_ids.size() != 2
+		or not shoreline_ids.has("shoreline_obstacle_top")
+		or not shoreline_ids.has("shoreline_obstacle_bottom")
+	):
+		errors.append("shoreline obstacle IDs are not stable")
+	if not bool(summary.get("shoreline_data_texture_bound", false)):
+		errors.append("shoreline geometry texture is not bound")
+	if Vector2(summary.get("shoreline_data_texture_size", Vector2.ZERO)) != Vector2(
+		40.0, 1.0
+	):
+		errors.append("shoreline geometry texture is not the dedicated 40x1 layout")
+	if int(summary.get("shoreline_overlay_count", 0)) != 2:
+		errors.append("debug overlay did not receive both shoreline banks")
+	if not bool(summary.get("shoreline_preserves_interaction_capacity", false)):
+		errors.append("shorelines unexpectedly consume addressable polygon capacity")
+	for shoreline_count: Variant in Array(
+		summary.get("shoreline_count_uniforms", [])
+	):
+		if int(shoreline_count) != 2:
+			errors.append("shoreline banks did not reach all seven head shaders")
+			break
+	for shoreline_bound: Variant in Array(
+		summary.get("shoreline_texture_bound_uniforms", [])
+	):
+		if not bool(shoreline_bound):
+			errors.append("a head shader is missing the shoreline texture")
+			break
 	if int(summary.get("source_polygon_count", 0)) != 1:
 		errors.append("expected one default water source polygon")
 	if int(summary.get("source_overlay_count", 0)) != 1:
@@ -1137,13 +1262,143 @@ func _ready() -> void:
 			+ "slots=300 active=~150 render_paced=true max_fps=30 interpolation=true "
 				+ "immutable_segments=22500 palette_layers=7 fixed_z=true "
 				+ "identity=true gate=true pause=true "
-				+ "debug=true title=true controller=true polygons=true salmon=true leaves=true"
+				+ "debug=true title=true regimes=true controller=true "
+				+ "polygons=true salmon=true leaves=true"
 		)
 		get_tree().quit(0)
 		return
 	for error in errors:
 		push_error("GPU_STAGE_SMOKE: %s" % error)
 	get_tree().quit(1)
+
+
+func _check_regime_panel(
+	stage: Node,
+	water_viewport: SubViewport,
+	regime_panel: Node2D,
+	regime_heading: Label,
+	errors: PackedStringArray
+) -> void:
+	var summary: Dictionary = stage.call(&"runtime_summary")
+	var shoreline_geometry := _shoreline_geometry_from_summary(summary)
+	if Vector2(summary.get(
+		"shoreline_inlet_y_range_pixels",
+		Vector2.ZERO,
+	)) != Vector2(28.0, 1052.0):
+		errors.append("inactive shoreline unexpectedly narrowed the water inlet")
+	if not bool(summary.get("regime_state_shared", false)):
+		errors.append("stage is not bound to the persistent ModelRegimes autoload")
+	if Array(summary.get("regime_names", [])) != EXPECTED_REGIME_NAMES:
+		errors.append("regime names are not in the required historical order")
+	if regime_panel == null:
+		errors.append("active-regime panel is missing")
+		return
+	if regime_panel.position != EXPECTED_REGIME_PANEL_POSITION:
+		errors.append("active-regime panel is not anchored to the lower centerlines")
+	if not is_equal_approx(regime_panel.rotation_degrees, -90.0):
+		errors.append("active-regime panel is not rotated -90 degrees")
+	if not regime_panel.visible:
+		errors.append("explicitly enabled active-regime panel is hidden")
+	if regime_heading == null:
+		errors.append("active-regime heading is missing")
+	else:
+		if regime_heading.text != "Regime":
+			errors.append("active-regime heading text is incorrect")
+		if regime_heading.get_theme_font_size(&"font_size") != 48:
+			errors.append("active-regime heading is not 48 px")
+		if not regime_heading.get_theme_color(&"font_color").is_equal_approx(
+			EXPECTED_TITLE_COLOR
+		):
+			errors.append("active-regime heading is not full-alpha #4AB0E1")
+	if water_viewport != null and water_viewport.is_ancestor_of(regime_panel):
+		errors.append("active-regime panel is inside the water occupancy texture")
+	for index in range(EXPECTED_REGIME_NAMES.size()):
+		var label := stage.get_node_or_null(
+			"StageTitleLayer/ActiveRegimes/Regime%d" % (index + 1)
+		) as Label
+		if label == null:
+			errors.append("active-regime label %d is missing" % (index + 1))
+			continue
+		if label.text != EXPECTED_REGIME_NAMES[index]:
+			errors.append("active-regime label order is incorrect")
+		if label.get_theme_font_size(&"font_size") != EXPECTED_TITLE_FONT_SIZE:
+			errors.append("regime name font does not match the title/date")
+		var initial_color := label.get_theme_color(&"font_color")
+		if not is_equal_approx(initial_color.a, 0.25):
+			errors.append("inactive regime is not rendered at 25% alpha")
+	if not bool(stage.call(
+		&"set_runtime_parameter",
+		&"regimes.active_names",
+		["Agriculture", "Tech"],
+	)):
+		errors.append("absolute active-regime controller path was rejected")
+	var active_summary: Dictionary = stage.call(&"runtime_summary")
+	if Array(active_summary.get("active_regime_names", [])) != ["Agriculture", "Tech"]:
+		errors.append("absolute active-regime set did not reach shared state")
+	if not is_equal_approx(
+		float(active_summary.get("shoreline_randomness", -1.0)),
+		0.15,
+	):
+		errors.append("Agriculture + Tech shoreline weights were not normalized to 0.15")
+	if _shoreline_geometry_from_summary(active_summary) != shoreline_geometry:
+		errors.append("regime activation regenerated the fixed shoreline geometry")
+	var active_inlet_range := Vector2(active_summary.get(
+		"shoreline_inlet_y_range_pixels",
+		Vector2.ZERO,
+	))
+	if (
+		active_inlet_range.x <= 28.0
+		or active_inlet_range.y >= 1052.0
+		or active_inlet_range.x >= active_inlet_range.y
+	):
+		errors.append("active shoreline did not constrain inlet lanes to open water")
+	for inlet_uniform: Variant in Array(active_summary.get(
+		"shoreline_inlet_y_range_uniforms",
+		[],
+	)):
+		if not Vector2(inlet_uniform).is_equal_approx(active_inlet_range):
+			errors.append("shoreline inlet range did not reach every water head shader")
+			break
+	for index in range(EXPECTED_REGIME_NAMES.size()):
+		var label := stage.get_node_or_null(
+			"StageTitleLayer/ActiveRegimes/Regime%d" % (index + 1)
+		) as Label
+		if label == null:
+			continue
+		var expected_alpha := 1.0 if index in [1, 5] else 0.25
+		if not is_equal_approx(
+			label.get_theme_color(&"font_color").a,
+			expected_alpha,
+		):
+			errors.append("active/inactive regime alpha did not refresh")
+	stage.call(&"set_active_regime_names", [])
+	var cleared_summary: Dictionary = stage.call(&"runtime_summary")
+	if not is_zero_approx(float(cleared_summary.get("shoreline_randomness", -1.0))):
+		errors.append("clearing regimes did not disable shoreline force")
+	if _shoreline_geometry_from_summary(cleared_summary) != shoreline_geometry:
+		errors.append("clearing regimes regenerated the fixed shoreline geometry")
+	if Vector2(cleared_summary.get(
+		"shoreline_inlet_y_range_pixels",
+		Vector2.ZERO,
+	)) != Vector2(28.0, 1052.0):
+		errors.append("clearing shoreline force did not restore the full inlet range")
+
+
+func _shoreline_geometry_from_summary(summary: Dictionary) -> Array:
+	var geometry: Array = []
+	for definition_variant: Variant in Array(
+		summary.get("shoreline_obstacles", [])
+	):
+		if not definition_variant is Dictionary:
+			continue
+		var definition: Dictionary = definition_variant
+		var vertices_variant: Variant = definition.get(
+			"vertices_world", PackedVector2Array()
+		)
+		if vertices_variant is PackedVector2Array:
+			var vertices: PackedVector2Array = vertices_variant
+			geometry.append(vertices.duplicate())
+	return geometry
 
 
 func _check_stage_title_runtime_independence(

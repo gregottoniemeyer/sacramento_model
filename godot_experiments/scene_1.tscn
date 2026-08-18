@@ -40,5 +40,7 @@ script = ExtResource("1_stage")
 model_id = &"mount_shasta_flow"
 screen_id = &"mount_shasta"
 stage_title = "Mount Shasta"
+model_start_day_index = 181
+watershed_data_path = "res://flow/data/water_pipeline/shasta_720.txt"
 interaction_polygons = Array[ExtResource("3_knagl")]([SubResource("Resource_knagl"), SubResource("Resource_kl852")])
 source_polygons = Array[ExtResource("4_kl852")]([SubResource("Resource_4nmru")])

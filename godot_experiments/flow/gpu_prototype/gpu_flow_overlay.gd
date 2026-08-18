@@ -11,6 +11,7 @@ var reservoir_center: Vector2 = RESERVOIR_CENTER
 var reservoir_radius: float = RESERVOIR_RADIUS
 var show_status_label: bool = true
 var interaction_polygons: Array[Dictionary] = []
+var shoreline_obstacles: Array[Dictionary] = []
 var source_polygons: Array[Dictionary] = []
 
 
@@ -35,6 +36,11 @@ func set_interaction_polygons(definitions: Array[Dictionary]) -> void:
 	queue_redraw()
 
 
+func set_shoreline_obstacles(definitions: Array[Dictionary]) -> void:
+	shoreline_obstacles = definitions.duplicate(true)
+	queue_redraw()
+
+
 func set_source_polygons(definitions: Array[Dictionary]) -> void:
 	source_polygons = definitions.duplicate(true)
 	queue_redraw()
@@ -44,6 +50,10 @@ func get_interaction_polygon_count() -> int:
 	return interaction_polygons.size()
 
 
+func get_shoreline_obstacle_count() -> int:
+	return shoreline_obstacles.size()
+
+
 func get_source_polygon_count() -> int:
 	return source_polygons.size()
 
@@ -51,6 +61,7 @@ func get_source_polygon_count() -> int:
 func _draw() -> void:
 	_draw_reservoir()
 	_draw_interaction_polygons()
+	_draw_shoreline_obstacles()
 	_draw_source_polygons()
 	draw_rect(Rect2(Vector2.ZERO, STAGE_SIZE), Color("1f3642"), false, 2.0)
 	if not show_status_label:
@@ -86,6 +97,25 @@ func _draw_interaction_polygons() -> void:
 		if not bool(definition.get("enabled", true)):
 			color.a *= 0.35
 		draw_polyline(closed_vertices, color, 4.0, true)
+
+
+func _draw_shoreline_obstacles() -> void:
+	var outline_color := Color("d4af37")
+	for definition: Dictionary in shoreline_obstacles:
+		var vertices_variant: Variant = definition.get(
+			"vertices", PackedVector2Array()
+		)
+		if not vertices_variant is PackedVector2Array:
+			continue
+		var vertices: PackedVector2Array = vertices_variant
+		if vertices.size() < 2:
+			continue
+		var color := outline_color
+		var weight := clampf(float(definition.get("weight", 0.0)), 0.0, 1.0)
+		color.a *= 0.35 + 0.65 * weight
+		# Only the water-facing edge is visible. The offscreen land closure is
+		# deliberately absent so debug drawing matches the segments used by physics.
+		draw_polyline(vertices, color, 4.0, true)
 
 
 func _draw_source_polygons() -> void:

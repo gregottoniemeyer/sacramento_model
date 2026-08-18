@@ -11,5 +11,6 @@ stage_index = 6
 model_id = &"delta_flow"
 screen_id = &"delta"
 stage_title = "Sacramento-San Joaquin Delta"
+regime_panel_visible = true
 model_start_day_index = 181
 watershed_data_path = "res://flow/data/water_pipeline/delta_720.txt"

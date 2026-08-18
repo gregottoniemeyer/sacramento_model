@@ -16,6 +16,12 @@ signal gate_changed(
 signal pause_changed(screen_id: StringName, paused: bool)
 signal debug_visibility_changed(screen_id: StringName, visible: bool)
 signal stage_title_changed(screen_id: StringName, title: String, visible: bool)
+signal regimes_changed(
+	screen_id: StringName,
+	active_names: Array,
+	active_indices: Array,
+	revision: int
+)
 signal model_date_changed(
 	screen_id: StringName,
 	date_mm_dd: String,
@@ -113,11 +119,37 @@ const INTERACTION_TEXTURE_WIDTH := (
 	MAX_INTERACTION_POLYGONS * INTERACTION_TEXELS_PER_POLYGON
 )
 const MAX_SOURCE_POLYGONS := 8
-const STAGE_TITLE_POSITION := Vector2(40.0, 40.0)
+const SHORELINE_OBSTACLE_COUNT := 2
+const SHORELINE_EDGE_SPAN_COUNT := 16
+const SHORELINE_EDGE_VERTEX_COUNT := SHORELINE_EDGE_SPAN_COUNT + 1
+const SHORELINE_TEXELS_PER_OBSTACLE := 20
+const SHORELINE_TEXTURE_WIDTH := (
+	SHORELINE_OBSTACLE_COUNT * SHORELINE_TEXELS_PER_OBSTACLE
+)
+const SHORELINE_TOP_ID := &"shoreline_obstacle_top"
+const SHORELINE_BOTTOM_ID := &"shoreline_obstacle_bottom"
+const SHORELINE_MAX_INTRUSION_WORLD := 2.60
+const SHORELINE_MIN_CHANNEL_HEIGHT_WORLD := 5.25
+const SHORELINE_INFLUENCE_WORLD := 0.75
+const SHORELINE_INLET_BASE_MARGIN_PIXELS := 28.0
+const SHORELINE_CLOSURE_MARGIN_WORLD := 2.0
+const TYPE_ROTATION_RADIANS := -PI * 0.5
+const TYPE_ROTATION_DEGREES := -90.0
+const STAGE_TITLE_POSITION := Vector2(60.0, 540.0)
 const STAGE_TITLE_COLOR := Color("4ab0e1")
-const STAGE_TITLE_FONT_SIZE := 40
-const MODEL_DATE_POSITION := Vector2(40.0, 980.0)
-const MODEL_DATE_LABEL_SIZE := Vector2(300.0, 72.0)
+const STAGE_TITLE_FONT_SIZE := 60
+const MODEL_DATE_FONT_SIZE := 48
+const MODEL_DATE_OPENTYPE_FEATURE := "tnum"
+const MODEL_DATE_POSITION := Vector2(1860.0, 540.0)
+const REGIME_PANEL_POSITION := Vector2(1324.0, 1050.0)
+const REGIME_HEADING_TEXT := "Regime"
+const REGIME_HEADING_FONT_SIZE := 48
+const REGIME_NAME_FONT_SIZE := STAGE_TITLE_FONT_SIZE
+const REGIME_HEADING_LOCAL_Y := 6.0
+const REGIME_NAME_START_Y := 60.0
+const REGIME_NAME_ROW_HEIGHT := 72.0
+const REGIME_ACTIVE_ALPHA := 1.0
+const REGIME_INACTIVE_ALPHA := 0.25
 const MODEL_CALENDAR_DAY_COUNT := 365
 const MODEL_MINUTES_PER_DAY := 1440
 const MODEL_YEAR_MINUTE_COUNT := MODEL_CALENDAR_DAY_COUNT * MODEL_MINUTES_PER_DAY
@@ -130,7 +162,7 @@ const DEFAULT_GRID_COLOR := Color(
 	74.0 / 255.0,
 	176.0 / 255.0,
 	225.0 / 255.0,
-	0.75
+	0.25
 )
 
 @export_group("Identity")
@@ -149,6 +181,10 @@ const DEFAULT_GRID_COLOR := Color(
 	set(value):
 		stage_title_visible = value
 		_apply_stage_title()
+@export var regime_panel_visible: bool = false:
+	set(value):
+		regime_panel_visible = value
+		_apply_regime_panel()
 
 @export_group("Presentation")
 @export var stage_grid_visible: bool = true:
@@ -309,11 +345,21 @@ var _background_grid: Node2D
 var _stage_title_layer: Node2D
 var _stage_title_label: Label
 var _model_date_label: Label
+var _model_date_font: FontVariation
+var _model_timeline: Node
+var _model_regimes: Node
+var _regime_panel: Node2D
+var _regime_heading_label: Label
+var _regime_name_labels: Array[Label] = []
+var _regime_snapshot: Dictionary = {}
 var _water_viewport: SubViewport
 var _water_canvas: Node2D
 var _salmon_school: GPUSalmon2D
 var _leaf_field: GPULeaf2D
 var _interaction_data_texture: ImageTexture
+var _shoreline_data_texture: ImageTexture
+var _shoreline_obstacles: Array[Dictionary] = []
+var _shoreline_randomness: float = 0.0
 var _source_texture_packer: GPUFlowSourceTexturePacker
 var _source_data_texture: ImageTexture
 var _source_geometry_batch_depth: int = 0
@@ -325,6 +371,7 @@ var _model_year_elapsed_seconds: float = 0.0
 var _model_day_index: int = 0
 var _model_minute_of_day: int = 0
 var _model_date_source: StringName = &"internal_clock"
+var _model_timeline_revision: int = 0
 var _watershed_raw_values := PackedFloat32Array()
 var _watershed_normalized_flow := PackedFloat32Array()
 var _watershed_scaled_flow := PackedFloat32Array()
@@ -338,6 +385,10 @@ var _watershed_interpolated_flow_rate: float = 0.0
 
 func _ready() -> void:
 	add_to_group(&"flow_models")
+	_bind_model_timeline()
+	_bind_model_regimes()
+	_build_shoreline_obstacles()
+	_apply_shoreline_randomness_from_regime_state(_regime_snapshot)
 	_install_default_interaction_polygons_if_needed()
 	_install_default_source_polygons_if_needed()
 	_source_texture_packer = SOURCE_TEXTURE_PACKER_SCRIPT.new(
@@ -346,6 +397,7 @@ func _ready() -> void:
 	)
 	_source_data_texture = _source_texture_packer.get_texture()
 	_load_watershed_data()
+	_sync_from_model_timeline(false)
 	_build_background()
 	_build_background_grid()
 	_build_water_render_surface()
@@ -359,16 +411,24 @@ func _ready() -> void:
 	_apply_identity()
 	_apply_runtime_parameters()
 	_apply_interaction_geometry()
+	_apply_shoreline_geometry()
 	_apply_source_geometry()
 	_apply_gate()
 	_apply_debug_visibility()
 	_apply_stage_title()
-	_reset_model_calendar()
-	set_paused(not auto_start)
+	if _model_timeline == null:
+		_reset_model_calendar()
+		_apply_local_paused(not auto_start)
+	else:
+		_sync_from_model_timeline(false)
 
 
 func _process(delta: float) -> void:
-	_advance_model_calendar(delta)
+	# ModelTimeline is the sole clock owner in the production project. Retain the
+	# local advance only as a fallback when this reusable scene is embedded in a
+	# project that has not installed the autoload.
+	if _model_timeline == null:
+		_advance_model_calendar(delta)
 	if _trail_recording_warmup_frames > 0:
 		_trail_recording_warmup_frames -= 1
 		if _trail_recording_warmup_frames == 0:
@@ -400,7 +460,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if key_event == null or not key_event.pressed or key_event.echo:
 		return
 	match key_event.keycode:
-		KEY_0, KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9:
+		KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7:
+			toggle_regime(int(key_event.keycode - KEY_1))
+		KEY_0, KEY_8, KEY_9:
 			set_flow_rate(float(key_event.keycode - KEY_0) / 9.0)
 		KEY_G:
 			toggle_gate()
@@ -411,7 +473,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		KEY_BRACKETRIGHT:
 			adjust_gate_width(0.10)
 		KEY_V:
-			set_debug_visible(not debug_visible)
+			_toggle_debug_visibility_for_all_stages()
 		KEY_S:
 			release_salmon()
 		KEY_L:
@@ -535,6 +597,13 @@ func toggle_gate(_reservoir_id: StringName = RESERVOIR_ID) -> void:
 
 
 func set_paused(value: bool) -> void:
+	if _model_timeline != null:
+		_model_timeline.call(&"set_paused", value)
+	_apply_local_paused(value)
+
+
+func _apply_local_paused(value: bool) -> void:
+	var pause_state_changed := _paused != value
 	_paused = value
 	for head_layer in _head_layers:
 		head_layer.speed_scale = 0.0 if _paused else 1.0
@@ -544,7 +613,7 @@ func set_paused(value: bool) -> void:
 		_salmon_school.set_paused(_paused)
 	if _leaf_field != null:
 		_leaf_field.set_paused(_paused)
-	if is_node_ready():
+	if pause_state_changed and is_node_ready():
 		pause_changed.emit(screen_id, _paused)
 
 
@@ -558,6 +627,17 @@ func set_debug_visible(value: bool) -> void:
 
 func toggle_debug_visibility() -> void:
 	debug_visible = not debug_visible
+
+
+func _toggle_debug_visibility_for_all_stages() -> void:
+	var next_visibility := not debug_visible
+	for model: Node in get_tree().get_nodes_in_group(&"flow_models"):
+		if (
+			is_instance_valid(model)
+			and not model.is_queued_for_deletion()
+			and model.has_method(&"set_debug_visible")
+		):
+			model.call(&"set_debug_visible", next_visibility)
 
 
 func apply_runtime_parameters() -> void:
@@ -605,12 +685,160 @@ func release_leaves(count_per_side: int = -1) -> int:
 	return _leaf_field.release_leaves(requested)
 
 
+func set_shoreline_randomness(value: float) -> void:
+	var next_value := clampf(value, 0.0, 1.0)
+	if not is_finite(next_value):
+		return
+	_shoreline_randomness = next_value
+	for shoreline_index in range(_shoreline_obstacles.size()):
+		var definition := _shoreline_obstacles[shoreline_index]
+		definition["weight"] = _shoreline_randomness
+		_shoreline_obstacles[shoreline_index] = definition
+	_apply_shoreline_geometry()
+
+
+func get_shoreline_randomness() -> float:
+	return _shoreline_randomness
+
+
+func toggle_regime(regime_index: int) -> bool:
+	if _model_regimes == null:
+		return false
+	return bool(_model_regimes.call(&"toggle_regime", regime_index))
+
+
+func set_regime_active(regime_index: int, active: bool) -> bool:
+	if _model_regimes == null:
+		return false
+	return bool(_model_regimes.call(
+		&"set_regime_active",
+		regime_index,
+		active,
+	))
+
+
+func set_active_regime_names(names: Array) -> bool:
+	if _model_regimes == null:
+		return false
+	return bool(_model_regimes.call(&"set_active_names", names))
+
+
+func get_regime_state() -> Dictionary:
+	if _model_regimes == null:
+		return _regime_snapshot.duplicate(true)
+	return Dictionary(_model_regimes.call(&"snapshot"))
+
+
+func _bind_model_regimes() -> void:
+	_model_regimes = get_node_or_null("/root/ModelRegimes")
+	if _model_regimes == null:
+		return
+	var regimes_callback := Callable(self, &"_on_model_regimes_changed")
+	if not _model_regimes.is_connected(&"regimes_changed", regimes_callback):
+		_model_regimes.connect(&"regimes_changed", regimes_callback)
+	_regime_snapshot = Dictionary(_model_regimes.call(&"snapshot"))
+
+
+func _on_model_regimes_changed(state: Dictionary) -> void:
+	_regime_snapshot = state.duplicate(true)
+	_apply_shoreline_randomness_from_regime_state(_regime_snapshot)
+	_apply_regime_panel()
+	if is_node_ready():
+		regimes_changed.emit(
+			screen_id,
+			Array(_regime_snapshot.get("active_names", [])).duplicate(),
+			Array(_regime_snapshot.get("active_indices", [])).duplicate(),
+			int(_regime_snapshot.get("revision", 0)),
+		)
+
+
+func _apply_shoreline_randomness_from_regime_state(state: Dictionary) -> void:
+	var features_variant: Variant = state.get("effective_features", {})
+	if not features_variant is Dictionary:
+		return
+	var features: Dictionary = features_variant
+	if not features.has("shoreline_randomness"):
+		return
+	var value: Variant = features["shoreline_randomness"]
+	if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
+		return
+	var numeric_value := float(value)
+	if not is_finite(numeric_value):
+		return
+	set_shoreline_randomness(numeric_value)
+
+
+func _bind_model_timeline() -> void:
+	_model_timeline = get_node_or_null("/root/ModelTimeline")
+	if _model_timeline == null:
+		return
+	var timeline_callback := Callable(self, &"_on_model_timeline_changed")
+	if not _model_timeline.is_connected(&"timeline_changed", timeline_callback):
+		_model_timeline.connect(&"timeline_changed", timeline_callback)
+	_model_timeline.call(
+		&"configure_if_needed",
+		model_year_duration_seconds,
+		model_start_day_index,
+		model_calendar_auto_advance,
+		not auto_start,
+	)
+	_sync_from_model_timeline(false)
+
+
+func _on_model_timeline_changed(_state: Dictionary) -> void:
+	_sync_from_model_timeline(true)
+
+
+func _sync_from_model_timeline(emit_date_signal: bool = true) -> void:
+	if _model_timeline == null:
+		return
+	var snapshot: Dictionary = _model_timeline.call(&"snapshot")
+	if snapshot.is_empty():
+		return
+	var previous_day_index := _model_day_index
+	_model_year_elapsed_seconds = float(snapshot.get(
+		"elapsed_seconds", _model_year_elapsed_seconds
+	))
+	_model_day_index = int(snapshot.get("day_index", _model_day_index))
+	_model_minute_of_day = int(snapshot.get(
+		"minute_of_day", _model_minute_of_day
+	))
+	model_year_duration_seconds = float(snapshot.get(
+		"year_duration_seconds", model_year_duration_seconds
+	))
+	model_start_day_index = int(snapshot.get(
+		"start_day_index", model_start_day_index
+	))
+	model_calendar_auto_advance = bool(snapshot.get(
+		"auto_advance", model_calendar_auto_advance
+	))
+	_model_date_source = StringName(String(snapshot.get(
+		"source", String(_model_date_source)
+	)))
+	_model_timeline_revision = int(snapshot.get(
+		"revision", _model_timeline_revision
+	))
+	_apply_local_paused(bool(snapshot.get("paused", _paused)))
+	_apply_model_date(
+		emit_date_signal and previous_day_index != _model_day_index
+	)
+	_update_watershed_timeline()
+
+
 func set_model_date_mm_dd(model_date_time: String) -> bool:
 	## Accepts MM/DD or MM/DD-HH:MM. A valid external value becomes
 	## authoritative until the internal data clock is enabled again.
 	var parsed_time := _parse_model_date_time(model_date_time)
 	if parsed_time.x < 0:
 		return false
+	if _model_timeline != null:
+		_model_timeline.call(
+			&"set_date",
+			parsed_time.x,
+			parsed_time.y,
+			&"external_mm_dd",
+		)
+		return true
 	model_calendar_auto_advance = false
 	_model_date_source = &"external_mm_dd"
 	_model_day_index = parsed_time.x
@@ -626,6 +854,9 @@ func set_model_date_time(model_date_time: String) -> bool:
 
 
 func set_model_calendar_auto_advance(value: bool) -> void:
+	if _model_timeline != null:
+		_model_timeline.call(&"set_auto_advance", value)
+		return
 	model_calendar_auto_advance = value
 	if model_calendar_auto_advance:
 		_model_date_source = &"internal_clock"
@@ -679,6 +910,9 @@ func set_runtime_parameter(
 		"stage.title_visible", "stage_title_visible":
 			stage_title_visible = bool(value)
 			return true
+		"stage.regime_panel_visible", "regime_panel_visible":
+			regime_panel_visible = bool(value)
+			return true
 		"stage.grid_visible", "stage_grid_visible":
 			stage_grid_visible = bool(value)
 			return true
@@ -700,26 +934,45 @@ func set_runtime_parameter(
 			var parsed_day_index := _strict_nonnegative_int(value)
 			if parsed_day_index < 0 or parsed_day_index >= MODEL_CALENDAR_DAY_COUNT:
 				return false
-			model_calendar_auto_advance = false
-			_model_date_source = &"external_day_index"
-			_set_model_day_index(parsed_day_index)
-			_align_model_elapsed_to_current_day()
-			_update_watershed_timeline()
+			if _model_timeline != null:
+				_model_timeline.call(
+					&"set_date",
+					parsed_day_index,
+					0,
+					&"external_day_index",
+				)
+			else:
+				model_calendar_auto_advance = false
+				_model_date_source = &"external_day_index"
+				_set_model_day_index(parsed_day_index)
+				_align_model_elapsed_to_current_day()
+				_update_watershed_timeline()
 			return true
 		"calendar.auto_advance", "model_calendar_auto_advance":
 			set_model_calendar_auto_advance(bool(value))
 			return true
 		"calendar.year_duration_seconds", "model_year_duration_seconds":
-			model_year_duration_seconds = clampf(float(value), 1.0, 86400.0)
-			_align_model_elapsed_to_current_day()
-			_update_watershed_timeline()
+			var parsed_year_duration := clampf(float(value), 1.0, 86400.0)
+			if _model_timeline != null:
+				_model_timeline.call(
+					&"set_year_duration", parsed_year_duration
+				)
+			else:
+				model_year_duration_seconds = parsed_year_duration
+				_align_model_elapsed_to_current_day()
+				_update_watershed_timeline()
 			return true
 		"calendar.start_day_index", "model_start_day_index":
 			var parsed_start_day := _strict_nonnegative_int(value)
 			if parsed_start_day < 0 or parsed_start_day >= MODEL_CALENDAR_DAY_COUNT:
 				return false
-			model_start_day_index = parsed_start_day
-			_reset_model_calendar()
+			if _model_timeline != null:
+				_model_timeline.call(
+					&"set_start_day_index", parsed_start_day, true
+				)
+			else:
+				model_start_day_index = parsed_start_day
+				_reset_model_calendar()
 			return true
 		"watershed.data_path", "watershed_data_path":
 			watershed_data_path = String(value)
@@ -736,6 +989,36 @@ func set_runtime_parameter(
 			watershed_interpolate_flow_rate = bool(value)
 			_update_watershed_timeline()
 			return true
+		"shoreline.randomness", "shorelines.randomness", "shoreline_randomness":
+			if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
+				return false
+			var shoreline_value := float(value)
+			if not is_finite(shoreline_value):
+				return false
+			set_shoreline_randomness(shoreline_value)
+			return true
+		"regimes.active_names", "active_regimes":
+			if not value is Array:
+				return false
+			return set_active_regime_names(value)
+		"regimes.active_indices":
+			if _model_regimes == null or not value is Array:
+				return false
+			return bool(_model_regimes.call(&"set_active_indices", value))
+		"regimes.kinship":
+			return set_regime_active(0, bool(value))
+		"regimes.agriculture", "regimes.ranch":
+			return set_regime_active(1, bool(value))
+		"regimes.gold_rush":
+			return set_regime_active(2, bool(value))
+		"regimes.water_projects":
+			return set_regime_active(3, bool(value))
+		"regimes.hydropower":
+			return set_regime_active(4, bool(value))
+		"regimes.tech":
+			return set_regime_active(5, bool(value))
+		"regimes.watershed":
+			return set_regime_active(6, bool(value))
 	if _is_source_parameter_path(path_string):
 		if not apply_immediately:
 			_source_geometry_batch_depth += 1
@@ -975,6 +1258,8 @@ func _is_direct_apply_parameter_path(path: String) -> bool:
 		"stage_title",
 		"stage.title_visible",
 		"stage_title_visible",
+		"stage.regime_panel_visible",
+		"regime_panel_visible",
 		"stage.grid_visible",
 		"stage_grid_visible",
 		"stage.grid_spacing_pixels",
@@ -1002,6 +1287,20 @@ func _is_direct_apply_parameter_path(path: String) -> bool:
 		"watershed_data_drives_flow_rate",
 		"watershed.interpolate_flow_rate",
 		"watershed_interpolate_flow_rate",
+		"shoreline.randomness",
+		"shorelines.randomness",
+		"shoreline_randomness",
+		"regimes.active_names",
+		"active_regimes",
+		"regimes.active_indices",
+		"regimes.kinship",
+		"regimes.agriculture",
+		"regimes.ranch",
+		"regimes.gold_rush",
+		"regimes.water_projects",
+		"regimes.hydropower",
+		"regimes.tech",
+		"regimes.watershed",
 	]
 
 
@@ -1034,6 +1333,9 @@ func runtime_summary() -> Dictionary:
 	var interaction_admission_enabled_uniforms: Array[bool] = []
 	var interaction_count_uniforms: Array[int] = []
 	var interaction_texture_bound_uniforms: Array[bool] = []
+	var shoreline_count_uniforms: Array[int] = []
+	var shoreline_texture_bound_uniforms: Array[bool] = []
+	var shoreline_inlet_y_range_uniforms: Array[Vector2] = []
 	var source_count_uniforms: Array[int] = []
 	var source_texture_bound_uniforms: Array[bool] = []
 	var trail_recording_enabled_uniforms: Array[bool] = []
@@ -1102,6 +1404,15 @@ func runtime_summary() -> Dictionary:
 		interaction_texture_bound_uniforms.append(
 			process_material.get_shader_parameter(&"interaction_data_texture") != null
 		)
+		shoreline_count_uniforms.append(int(
+			process_material.get_shader_parameter(&"shoreline_count")
+		))
+		shoreline_texture_bound_uniforms.append(
+			process_material.get_shader_parameter(&"shoreline_data_texture") != null
+		)
+		shoreline_inlet_y_range_uniforms.append(Vector2(
+			process_material.get_shader_parameter(&"shoreline_inlet_y_range")
+		))
 		source_count_uniforms.append(int(
 			process_material.get_shader_parameter(&"source_count")
 		))
@@ -1144,6 +1455,11 @@ func runtime_summary() -> Dictionary:
 	)
 	var watershed_row := get_current_watershed_data_row()
 	var watershed_row_count := _watershed_normalized_flow.size()
+	var regime_state := get_regime_state()
+	var shoreline_definitions := _shoreline_runtime_definitions()
+	var shoreline_ids: Array[String] = []
+	for shoreline_definition: Dictionary in shoreline_definitions:
+		shoreline_ids.append(String(shoreline_definition["element_id"]))
 	return {
 		"stage_index": stage_index,
 		"model_id": String(model_id),
@@ -1152,10 +1468,53 @@ func runtime_summary() -> Dictionary:
 		"stage_title": stage_title,
 		"stage_title_visible": stage_title_visible,
 		"stage_title_position": STAGE_TITLE_POSITION,
+		"stage_title_position_anchor": "CENTERLINE",
+		"stage_title_rotation_degrees": TYPE_ROTATION_DEGREES,
 		"stage_title_color": STAGE_TITLE_COLOR,
 		"stage_title_font_size": STAGE_TITLE_FONT_SIZE,
 		"stage_title_font_resource": STAGE_TITLE_FONT.resource_path,
 		"stage_title_z_index": STAGE_TITLE_Z_INDEX,
+		"regime_state_shared": _model_regimes != null,
+		"regime_state_scope": String(regime_state.get("scope", "")),
+		"regime_names": Array(regime_state.get("regime_names", [])).duplicate(),
+		"regime_ids": Array(regime_state.get("regime_ids", [])).duplicate(),
+		"regime_active_states": Array(
+			regime_state.get("active_states", [])
+		).duplicate(),
+		"active_regime_indices": Array(
+			regime_state.get("active_indices", [])
+		).duplicate(),
+		"active_regime_names": Array(
+			regime_state.get("active_names", [])
+		).duplicate(),
+		"active_regime_count": int(regime_state.get("active_count", 0)),
+		"regime_revision": int(regime_state.get("revision", 0)),
+		"regime_profile_path": String(regime_state.get("profile_path", "")),
+		"regime_profiles_loaded": bool(
+			regime_state.get("profiles_loaded", false)
+		),
+		"regime_profile_count": int(regime_state.get("profile_count", 0)),
+		"regime_profile_reload_revision": int(
+			regime_state.get("profile_reload_revision", 0)
+		),
+		"regime_profile_diagnostics": Array(
+			regime_state.get("profile_diagnostics", [])
+		).duplicate(true),
+		"regime_effective_features": Dictionary(
+			regime_state.get("effective_features", {})
+		).duplicate(true),
+		"regime_panel_visible": (
+			_regime_panel.visible if _regime_panel != null else false
+		),
+		"regime_panel_position": REGIME_PANEL_POSITION,
+		"regime_panel_rotation_degrees": TYPE_ROTATION_DEGREES,
+		"regime_heading_text": REGIME_HEADING_TEXT,
+		"regime_heading_font_size": REGIME_HEADING_FONT_SIZE,
+		"regime_name_font_size": REGIME_NAME_FONT_SIZE,
+		"regime_name_row_height": REGIME_NAME_ROW_HEIGHT,
+		"regime_active_alpha": REGIME_ACTIVE_ALPHA,
+		"regime_inactive_alpha": REGIME_INACTIVE_ALPHA,
+		"regime_panel_z_index": STAGE_TITLE_Z_INDEX,
 		"background_z_index": BACKGROUND_Z_INDEX,
 		"stage_grid_visible": stage_grid_visible,
 		"stage_grid_spacing_pixels": stage_grid_spacing_pixels,
@@ -1174,9 +1533,13 @@ func runtime_summary() -> Dictionary:
 		),
 		"stage_date_format": "MM/DD-HH:MM",
 		"stage_date_position": MODEL_DATE_POSITION,
+		"stage_date_position_anchor": "CENTERLINE",
+		"stage_date_rotation_degrees": TYPE_ROTATION_DEGREES,
 		"stage_date_color": STAGE_TITLE_COLOR,
-		"stage_date_font_size": STAGE_TITLE_FONT_SIZE,
+		"stage_date_font_size": MODEL_DATE_FONT_SIZE,
 		"stage_date_font_resource": STAGE_TITLE_FONT.resource_path,
+		"stage_date_tabular_numerals": true,
+		"stage_date_opentype_feature": MODEL_DATE_OPENTYPE_FEATURE,
 		"stage_date_z_index": STAGE_TITLE_Z_INDEX,
 		"model_day_index": _model_day_index,
 		"model_day_of_year": _model_day_index + 1,
@@ -1193,6 +1556,9 @@ func runtime_summary() -> Dictionary:
 		"model_calendar_auto_advance": model_calendar_auto_advance,
 		"model_calendar_source": String(_model_date_source),
 		"model_start_day_index": model_start_day_index,
+		"model_timeline_shared": _model_timeline != null,
+		"model_timeline_scope": "GODOT_PROCESS",
+		"model_timeline_revision": _model_timeline_revision,
 		"watershed_data_path": watershed_data_path,
 		"watershed_data_loaded": watershed_row_count > 0,
 		"watershed_data_error": _watershed_data_error,
@@ -1236,6 +1602,7 @@ func runtime_summary() -> Dictionary:
 		"water_texture_excludes_debug_overlay": true,
 		"water_texture_excludes_stage_title": true,
 		"water_texture_excludes_stage_date": true,
+		"water_texture_excludes_regime_panel": true,
 		"amount": particle_slots,
 		"amount_ratio": particles.amount_ratio,
 		"flow_rate": flow_rate,
@@ -1272,12 +1639,27 @@ func runtime_summary() -> Dictionary:
 		),
 		"interaction_count_uniforms": interaction_count_uniforms,
 		"interaction_texture_bound_uniforms": interaction_texture_bound_uniforms,
+		"shoreline_count_uniforms": shoreline_count_uniforms,
+		"shoreline_texture_bound_uniforms": shoreline_texture_bound_uniforms,
+		"shoreline_inlet_y_range_uniforms": shoreline_inlet_y_range_uniforms,
 		"source_count_uniforms": source_count_uniforms,
 		"source_texture_bound_uniforms": source_texture_bound_uniforms,
 		"interaction_polygon_count": interaction_definitions.size(),
 		"polygon_object_count": interaction_definitions.size(),
 		"interaction_polygons": interaction_definitions,
 		"polygon_objects": interaction_definitions,
+		"shoreline_randomness": _shoreline_randomness,
+		"shoreline_count": shoreline_definitions.size(),
+		"shoreline_vertex_count": SHORELINE_EDGE_VERTEX_COUNT,
+		"shoreline_ids": shoreline_ids,
+		"shoreline_obstacles": shoreline_definitions,
+		"shoreline_inlet_y_range_pixels": _shoreline_inlet_y_range_pixels(),
+		"shoreline_preserves_interaction_capacity": true,
+		"shoreline_overlay_count": (
+			int(_overlay.call(&"get_shoreline_obstacle_count"))
+			if _overlay != null
+			else 0
+		),
 		"source_polygon_count": source_definitions.size(),
 		"source_polygons": source_definitions,
 		"source_texture_packer": (
@@ -1459,6 +1841,17 @@ func runtime_summary() -> Dictionary:
 		"interaction_data_texture_size": (
 			_interaction_data_texture.get_size()
 			if _interaction_data_texture != null
+			else Vector2.ZERO
+		),
+		"shoreline_count_uniform": _process_material.get_shader_parameter(
+			&"shoreline_count"
+		),
+		"shoreline_data_texture_bound": (
+			_process_material.get_shader_parameter(&"shoreline_data_texture") != null
+		),
+		"shoreline_data_texture_size": (
+			_shoreline_data_texture.get_size()
+			if _shoreline_data_texture != null
 			else Vector2.ZERO
 		),
 		"source_count_uniform": _process_material.get_shader_parameter(
@@ -2383,6 +2776,246 @@ func _apply_gate() -> void:
 		gate_changed.emit(screen_id, RESERVOIR_ID, gate_open, gate_width)
 
 
+func _build_shoreline_obstacles() -> void:
+	## Generate one immutable, stage-specific water-edge chain for each bank.
+	## Runtime regime changes alter only the packed weight, never these vertices.
+	var bottom_intrusions := _shoreline_intrusion_samples("bottom")
+	var top_intrusions := _shoreline_intrusion_samples("top")
+	var maximum_combined_intrusion := (
+		WORLD_SIZE.y - SHORELINE_MIN_CHANNEL_HEIGHT_WORLD
+	)
+	for sample_index in range(SHORELINE_EDGE_VERTEX_COUNT):
+		var combined := (
+			float(bottom_intrusions[sample_index])
+			+ float(top_intrusions[sample_index])
+		)
+		if combined <= maximum_combined_intrusion or combined <= 0.000001:
+			continue
+		var safe_scale := maximum_combined_intrusion / combined
+		bottom_intrusions[sample_index] *= safe_scale
+		top_intrusions[sample_index] *= safe_scale
+
+	var bottom_edge := PackedVector2Array()
+	var top_edge := PackedVector2Array()
+	for sample_index in range(SHORELINE_EDGE_VERTEX_COUNT):
+		var sample_x := float(sample_index)
+		bottom_edge.append(Vector2(
+			sample_x,
+			float(bottom_intrusions[sample_index])
+		))
+		top_edge.append(Vector2(
+			sample_x,
+			WORLD_SIZE.y - float(top_intrusions[sample_index])
+		))
+
+	var bottom_polygon := bottom_edge.duplicate()
+	bottom_polygon.append(Vector2(
+		WORLD_SIZE.x + 1.0,
+		-SHORELINE_CLOSURE_MARGIN_WORLD
+	))
+	bottom_polygon.append(Vector2(
+		-1.0,
+		-SHORELINE_CLOSURE_MARGIN_WORLD
+	))
+	var top_polygon := top_edge.duplicate()
+	top_polygon.append(Vector2(
+		WORLD_SIZE.x + 1.0,
+		WORLD_SIZE.y + SHORELINE_CLOSURE_MARGIN_WORLD
+	))
+	top_polygon.append(Vector2(
+		-1.0,
+		WORLD_SIZE.y + SHORELINE_CLOSURE_MARGIN_WORLD
+	))
+
+	_shoreline_obstacles = [
+		{
+			"element_id": String(SHORELINE_TOP_ID),
+			"side": "top",
+			"channel_y_sign_pixels": 1.0,
+			"weight": _shoreline_randomness,
+			"influence_world": SHORELINE_INFLUENCE_WORLD,
+			"vertices_world": top_edge,
+			"polygon_vertices_world": top_polygon,
+		},
+		{
+			"element_id": String(SHORELINE_BOTTOM_ID),
+			"side": "bottom",
+			"channel_y_sign_pixels": -1.0,
+			"weight": _shoreline_randomness,
+			"influence_world": SHORELINE_INFLUENCE_WORLD,
+			"vertices_world": bottom_edge,
+			"polygon_vertices_world": bottom_polygon,
+		},
+	]
+
+
+func _shoreline_intrusion_samples(side: String) -> PackedFloat32Array:
+	var samples := PackedFloat32Array()
+	samples.resize(SHORELINE_EDGE_VERTEX_COUNT)
+	for sample_index in range(SHORELINE_EDGE_VERTEX_COUNT):
+		var seed_id := StringName("%s:%d:shoreline:%s:%d" % [
+			String(screen_id),
+			stage_index,
+			side,
+			sample_index,
+		])
+		samples[sample_index] = _stable_interaction_seed(seed_id)
+	# One light low-pass pass creates connected bends without imposing the same
+	# envelope on every river. Endpoints use clamped neighbors, so the inlet and
+	# outlet are part of each stage's generated bank shape too.
+	var smoothed := samples.duplicate()
+	for sample_index in range(SHORELINE_EDGE_VERTEX_COUNT):
+		var previous_index := maxi(sample_index - 1, 0)
+		var following_index := mini(
+			sample_index + 1,
+			SHORELINE_EDGE_VERTEX_COUNT - 1
+		)
+		smoothed[sample_index] = (
+			float(samples[previous_index])
+			+ 2.0 * float(samples[sample_index])
+			+ float(samples[following_index])
+		) * 0.25 * SHORELINE_MAX_INTRUSION_WORLD
+	return smoothed
+
+
+func _shoreline_inlet_y_range_pixels() -> Vector2:
+	var full_range := Vector2(
+		SHORELINE_INLET_BASE_MARGIN_PIXELS,
+		STAGE_SIZE.y - SHORELINE_INLET_BASE_MARGIN_PIXELS
+	)
+	if _shoreline_randomness <= 0.000001:
+		return full_range
+	var top_channel_y := 0.0
+	var bottom_channel_y := STAGE_SIZE.y
+	var found_top := false
+	var found_bottom := false
+	for definition: Dictionary in _shoreline_obstacles:
+		var vertices: PackedVector2Array = definition.get(
+			"vertices_world",
+			PackedVector2Array()
+		)
+		if vertices.is_empty():
+			continue
+		var inlet_y_pixels := (
+			WORLD_SIZE.y - vertices[0].y
+		) * PIXELS_PER_WORLD_UNIT
+		match String(definition.get("side", "")):
+			"top":
+				top_channel_y = inlet_y_pixels
+				found_top = true
+			"bottom":
+				bottom_channel_y = inlet_y_pixels
+				found_bottom = true
+	if not found_top or not found_bottom:
+		return full_range
+	var clearance := maxf(
+		SHORELINE_INLET_BASE_MARGIN_PIXELS,
+		SHORELINE_INFLUENCE_WORLD
+			* PIXELS_PER_WORLD_UNIT
+			+ maxf(line_width_min, line_width_max) * 0.5
+			+ 1.0
+	)
+	var inlet_min := top_channel_y + clearance
+	var inlet_max := bottom_channel_y - clearance
+	if inlet_max <= inlet_min:
+		var center_y := (top_channel_y + bottom_channel_y) * 0.5
+		return Vector2(center_y - 1.0, center_y + 1.0)
+	return Vector2(inlet_min, inlet_max)
+
+
+func _apply_shoreline_geometry() -> void:
+	var data_image := Image.create(
+		SHORELINE_TEXTURE_WIDTH,
+		1,
+		false,
+		Image.FORMAT_RGBAF
+	)
+	data_image.fill(Color(0.0, 0.0, 0.0, 0.0))
+	var packed_count := mini(
+		_shoreline_obstacles.size(),
+		SHORELINE_OBSTACLE_COUNT
+	)
+	var overlay_definitions: Array[Dictionary] = []
+	for shoreline_index in range(packed_count):
+		var definition := _shoreline_obstacles[shoreline_index]
+		var world_vertices: PackedVector2Array = definition["vertices_world"]
+		if world_vertices.size() != SHORELINE_EDGE_VERTEX_COUNT:
+			continue
+		var native_vertices := _polygon_native_vertices(world_vertices)
+		var bounds := _native_polygon_bounds(native_vertices)
+		var record_start := shoreline_index * SHORELINE_TEXELS_PER_OBSTACLE
+		data_image.set_pixel(
+			record_start,
+			0,
+			Color(
+				clampf(float(definition.get("weight", 0.0)), 0.0, 1.0),
+				float(definition["channel_y_sign_pixels"]),
+				float(definition["influence_world"]) * PIXELS_PER_WORLD_UNIT,
+				float(native_vertices.size())
+			)
+		)
+		data_image.set_pixel(
+			record_start + 1,
+			0,
+			Color(
+				bounds.position.x,
+				bounds.position.y,
+				bounds.end.x,
+				bounds.end.y
+			)
+		)
+		for vertex_index in range(native_vertices.size()):
+			var vertex := native_vertices[vertex_index]
+			data_image.set_pixel(
+				record_start + 2 + vertex_index,
+				0,
+				Color(vertex.x, vertex.y, 0.0, 0.0)
+			)
+		overlay_definitions.append({
+			"element_id": String(definition["element_id"]),
+			"side": String(definition["side"]),
+			"weight": float(definition.get("weight", 0.0)),
+			"vertices": native_vertices,
+		})
+	if _shoreline_data_texture == null:
+		_shoreline_data_texture = ImageTexture.create_from_image(data_image)
+	else:
+		_shoreline_data_texture.update(data_image)
+	var inlet_y_range := _shoreline_inlet_y_range_pixels()
+	for process_material in _process_material_layers:
+		process_material.set_shader_parameter(
+			&"shoreline_data_texture",
+			_shoreline_data_texture
+		)
+		process_material.set_shader_parameter(&"shoreline_count", packed_count)
+		process_material.set_shader_parameter(
+			&"shoreline_inlet_y_range",
+			inlet_y_range
+		)
+	if _overlay != null:
+		_overlay.call(&"set_shoreline_obstacles", overlay_definitions)
+
+
+func _shoreline_runtime_definitions() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for definition: Dictionary in _shoreline_obstacles:
+		var world_vertices: PackedVector2Array = definition["vertices_world"]
+		var polygon_vertices: PackedVector2Array = (
+			definition["polygon_vertices_world"]
+		)
+		result.append({
+			"element_id": String(definition["element_id"]),
+			"side": String(definition["side"]),
+			"weight": float(definition.get("weight", 0.0)),
+			"influence_world": float(definition["influence_world"]),
+			"vertices": world_vertices.duplicate(),
+			"vertices_world": world_vertices.duplicate(),
+			"vertices_pixels": _polygon_native_vertices(world_vertices),
+			"polygon_vertices_world": polygon_vertices.duplicate(),
+		})
+	return result
+
+
 func _apply_interaction_geometry() -> void:
 	var active_polygons := _gpu_interaction_polygons()
 	var data_image := Image.create(
@@ -2631,6 +3264,15 @@ func _build_particles() -> void:
 	)
 	interaction_image.fill(Color(0.0, 0.0, 0.0, 0.0))
 	_interaction_data_texture = ImageTexture.create_from_image(interaction_image)
+	if _shoreline_data_texture == null:
+		var shoreline_image := Image.create(
+			SHORELINE_TEXTURE_WIDTH,
+			1,
+			false,
+			Image.FORMAT_RGBAF
+		)
+		shoreline_image.fill(Color(0.0, 0.0, 0.0, 0.0))
+		_shoreline_data_texture = ImageTexture.create_from_image(shoreline_image)
 	var desired_lifetime: float = clampf(trail_lifetime, 0.1, 8.0)
 	var desired_ratio: float = clampf(flow_rate, 0.0, 1.0)
 	for layer_index in range(PALETTE_LAYER_COUNT):
@@ -2688,6 +3330,11 @@ func _build_particles() -> void:
 		process_material.set_shader_parameter(
 			&"interaction_data_texture",
 			_interaction_data_texture
+		)
+		process_material.set_shader_parameter(&"shoreline_count", 0)
+		process_material.set_shader_parameter(
+			&"shoreline_data_texture",
+			_shoreline_data_texture
 		)
 		process_material.set_shader_parameter(&"source_count", 0)
 		process_material.set_shader_parameter(&"source_admission_enabled", true)
@@ -2941,11 +3588,6 @@ func _build_stage_title() -> void:
 
 	_stage_title_label = Label.new()
 	_stage_title_label.name = "StageTitle"
-	_stage_title_label.position = STAGE_TITLE_POSITION
-	_stage_title_label.size = Vector2(
-		STAGE_SIZE.x - STAGE_TITLE_POSITION.x * 2.0,
-		96.0
-	)
 	_stage_title_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_stage_title_label.focus_mode = Control.FOCUS_NONE
 	_stage_title_label.autowrap_mode = TextServer.AUTOWRAP_OFF
@@ -2963,24 +3605,99 @@ func _build_stage_title() -> void:
 
 	_model_date_label = Label.new()
 	_model_date_label.name = "ModelDate"
-	_model_date_label.position = MODEL_DATE_POSITION
-	_model_date_label.size = MODEL_DATE_LABEL_SIZE
 	_model_date_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_model_date_label.focus_mode = Control.FOCUS_NONE
 	_model_date_label.autowrap_mode = TextServer.AUTOWRAP_OFF
 	_model_date_label.clip_text = false
-	_model_date_label.add_theme_font_override(&"font", STAGE_TITLE_FONT)
+	_model_date_font = FontVariation.new()
+	_model_date_font.base_font = STAGE_TITLE_FONT
+	_model_date_font.opentype_features = {
+		TextServerManager.get_primary_interface().name_to_tag(
+			MODEL_DATE_OPENTYPE_FEATURE
+		): 1,
+	}
+	_model_date_label.add_theme_font_override(&"font", _model_date_font)
 	_model_date_label.add_theme_font_size_override(
 		&"font_size",
-		STAGE_TITLE_FONT_SIZE
+		MODEL_DATE_FONT_SIZE
 	)
 	_model_date_label.add_theme_color_override(
 		&"font_color",
 		STAGE_TITLE_COLOR
 	)
 	_stage_title_layer.add_child(_model_date_label)
+	_build_regime_panel()
 	_apply_stage_title()
 	_apply_model_date()
+
+
+func _build_regime_panel() -> void:
+	_regime_panel = Node2D.new()
+	_regime_panel.name = "ActiveRegimes"
+	_regime_panel.position = REGIME_PANEL_POSITION
+	_regime_panel.rotation = TYPE_ROTATION_RADIANS
+	_stage_title_layer.add_child(_regime_panel)
+
+	_regime_heading_label = Label.new()
+	_regime_heading_label.name = "Heading"
+	_regime_heading_label.text = REGIME_HEADING_TEXT
+	_regime_heading_label.position = Vector2(0.0, REGIME_HEADING_LOCAL_Y)
+	_regime_heading_label.size = Vector2(520.0, REGIME_NAME_START_Y)
+	_regime_heading_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_regime_heading_label.focus_mode = Control.FOCUS_NONE
+	_regime_heading_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	_regime_heading_label.clip_text = false
+	_regime_heading_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_regime_heading_label.add_theme_font_override(&"font", STAGE_TITLE_FONT)
+	_regime_heading_label.add_theme_font_size_override(
+		&"font_size",
+		REGIME_HEADING_FONT_SIZE,
+	)
+	_regime_heading_label.add_theme_color_override(
+		&"font_color",
+		STAGE_TITLE_COLOR,
+	)
+	_regime_panel.add_child(_regime_heading_label)
+
+	_regime_name_labels.clear()
+	for index in range(7):
+		var regime_label := Label.new()
+		regime_label.name = "Regime%d" % (index + 1)
+		regime_label.position = Vector2(
+			0.0,
+			REGIME_NAME_START_Y + float(index) * REGIME_NAME_ROW_HEIGHT,
+		)
+		regime_label.size = Vector2(520.0, REGIME_NAME_ROW_HEIGHT)
+		regime_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		regime_label.focus_mode = Control.FOCUS_NONE
+		regime_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+		regime_label.clip_text = false
+		regime_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		regime_label.add_theme_font_override(&"font", STAGE_TITLE_FONT)
+		regime_label.add_theme_font_size_override(
+			&"font_size",
+			REGIME_NAME_FONT_SIZE,
+		)
+		_regime_panel.add_child(regime_label)
+		_regime_name_labels.append(regime_label)
+	_apply_regime_panel()
+
+
+func _apply_regime_panel() -> void:
+	if _regime_panel == null:
+		return
+	_regime_panel.visible = regime_panel_visible
+	var names := Array(_regime_snapshot.get("regime_names", []))
+	var active_states := Array(_regime_snapshot.get("active_states", []))
+	for index in range(_regime_name_labels.size()):
+		var label := _regime_name_labels[index]
+		label.text = String(names[index]) if index < names.size() else ""
+		var active := index < active_states.size() and bool(active_states[index])
+		var label_color := STAGE_TITLE_COLOR
+		label_color.a = (
+			REGIME_ACTIVE_ALPHA if active else REGIME_INACTIVE_ALPHA
+		)
+		label.add_theme_color_override(&"font_color", label_color)
 
 
 func _apply_stage_title() -> void:
@@ -2988,6 +3705,11 @@ func _apply_stage_title() -> void:
 		return
 	_stage_title_label.text = stage_title
 	_stage_title_label.visible = stage_title_visible
+	_center_label_on_rotated_centerline(
+		_stage_title_label,
+		STAGE_TITLE_POSITION
+	)
+	_apply_regime_panel()
 	if is_node_ready():
 		stage_title_changed.emit(screen_id, stage_title, stage_title_visible)
 
@@ -3135,6 +3857,9 @@ func _advance_model_calendar(delta: float) -> void:
 
 
 func _reset_model_calendar() -> void:
+	if _model_timeline != null:
+		_model_timeline.call(&"reset")
+		return
 	_model_year_elapsed_seconds = 0.0
 	_model_day_index = clampi(
 		model_start_day_index,
@@ -3151,6 +3876,14 @@ func _reset_model_calendar() -> void:
 
 
 func _set_model_day_index(day_index: int) -> void:
+	if _model_timeline != null:
+		_model_timeline.call(
+			&"set_date",
+			posmod(day_index, MODEL_CALENDAR_DAY_COUNT),
+			0,
+			&"external_day_index",
+		)
+		return
 	_model_day_index = posmod(day_index, MODEL_CALENDAR_DAY_COUNT)
 	_model_minute_of_day = 0
 	_apply_model_date()
@@ -3181,12 +3914,26 @@ func _apply_model_date(emit_date_signal: bool = true) -> void:
 	)
 	_model_date_label.text = date_time
 	_model_date_label.visible = stage_date_visible
+	_center_label_on_rotated_centerline(
+		_model_date_label,
+		MODEL_DATE_POSITION
+	)
 	if emit_date_signal and is_node_ready():
 		model_date_changed.emit(
 			screen_id,
 			_format_model_date(_model_day_index),
 			_model_day_index + 1
 		)
+
+
+func _center_label_on_rotated_centerline(
+	label: Label,
+	centerline: Vector2
+) -> void:
+	label.reset_size()
+	label.pivot_offset = label.size * 0.5
+	label.position = centerline - label.pivot_offset
+	label.rotation = TYPE_ROTATION_RADIANS
 
 
 func _format_model_date(day_index: int) -> String:
