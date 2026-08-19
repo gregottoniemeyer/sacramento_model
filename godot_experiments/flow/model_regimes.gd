@@ -8,8 +8,8 @@ extends Node
 signal regimes_changed(state: Dictionary)
 
 const PROFILE_TEXT_PATH := "res://regime_feature_profiles.txt"
-const PROFILE_SCHEMA_VERSION := "1"
-const RIVER_PROFILE_SCHEMA_VERSION := "1"
+const PROFILE_SCHEMA_VERSION := "2"
+const RIVER_PROFILE_SCHEMA_VERSION := "2"
 const RIVER_PROFILE_DIRECTORY := "res://flow/data/regimes/"
 const MONTH_DAY_COUNTS: Array[int] = [
 	31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
@@ -27,7 +27,6 @@ const FEATURE_FIELDS: Array[String] = [
 	"reservoir_area_fraction",
 	"drain_area_fraction",
 	"obstacle_area_fraction",
-	"source_area_fraction",
 	"shoreline_randomness",
 	"salmon_activity",
 	"leaf_activity",
@@ -40,7 +39,6 @@ const EFFECTIVE_FEATURE_FIELDS: Array[String] = [
 	"drain_power",
 	"obstacle_area_fraction",
 	"obstacle_power",
-	"source_area_fraction",
 	"shoreline_randomness",
 	"salmon_activity",
 	"leaf_activity",
@@ -52,7 +50,6 @@ const RIVER_FRACTION_FIELDS: Array[String] = [
 	"drain_power",
 	"obstacle_area_fraction",
 	"obstacle_power",
-	"source_area_fraction",
 	"shoreline_randomness",
 	"salmon_activity",
 	"leaf_activity",
@@ -87,7 +84,6 @@ const RIVER_PROFILE_COLUMNS: Array[String] = [
 	"drain_power",
 	"obstacle_area_fraction",
 	"obstacle_power",
-	"source_area_fraction",
 	"shoreline_randomness",
 	"salmon_activity",
 	"salmon_start_mm_dd",
@@ -128,7 +124,6 @@ var _effective_features: Dictionary = {
 	"reservoir_area_fraction": 0.0,
 	"drain_area_fraction": 0.0,
 	"obstacle_area_fraction": 0.0,
-	"source_area_fraction": 0.0,
 	"shoreline_randomness": 0.0,
 	"salmon_activity": 0.0,
 	"leaf_activity": 0.0,
@@ -290,6 +285,11 @@ func _load_profiles_from_text() -> bool:
 	var header_row := file.get_csv_line()
 	var header_indices := _csv_header_indices(header_row, next_diagnostics)
 	var master_profiles_valid := next_diagnostics.is_empty()
+	if not header_indices.has("schema_version"):
+		next_diagnostics.append(
+			"Profile header is missing required column: schema_version"
+		)
+		master_profiles_valid = false
 	if not header_indices.has("regime_id"):
 		next_diagnostics.append("Profile header is missing required column: regime_id")
 		_commit_loaded_profiles(next_profiles, next_diagnostics, false)
@@ -350,7 +350,7 @@ func _load_profiles_from_text() -> bool:
 			header_indices,
 			"schema_version"
 		)
-		if schema_version != "" and schema_version != PROFILE_SCHEMA_VERSION:
+		if schema_version != PROFILE_SCHEMA_VERSION:
 			next_diagnostics.append(
 				"Row %d uses unsupported schema_version '%s'." % [
 					row_number,

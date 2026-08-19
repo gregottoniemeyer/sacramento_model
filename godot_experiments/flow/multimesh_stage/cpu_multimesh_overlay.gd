@@ -16,9 +16,6 @@ const UPSTREAM_OPENING_ANGLE := 0.30
 
 # #D4AF37, retained exactly from the approved interaction overlay.
 const INTERACTION_COLOR := Color(0.83137255, 0.68627451, 0.21568627, 1.0)
-# Violet is distinct from the cyan reservoir, green/orange gate, gold
-# interactions, and the blue/green water palette.
-const SOURCE_COLOR := Color(0.78039216, 0.49019608, 1.0, 1.0)
 const RESERVOIR_COLOR := Color(0.22, 0.76, 0.92, 0.90)
 const CLOSED_GATE_COLOR := Color(1.0, 0.68235294, 0.34117647, 1.0)
 const OPEN_GATE_COLOR := Color(0.41176471, 0.87450980, 0.60392157, 1.0)
@@ -28,11 +25,6 @@ const RESERVOIR_LINE_WIDTH := 5.0
 const CLOSED_GATE_LINE_WIDTH := 9.0
 const OPEN_GATE_LINE_WIDTH := 5.0
 const DISABLED_ALPHA_MULTIPLIER := 0.35
-const SOURCE_TICK_INSET := 2.0
-const SOURCE_TICK_LENGTH := 13.0
-const SOURCE_ARROW_BACK_LENGTH := 5.0
-const SOURCE_ARROW_HALF_WIDTH := 3.5
-const SOURCE_MARKER_LINE_WIDTH := 3.0
 
 var reservoir_center: Vector2 = DEFAULT_RESERVOIR_CENTER
 var reservoir_radius: float = DEFAULT_RESERVOIR_RADIUS
@@ -40,7 +32,6 @@ var gate_open: bool = true
 var gate_half_width: float = 15.0
 
 var _interaction_polygons: Array[Dictionary] = []
-var _source_polygons: Array[Dictionary] = []
 
 
 func set_reservoir_geometry(center: Vector2, radius: float) -> void:
@@ -79,47 +70,13 @@ func set_interaction_polygons(definitions: Array[Dictionary]) -> void:
 	queue_redraw()
 
 
-func set_source_polygons(definitions: Array[Dictionary]) -> void:
-	## downstream_edges accepts the native-coordinate dictionaries returned by
-	## CPUFlowSourcePolygon.selected_downstream_edges() after caller conversion.
-	## edge_index + outward_normal is sufficient; explicit start/end is also
-	## accepted when edge_index is unavailable.
-	var copied_definitions: Array[Dictionary] = []
-	for definition: Dictionary in definitions:
-		var vertices := _vertices_from_variant(
-			definition.get("vertices", PackedVector2Array())
-		)
-		if vertices.size() < 3:
-			continue
-		var downstream_value: Variant = definition.get(
-			"downstream_edges",
-			definition.get("selected_downstream_edges", []),
-		)
-		var downstream_edges := _copy_downstream_edges(
-			downstream_value,
-			vertices,
-		)
-		copied_definitions.append({
-			"vertices": vertices,
-			"enabled": bool(definition.get("enabled", true)),
-			"downstream_edges": downstream_edges,
-		})
-	_source_polygons = copied_definitions
-	queue_redraw()
-
-
 func get_interaction_polygon_count() -> int:
 	return _interaction_polygons.size()
-
-
-func get_source_polygon_count() -> int:
-	return _source_polygons.size()
 
 
 func _draw() -> void:
 	_draw_reservoir()
 	_draw_interaction_polygons()
-	_draw_source_polygons()
 
 
 func _draw_reservoir() -> void:
@@ -199,24 +156,6 @@ func _draw_interaction_polygons() -> void:
 		_draw_closed_polygon(vertices, color)
 
 
-func _draw_source_polygons() -> void:
-	for definition: Dictionary in _source_polygons:
-		var vertices: PackedVector2Array = definition["vertices"]
-		var color := _enabled_color(
-			SOURCE_COLOR,
-			bool(definition["enabled"]),
-		)
-		_draw_closed_polygon(vertices, color)
-		var edges_value: Variant = definition["downstream_edges"]
-		if not edges_value is Array:
-			continue
-		for edge_value: Variant in edges_value:
-			if not edge_value is Dictionary:
-				continue
-			var edge_info: Dictionary = edge_value
-			_draw_source_edge_marker(edge_info, color)
-
-
 func _draw_closed_polygon(
 	vertices: PackedVector2Array,
 	color: Color,
@@ -231,80 +170,6 @@ func _draw_closed_polygon(
 		POLYGON_LINE_WIDTH,
 		true,
 	)
-
-
-func _draw_source_edge_marker(edge_info: Dictionary, color: Color) -> void:
-	var start: Vector2 = edge_info["start"]
-	var end: Vector2 = edge_info["end"]
-	var outward_normal: Vector2 = edge_info["outward_normal"]
-	if outward_normal.length_squared() <= 0.000000000001:
-		return
-	outward_normal = outward_normal.normalized()
-	var tangent := Vector2(-outward_normal.y, outward_normal.x)
-	var midpoint := start.lerp(end, 0.5)
-	var tick_start := midpoint - outward_normal * SOURCE_TICK_INSET
-	var tip := midpoint + outward_normal * SOURCE_TICK_LENGTH
-	var arrow_base := tip - outward_normal * SOURCE_ARROW_BACK_LENGTH
-	draw_line(
-		tick_start,
-		tip,
-		color,
-		SOURCE_MARKER_LINE_WIDTH,
-		true,
-	)
-	draw_line(
-		tip,
-		arrow_base + tangent * SOURCE_ARROW_HALF_WIDTH,
-		color,
-		SOURCE_MARKER_LINE_WIDTH,
-		true,
-	)
-	draw_line(
-		tip,
-		arrow_base - tangent * SOURCE_ARROW_HALF_WIDTH,
-		color,
-		SOURCE_MARKER_LINE_WIDTH,
-		true,
-	)
-
-
-static func _copy_downstream_edges(
-	value: Variant,
-	vertices: PackedVector2Array,
-) -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	if not value is Array:
-		return result
-	for raw_edge: Variant in value:
-		if not raw_edge is Dictionary:
-			continue
-		var edge: Dictionary = raw_edge
-		var edge_index := _integral_index(edge.get("edge_index", -1))
-		var start_variant: Variant = null
-		var end_variant: Variant = null
-		if edge_index >= 0 and edge_index < vertices.size():
-			start_variant = vertices[edge_index]
-			end_variant = vertices[(edge_index + 1) % vertices.size()]
-		else:
-			start_variant = _vector_from_variant(edge.get("start", null))
-			end_variant = _vector_from_variant(edge.get("end", null))
-		var normal_variant: Variant = _vector_from_variant(
-			edge.get("outward_normal", null)
-		)
-		if start_variant == null or end_variant == null or normal_variant == null:
-			continue
-		var start: Vector2 = start_variant
-		var end: Vector2 = end_variant
-		var outward_normal: Vector2 = normal_variant
-		if outward_normal.length_squared() <= 0.000000000001:
-			continue
-		result.append({
-			"edge_index": edge_index,
-			"start": start,
-			"end": end,
-			"outward_normal": outward_normal.normalized(),
-		})
-	return result
 
 
 static func _vertices_from_variant(value: Variant) -> PackedVector2Array:
@@ -335,15 +200,6 @@ static func _vector_from_variant(value: Variant) -> Variant:
 		if _is_finite_number(value["x"]) and _is_finite_number(value["y"]):
 			return Vector2(float(value["x"]), float(value["y"]))
 	return null
-
-
-static func _integral_index(value: Variant) -> int:
-	if not _is_finite_number(value):
-		return -1
-	var numeric_value := float(value)
-	if numeric_value != floor(numeric_value):
-		return -1
-	return int(numeric_value)
 
 
 static func _is_finite_number(value: Variant) -> bool:

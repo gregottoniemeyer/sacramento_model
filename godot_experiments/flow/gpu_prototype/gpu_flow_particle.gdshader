@@ -33,13 +33,11 @@ uniform bool regime_drain_override_enabled = false;
 uniform bool regime_drain_power_override_enabled = false;
 uniform bool regime_obstacle_override_enabled = false;
 uniform bool regime_obstacle_power_override_enabled = false;
-uniform bool regime_source_override_enabled = false;
 uniform float regime_reservoir_weight = 1.0;
 uniform float regime_drain_weight = 1.0;
 uniform float regime_drain_power = 1.0;
 uniform float regime_obstacle_weight = 1.0;
 uniform float regime_obstacle_power = 1.0;
-uniform float regime_source_weight = 1.0;
 
 uniform vec2 reservoir_center = vec2(1388.57, 771.43);
 uniform float reservoir_geometry_revision = 0.0;
@@ -81,12 +79,13 @@ uniform float edge_turbulence_wall_band_pixels = 40.0;
 uniform float edge_turbulence_crossflow_ratio = 0.65;
 uniform float edge_turbulence_streamwise_ratio = 0.08;
 uniform float edge_turbulence_inward_ratio = 0.75;
-// Source geometry uses an independent 128 x 1 RGBAF texture with the same
-// fixed 8 x 16 layout size as interactions. It affects logical head creation
-// only; immutable trail rendering remains completely geometry-agnostic.
-uniform sampler2D source_data_texture : filter_nearest, repeat_disable;
-uniform int source_count = 0;
-uniform bool source_admission_enabled = true;
+// A bank-connected ABSORB polygon is a lateral field intake. Eligible heads
+// bend toward its river-facing mouth, then continue through the field and leave
+// the viewport vertically instead of teleporting or stopping in the channel.
+uniform float bank_field_suction_reach_pixels = 180.0;
+uniform float bank_field_suction_crossflow_ratio = 1.25;
+uniform float bank_field_suction_streamwise_ratio = 0.06;
+uniform float bank_field_capture_depth_pixels = 10.0;
 
 const float STATE_FLOWING = 0.0;
 const float STATE_ENTERING = 1.0;
@@ -97,16 +96,13 @@ const float STATE_BYPASSING = 5.0;
 const float STATE_GATE_STAGING = 6.0;
 const float STATE_GATE_FLUSHING = 7.0;
 const float STATE_ABSORBED = 8.0;
+const float STATE_FIELD_DRAINING = 9.0;
 const float RECYCLE_EPSILON = 0.0001;
 const float RECYCLE_SAFETY_SECONDS = 0.067;
 const int MAX_INTERACTION_POLYGONS = 8;
 const int MAX_INTERACTION_VERTICES = 12;
 const int INTERACTION_TEXELS_PER_POLYGON = 16;
 const int INTERACTION_TEXTURE_WIDTH = 128;
-const int MAX_SOURCE_POLYGONS = 8;
-const int MAX_SOURCE_VERTICES = 12;
-const int SOURCE_TEXELS_PER_POLYGON = 16;
-const int SOURCE_TEXTURE_WIDTH = 128;
 
 float hash11(float value) {
 	return fract(sin(value * 127.1 + 311.7) * 43758.5453123);
@@ -122,159 +118,6 @@ vec4 interaction_record(int polygon_index, int record_offset) {
 
 vec2 interaction_vertex(int polygon_index, int vertex_index) {
 	return interaction_record(polygon_index, 4 + vertex_index).xy;
-}
-
-vec4 source_record(int source_index, int record_offset) {
-	float texture_x = (
-		float(source_index * SOURCE_TEXELS_PER_POLYGON + record_offset)
-		+ 0.5
-	) / float(SOURCE_TEXTURE_WIDTH);
-	return textureLod(source_data_texture, vec2(texture_x, 0.5), 0.0);
-}
-
-vec2 source_vertex(int source_index, int vertex_index) {
-	return source_record(source_index, 4 + vertex_index).xy;
-}
-
-// Returns (spawn_x, spawn_y, initial_direction_x, initial_direction_y).
-// A very negative X is the no-source sentinel. The CPU has already converted
-// world geometry and projected edge weights into native stage coordinates.
-vec4 source_spawn(float particle_index, float lifecycle_generation) {
-	if (!source_admission_enabled || source_count <= 0) {
-		return vec4(-1.0e20, 0.0, 1.0, 0.0);
-	}
-	float total_fraction = 0.0;
-	for (int source_index = 0; source_index < MAX_SOURCE_POLYGONS; source_index++) {
-		if (source_index >= source_count) {
-			break;
-		}
-		vec4 source_policy = source_record(source_index, 0);
-		if (source_policy.z >= 0.5) {
-			total_fraction += clamp(source_policy.y, 0.0, 1.0);
-		}
-	}
-	if (total_fraction <= 0.000001) {
-		return vec4(-1.0e20, 0.0, 1.0, 0.0);
-	}
-	float admission_probability = min(total_fraction, 1.0);
-	if (regime_profile_physics_enabled && regime_source_override_enabled) {
-		// The profile budget is the aggregate source share. Individual source
-		// fractions below continue to choose among several authored sources.
-		admission_probability = clamp(regime_source_weight, 0.0, 1.0);
-	}
-	if (admission_probability <= 0.000001) {
-		return vec4(-1.0e20, 0.0, 1.0, 0.0);
-	}
-	float admission_selector = hash11(
-		particle_index * 23.731
-		+ lifecycle_generation * 91.117
-		+ stage_phase * 13.0
-	);
-	if (admission_selector >= admission_probability) {
-		return vec4(-1.0e20, 0.0, 1.0, 0.0);
-	}
-
-	float source_selector = hash11(
-		particle_index * 41.137
-		+ lifecycle_generation * 17.731
-		+ stage_phase * 29.0
-	) * total_fraction;
-	int selected_source = -1;
-	float accumulated_fraction = 0.0;
-	for (int source_index = 0; source_index < MAX_SOURCE_POLYGONS; source_index++) {
-		if (source_index >= source_count) {
-			break;
-		}
-		vec4 source_policy = source_record(source_index, 0);
-		float active_fraction = (
-			source_policy.z >= 0.5
-			? clamp(source_policy.y, 0.0, 1.0)
-			: 0.0
-		);
-		accumulated_fraction += active_fraction;
-		if (selected_source < 0 && source_selector < accumulated_fraction) {
-			selected_source = source_index;
-		}
-	}
-	if (selected_source < 0) {
-		return vec4(-1.0e20, 0.0, 1.0, 0.0);
-	}
-
-	vec4 source_policy = source_record(selected_source, 0);
-	vec4 source_geometry = source_record(selected_source, 1);
-	vec4 source_bounds = source_record(selected_source, 2);
-	vec4 source_identity = source_record(selected_source, 3);
-	int vertex_count = int(source_policy.x + 0.5);
-	float total_edge_weight = source_geometry.w;
-	if (vertex_count < 3 || total_edge_weight <= 0.000001) {
-		return vec4(-1.0e20, 0.0, 1.0, 0.0);
-	}
-	float edge_sample = hash11(
-		particle_index * 67.193
-		+ lifecycle_generation * 37.717
-		+ source_identity.z * 811.0
-		+ stage_phase * 7.0
-	);
-	if (source_identity.w >= 0.5) {
-		edge_sample = fract(edge_sample + source_policy.w);
-	}
-	// Keep the existing projected-edge choice for Y, but give each lifecycle a
-	// second stable sample across the complete packed X bounds. For the project's
-	// +X flow this makes a polygon source read as an area instead of a vertical
-	// launch seam, without changing the fixed source-texture layout.
-	float horizontal_sample = hash11(
-		particle_index * 83.917
-		+ lifecycle_generation * 29.371
-		+ source_identity.z * 613.0
-		+ stage_phase * 11.0
-	);
-	if (source_identity.w >= 0.5) {
-		horizontal_sample = fract(horizontal_sample + source_policy.w);
-	}
-	float target_weight = edge_sample * total_edge_weight;
-	for (int vertex_index = 0; vertex_index < MAX_SOURCE_VERTICES; vertex_index++) {
-		if (vertex_index >= vertex_count) {
-			break;
-		}
-		vec4 edge_record = source_record(selected_source, 4 + vertex_index);
-		float edge_weight = edge_record.z;
-		float cumulative_weight = edge_record.w;
-		if (edge_weight <= 0.000001 || target_weight >= cumulative_weight) {
-			continue;
-		}
-		int next_index = vertex_index + 1;
-		if (next_index >= vertex_count) {
-			next_index = 0;
-		}
-		vec2 edge_start = edge_record.xy;
-		vec2 edge_end = source_vertex(selected_source, next_index);
-		float previous_weight = cumulative_weight - edge_weight;
-		float local_sample = clamp(
-			(target_weight - previous_weight) / edge_weight,
-			0.0,
-			1.0
-		);
-		vec2 edge = edge_end - edge_start;
-		vec2 right_normal = normalize(
-			vec2(edge.y, -edge.x) + vec2(0.000001, 0.0)
-		);
-		vec2 outward_normal = (
-			source_geometry.z >= 0.0 ? right_normal : -right_normal
-		);
-		vec2 spawn_point = (
-			mix(edge_start, edge_end, local_sample) + outward_normal * 1.5
-		);
-		spawn_point.x = mix(
-			min(source_bounds.x, source_bounds.z),
-			max(source_bounds.x, source_bounds.z),
-			horizontal_sample
-		);
-		vec2 initial_direction = normalize(
-			source_geometry.xy + vec2(0.000001, 0.0)
-		);
-		return vec4(spawn_point, initial_direction);
-	}
-	return vec4(-1.0e20, 0.0, 1.0, 0.0);
 }
 
 float cross_2d(vec2 first, vec2 second) {
@@ -450,8 +293,7 @@ void start() {
 	// restarts retain its simulation state; visible segments live independently.
 	if (slot_enabled && CUSTOM.x <= 0.0) {
 		// TRANSFORM[2].w is invisible in the 2D renderer and survives logical
-		// recycling. It makes source choice and edge sampling vary per lifecycle
-		// without any CPU particle-state readback.
+		// recycling. It varies the inlet lane per lifecycle without CPU readback.
 		float lifecycle_generation = max(TRANSFORM[2].w, 0.0);
 		// Ordinary left-edge inlets vary their Y lane after each completed
 		// lifecycle too. A reservoir-held head still owns its slot until release,
@@ -462,40 +304,31 @@ void start() {
 			+ stage_phase * 19.0
 			+ lifecycle_generation * 53.137
 		);
-		vec4 source_result = source_spawn(
-			particle_index,
-			lifecycle_generation
-		);
 		TRANSFORM = mat4(1.0);
 		// This invisible basis component owns the reservoir layout generation.
 		// It survives normal 2D transform updates and is refreshed on admission.
 		TRANSFORM[1].z = reservoir_geometry_revision;
 		vec2 initial_direction = vec2(1.0, 0.0);
-		if (source_result.x > -1.0e10) {
-			TRANSFORM[3].xy = source_result.xy;
-			initial_direction = normalize(
-				source_result.zw + vec2(0.000001, 0.0)
-			);
-		} else {
-			float inlet_min_y = clamp(
-				min(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
-				0.0,
-				stage_size.y
-			);
-			float inlet_max_y = clamp(
-				max(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
-				inlet_min_y,
-				stage_size.y
-			);
-			TRANSFORM[3].xy = vec2(
-				-18.0,
-				mix(inlet_min_y, inlet_max_y, lane_seed)
-			);
-		}
+		float inlet_min_y = clamp(
+			min(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
+			0.0,
+			stage_size.y
+		);
+		float inlet_max_y = clamp(
+			max(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
+			inlet_min_y,
+			stage_size.y
+		);
+		TRANSFORM[3].xy = vec2(
+			-18.0,
+			mix(inlet_min_y, inlet_max_y, lane_seed)
+		);
 		// TRANSFORM[2].xy is unused by 2D drawing. Keep the previous completed
 		// head position there so a segment also covers Godot's pre-process
 		// velocity integration on the next fixed tick.
 		TRANSFORM[2].xy = TRANSFORM[3].xy;
+		// Reserved for the native-Y direction of a bank field after capture.
+		TRANSFORM[2].z = 0.0;
 		TRANSFORM[2].w = lifecycle_generation;
 		float speed = base_speed * mix(
 			1.0 - speed_variation,
@@ -620,6 +453,16 @@ void process() {
 	bool head_bypassing = CUSTOM.w > 4.5 && CUSTOM.w < 5.5;
 	bool head_gate_staging = CUSTOM.w > 5.5 && CUSTOM.w < 6.5;
 	bool head_gate_flushing = CUSTOM.w > 6.5 && CUSTOM.w < 7.5;
+	bool head_field_draining = CUSTOM.w > 8.5 && CUSTOM.w < 9.5;
+	if (head_field_draining) {
+		float field_direction_y = clamp(TRANSFORM[2].z, -1.0, 1.0);
+		target_velocity = vec2(
+			speed * max(bank_field_suction_streamwise_ratio, 0.0),
+			field_direction_y
+				* speed
+				* max(bank_field_suction_crossflow_ratio, 0.0)
+		);
+	}
 	bool reservoir_geometry_changed = (
 		abs(TRANSFORM[1].z - reservoir_geometry_revision) > 0.25
 	);
@@ -706,10 +549,13 @@ void process() {
 		head_flowing = true;
 	}
 
-	// Repellers are a soft head-only velocity field. Immutable tail segments have
-	// no simulation pass, so they simply preserve the path the head actually took.
-	// Reservoir-owned states have explicit precedence and are never displaced by
-	// an overlapping runtime polygon.
+	// Bank-connected fields and repellers share the same bounded interaction
+	// records. Fields select the strongest eligible lateral intake instead of
+	// summing several pulls; repellers retain their authored additive steering.
+	// Immutable tails never re-simulate either influence.
+	bool bank_field_suction_active = false;
+	float bank_field_suction_strength = 0.0;
+	vec2 bank_field_suction_velocity = vec2(0.0);
 	if (generic_interaction_pass_enabled && head_flowing) {
 		for (
 			int polygon_index = 0;
@@ -723,6 +569,156 @@ void process() {
 			vec4 interaction_metadata = interaction_record(polygon_index, 1);
 			vec4 interaction_bounds = interaction_record(polygon_index, 2);
 			vec4 interaction_center_enabled = interaction_record(polygon_index, 3);
+			bool absorb_mode = interaction_parameters.x < 0.5;
+			bool repel_mode = !absorb_mode;
+			if (interaction_center_enabled.w < 0.5) {
+				continue;
+			}
+			int vertex_count = int(interaction_metadata.x + 0.5);
+			if (absorb_mode) {
+				float bank_direction_y = interaction_center_enabled.z;
+				if (abs(bank_direction_y) < 0.5) {
+					// Interior/controller absorbers keep their legacy swept-only path.
+					continue;
+				}
+				if (regime_profile_physics_enabled && regime_drain_override_enabled) {
+					float drain_selector = hash11(
+						particle_index * 29.731
+						+ TRANSFORM[2].w * 53.117
+						+ stage_phase * 17.0
+					);
+					if (drain_selector >= clamp(regime_drain_weight, 0.0, 1.0)) {
+						continue;
+					}
+				}
+				float absorption_probability = clamp(
+					interaction_parameters.y,
+					0.0,
+					1.0
+				);
+				if (
+					regime_profile_physics_enabled
+					&& regime_drain_power_override_enabled
+				) {
+					absorption_probability = clamp(
+						regime_drain_power,
+						0.0,
+						1.0
+					);
+				}
+				float absorption_selector = hash11(
+					particle_index * 19.731
+					+ interaction_metadata.z * 811.0
+					+ stage_phase * 7.0
+				);
+				if (absorption_selector >= absorption_probability) {
+					continue;
+				}
+				float suction_reach = max(
+					interaction_metadata.y,
+					max(bank_field_suction_reach_pixels, 0.0)
+				);
+				if (
+					point.x < interaction_bounds.x - suction_reach
+					|| point.x > interaction_bounds.z + suction_reach
+					|| point.y < interaction_bounds.y - suction_reach
+					|| point.y > interaction_bounds.w + suction_reach
+				) {
+					continue;
+				}
+				if (point_in_interaction_polygon(polygon_index, vertex_count, point)) {
+					// A regime may appear around an existing head; do not consume it
+					// retroactively without a real water-to-field mouth crossing.
+					continue;
+				}
+				vec2 river_facing_outward = vec2(0.0, -bank_direction_y);
+				float mouth_distance_squared = 1.0e20;
+				vec2 mouth_point = point;
+				bool mouth_found = false;
+				for (
+					int vertex_index = 0;
+					vertex_index < MAX_INTERACTION_VERTICES;
+					vertex_index++
+				) {
+					if (vertex_index >= vertex_count) {
+						break;
+					}
+					int following_index = vertex_index + 1;
+					if (following_index >= vertex_count) {
+						following_index = 0;
+					}
+					vec2 edge_start = interaction_vertex(polygon_index, vertex_index);
+					vec2 edge_end = interaction_vertex(polygon_index, following_index);
+					vec2 edge = edge_end - edge_start;
+					vec2 right_normal = normalize(
+						vec2(edge.y, -edge.x) + vec2(0.000001, 0.0)
+					);
+					vec2 outward = (
+						interaction_metadata.w >= 0.0 ? right_normal : -right_normal
+					);
+					if (dot(outward, river_facing_outward) < 0.35) {
+						continue;
+					}
+					float edge_length_squared = max(dot(edge, edge), 0.000001);
+					float edge_fraction = clamp(
+						dot(point - edge_start, edge) / edge_length_squared,
+						0.0,
+						1.0
+					);
+					vec2 candidate_mouth_point = edge_start + edge * edge_fraction;
+					float candidate_distance_squared = dot(
+						point - candidate_mouth_point,
+						point - candidate_mouth_point
+					);
+					if (candidate_distance_squared < mouth_distance_squared) {
+						mouth_distance_squared = candidate_distance_squared;
+						mouth_point = candidate_mouth_point;
+						mouth_found = true;
+					}
+				}
+				if (!mouth_found) {
+					continue;
+				}
+				vec2 to_mouth = mouth_point - point;
+				float mouth_distance = sqrt(max(mouth_distance_squared, 0.0));
+				if (
+					mouth_distance > suction_reach
+					|| point.x > mouth_point.x + 24.0
+				) {
+					continue;
+				}
+				float proximity = 1.0 - smoothstep(
+					0.0,
+					max(suction_reach, 0.001),
+					mouth_distance
+				);
+				float active_strength = clamp(
+					proximity * absorption_probability,
+					0.0,
+					1.0
+				);
+				if (active_strength <= bank_field_suction_strength) {
+					continue;
+				}
+				vec2 suction_direction = normalize(to_mouth + vec2(0.0001, 0.0));
+				float suction_x = max(
+					speed * max(bank_field_suction_streamwise_ratio, 0.0),
+					speed * (
+						max(bank_field_suction_streamwise_ratio, 0.0)
+						+ max(suction_direction.x, 0.0) * 0.30
+					)
+				);
+				bank_field_suction_velocity = vec2(
+					suction_x,
+					bank_direction_y
+						* speed
+						* max(bank_field_suction_crossflow_ratio, 0.0)
+				);
+				bank_field_suction_strength = active_strength;
+				bank_field_suction_active = true;
+				continue;
+			}
+
 			float repellent_strength = clamp(interaction_parameters.z, 0.0, 1.0);
 			if (regime_profile_physics_enabled && regime_obstacle_override_enabled) {
 				float obstacle_selector = hash11(
@@ -740,15 +736,12 @@ void process() {
 			) {
 				repellent_strength = clamp(regime_obstacle_power, 0.0, 1.0);
 			}
-			bool repel_mode = interaction_parameters.x >= 0.5;
 			if (
 				!repel_mode
-				|| interaction_center_enabled.w < 0.5
 				|| repellent_strength <= 0.0
 			) {
 				continue;
 			}
-			int vertex_count = int(interaction_metadata.x + 0.5);
 			float influence = max(interaction_metadata.y, 0.0);
 			if (
 				point.x < interaction_bounds.x - influence
@@ -891,6 +884,21 @@ void process() {
 			target_velocity.y = min(target_velocity.y, -edge_resolved_inward_floor);
 		}
 		target_velocity.x = max(target_velocity.x, speed * 0.08);
+	}
+	// Field capture takes local precedence over the thin edge-containment floor.
+	// This lets an eligible trail visibly turn through a bank mouth while the
+	// ordinary shoreline field continues to protect every other edge location.
+	if (head_flowing && bank_field_suction_active) {
+		target_velocity = mix(
+			target_velocity,
+			bank_field_suction_velocity,
+			clamp(bank_field_suction_strength * 1.15, 0.0, 1.0)
+		);
+		target_velocity.x = max(
+			target_velocity.x,
+			speed * max(bank_field_suction_streamwise_ratio, 0.0)
+		);
+		edge_resolved_inward_floor = 0.0;
 	}
 
 	vec2 from_reservoir = point - reservoir_center;
@@ -1491,6 +1499,9 @@ void process() {
 				continue;
 			}
 			bool absorb_mode = interaction_parameters.x < 0.5;
+			float bank_direction_y = (
+				absorb_mode ? interaction_center_enabled.z : 0.0
+			);
 			if (absorb_mode && regime_profile_physics_enabled && regime_drain_override_enabled) {
 				float drain_selector = hash11(
 					particle_index * 29.731
@@ -1534,9 +1545,18 @@ void process() {
 				vec2 outward = (
 					interaction_metadata.w >= 0.0 ? right_normal : -right_normal
 				);
-				// Absorbers accept only their geometrically upstream-facing (-X) edge.
-				if (absorb_mode && outward.x >= -0.15) {
-					continue;
+				if (absorb_mode) {
+					if (abs(bank_direction_y) > 0.5) {
+						// A top/bottom field accepts water only through its horizontal,
+						// river-facing mouth. Root and side edges are not intakes.
+						vec2 river_facing_outward = vec2(0.0, -bank_direction_y);
+						if (dot(outward, river_facing_outward) < 0.35) {
+							continue;
+						}
+					} else if (outward.x >= -0.15) {
+						// Freeform/controller absorbers preserve legacy upstream entry.
+						continue;
+					}
 				}
 				if (dot(next_point - point, outward) >= 0.0) {
 					continue;
@@ -1578,10 +1598,21 @@ void process() {
 					+ stage_phase * 7.0
 				);
 				if (absorption_selector < absorption_probability) {
-					// Stop just inside the crossed edge. There is no teleport to an
-					// object center and therefore no stretched bridge in trail history.
-					next_point = crossing_point - crossing_outward * 1.5;
-					CUSTOM.w = STATE_ABSORBED;
+					// Enter through the actual crossed mouth, never by teleporting to
+					// an object center. Bank fields keep recording vertically through
+					// the trapezoid; freeform absorbers retain the terminal fade state.
+					float capture_depth = (
+						abs(bank_direction_y) > 0.5
+						? max(bank_field_capture_depth_pixels, 1.5)
+						: 1.5
+					);
+					next_point = crossing_point - crossing_outward * capture_depth;
+					if (abs(bank_direction_y) > 0.5) {
+						CUSTOM.w = STATE_FIELD_DRAINING;
+						TRANSFORM[2].z = bank_direction_y;
+					} else {
+						CUSTOM.w = STATE_ABSORBED;
+					}
 					CUSTOM.y = 0.0;
 					absorbed_after_update = true;
 					break;

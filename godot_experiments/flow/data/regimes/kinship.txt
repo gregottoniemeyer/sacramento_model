@@ -1,8 +1,8 @@
-schema_version,screen_id,reservoir_area_fraction,reservoir_count,reservoir_gate_aperture_fraction,reservoir_gate_open_start_mm_dd,reservoir_gate_open_end_mm_dd,drain_area_fraction,drain_power,obstacle_area_fraction,obstacle_power,source_area_fraction,shoreline_randomness,salmon_activity,salmon_start_mm_dd,salmon_end_mm_dd,salmon_interval_days,leaf_activity,leaf_start_mm_dd,leaf_end_mm_dd,leaf_interval_days,notes
-1,mount_shasta,0,0,,,,0,0,0,0,0.1,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
-1,mccloud_pit,0,0,,,,0,0,0,0,0.1,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
-1,cottonwood_creek,0,0,,,,0,0,0,0,0.1,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
-1,mill_creek,0,0,,,,0,0,0,0,0.1,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
-1,feather_river,0,0,,,,0,0,0,0,0.1,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
-1,american_river,0,0,,,,0,0,0,0,0.1,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
-1,delta,0,0,,,,0,0,0,0,0.1,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
+schema_version,screen_id,reservoir_area_fraction,reservoir_count,reservoir_gate_aperture_fraction,reservoir_gate_open_start_mm_dd,reservoir_gate_open_end_mm_dd,drain_area_fraction,drain_power,obstacle_area_fraction,obstacle_power,shoreline_randomness,salmon_activity,salmon_start_mm_dd,salmon_end_mm_dd,salmon_interval_days,leaf_activity,leaf_start_mm_dd,leaf_end_mm_dd,leaf_interval_days,notes
+2,mount_shasta,0,0,,,,0,0,0,0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
+2,mccloud_pit,0,0,,,,0,0,0,0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
+2,cottonwood_creek,0,0,,,,0,0,0,0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
+2,mill_creek,0,0,,,,0,0,0,0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
+2,feather_river,0,0,,,,0,0,0,0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
+2,american_river,0,0,,,,0,0,0,0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.
+2,delta,0,0,,,,0,0,0,0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Explicit current Kinship values for this river.

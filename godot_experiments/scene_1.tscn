@@ -3,13 +3,12 @@
 [ext_resource type="Script" uid="uid://b1nyfe3fm5hux" path="res://stage_scene.gd" id="1_stage"]
 [ext_resource type="PackedScene" path="res://flow/gpu_stage/gpu_flow_stage_2d.tscn" id="2_flow"]
 [ext_resource type="Script" uid="uid://nb2n4j8u1mjv" path="res://flow/gpu_stage/gpu_flow_interaction_polygon.gd" id="3_knagl"]
-[ext_resource type="Script" uid="uid://cyrqqljtxwc8g" path="res://flow/gpu_stage/gpu_flow_source_polygon.gd" id="4_kl852"]
 
 [sub_resource type="Resource" id="Resource_knagl"]
 resource_local_to_scene = true
 script = ExtResource("3_knagl")
 element_id = &"absorber_test"
-vertices = PackedVector2Array(4.2, 7.35, 5.3, 7.55, 5.1, 8.45, 4.1, 8.25)
+vertices = PackedVector2Array(4.2, 7.2, 5, 7.2, 5.15, 9, 4.05, 9)
 mode = 0
 absorption_fraction = 0.5
 repellent_force = 0.0
@@ -25,14 +24,6 @@ repellent_force = 0.7
 wave_strength = 0.0
 influence = 0.8
 
-[sub_resource type="Resource" id="Resource_4nmru"]
-resource_local_to_scene = true
-script = ExtResource("4_kl852")
-element_id = &"source_test"
-vertices = PackedVector2Array(1.2, 3.6, 2, 3.6, 2, 5.4, 1.2, 5.4)
-emission_fraction = 0.18
-seed = 1701
-
 [node name="MountShastaScreen" type="Node2D" unique_id=916247402]
 script = ExtResource("1_stage")
 
@@ -43,5 +34,7 @@ stage_title = "Mount Shasta"
 regime_profile_physics_enabled = true
 model_start_day_index = 181
 watershed_data_path = "res://flow/data/water_pipeline/shasta_720.txt"
+stage_temperature_visible = true
+temperature_data_path = "res://flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt"
+temperature_data_column = "shasta_keswick_release_temp_c"
 interaction_polygons = Array[ExtResource("3_knagl")]([SubResource("Resource_knagl"), SubResource("Resource_kl852")])
-source_polygons = Array[ExtResource("4_kl852")]([SubResource("Resource_4nmru")])

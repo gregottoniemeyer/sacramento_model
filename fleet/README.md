@@ -54,12 +54,12 @@ python3 fleet/godot_controller.py regime-console
 ```
 
 `set --geo TRUE/FALSE` sets obstacle/debug geometry to an absolute state on all
-seven screens. `FALSE` hides the reservoir guide, obstacle/drain outlines, and
-source outlines without changing their physics; `TRUE` shows them. A
-geometry-only `set` preserves the saved regime set, while a combined command
-replaces the regime set and changes geometry visibility together. The geometry
-value is persisted and reapplied by `start` and `restart`. Values are
-case-insensitive, but must be `TRUE` or `FALSE`.
+seven screens. `FALSE` hides the reservoir guide and obstacle/drain outlines
+without changing their physics; `TRUE` shows them. A geometry-only `set` preserves
+the saved regime set, while a combined command replaces the regime set and
+changes geometry visibility together. The geometry value is persisted and
+reapplied by `start` and `restart`. Values are case-insensitive, but must be
+`TRUE` or `FALSE`.
 
 Inside `regime-console`, keys `1` through `7` toggle Kinship, Agriculture,
 Gold Rush, Water Projects, Hydropower, Tech, and Watershed. Press `c` to clear
@@ -99,14 +99,18 @@ master, a blank inherits the master or remains undefined, and explicit `0` is a
 defined contribution. For each feature on each screen, only defined active
 contributors enter the equal mean; when none define it, the stage retains its
 authored behavior.
+The master and linked files use source-free schema version `2`: reservoir,
+drain/field, obstacle, shoreline, and ecology values remain, while supplemental
+source-area/season columns and source-polygon controls do not. The ordinary
+full-height left river inlet remains part of every water lifecycle.
 
 The operator-level matrix is:
 
 - Kinship removes the reservoir, drain/field, and obstacle constraints and their
-  debug guides, defines source `.10`, and applies the full irregular shoreline,
-  with salmon `11/01–01/31` daily and leaves `10/01–10/31` every 2 days on all
-  seven. Water already retained by a reservoir is released downstream while its
-  existing trail fades normally.
+  debug guides and applies the full irregular shoreline, with salmon
+  `11/01–01/31` daily and leaves `10/01–10/31` every 2 days on all seven. Water
+  already retained by a reservoir is released downstream while its existing
+  trail fades normally.
 - Agriculture defines reservoir `.20` except Cottonwood `0` (counts 1 on
   Shasta/Mill/Feather/American, 2 on McCloud/Delta), drain `.75` everywhere,
   shoreline `.30` on Shasta/McCloud/Cottonwood and `0` elsewhere, with positive
@@ -125,9 +129,10 @@ The operator-level matrix is:
   zero on all seven. Watershed is reserved for the future AI model and is a
   current no-op with no linked per-river file.
 
-The `*_area_fraction` values are deterministic particle admission/encounter
-budgets, not literal geometric coverage. An explicit zero area removes that
-feature's runtime constraint and hides its debug geometry; a zero reservoir
+The reservoir, drain, and obstacle `*_area_fraction` values are deterministic
+particle admission/encounter budgets, not literal geometric coverage. An
+explicit zero area removes that feature's runtime constraint and hides its
+debug geometry; a zero reservoir
 count also removes the reservoir. The Delta panel immediately renders active
 regime names at full alpha and leaves inactive names dim. The renderer currently
 has one physical reservoir; `reservoir_count=2` is retained desired-state data
@@ -157,8 +162,19 @@ the same absolute active set is idempotent: it can be acknowledged without
 reapplying stage features or schedules. Ecology and scheduled reservoir gates
 are evaluated on an actual regime change or model-day boundary, rather than on
 every rendered frame. Kinship's explicit zero drain and obstacle budgets also
-skip the generic polygon-interaction passes; its shoreline remains active and
-uses only the local X spans touched by each head or movement segment.
+skip the generic polygon-interaction passes; its shoreline remains active as a
+bounded edge-turbulence field.
+
+Every real change to the absolute active set advances a layout generation on
+each stage. The five resident drain/field slots and two resident obstacle slots
+are reused but receive fresh per-screen positions; switching `Tech` to
+Agriculture therefore cannot leave the same layout in place. Re-sending the
+identical set does not reroll it. Active fields are newly sized trapezoids rooted
+at alternating top/bottom screen edges. Eligible water curves laterally through
+their river-facing mouths, continues toward the bank, and drains offscreen before
+its fixed head slot is recycled. Obstacles likewise move on each real transition.
+No transition restarts water or grows a node, resource, texture, or particle
+pool.
 
 Before installation, run a representative 12-minute/full-model-year soak on the
 oldest fleet Mac while exercising regime changes and seasonal salmon/leaves.

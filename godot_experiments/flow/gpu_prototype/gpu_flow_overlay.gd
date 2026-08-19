@@ -12,11 +12,9 @@ var reservoir_radius: float = RESERVOIR_RADIUS
 var reservoir_visible: bool = true
 var drain_visible: bool = true
 var obstacle_visible: bool = true
-var source_visible: bool = true
 var show_status_label: bool = true
 var interaction_polygons: Array[Dictionary] = []
 var shoreline_obstacles: Array[Dictionary] = []
-var source_polygons: Array[Dictionary] = []
 
 
 func set_gate_open(value: bool) -> void:
@@ -43,32 +41,21 @@ func set_feature_visibility(
 	show_reservoir: bool,
 	show_drains: bool,
 	show_obstacles: bool,
-	show_sources: bool,
 ) -> void:
 	if (
 		reservoir_visible == show_reservoir
 		and drain_visible == show_drains
 		and obstacle_visible == show_obstacles
-		and source_visible == show_sources
 	):
 		return
 	reservoir_visible = show_reservoir
 	drain_visible = show_drains
 	obstacle_visible = show_obstacles
-	source_visible = show_sources
 	queue_redraw()
 
 
 func is_reservoir_visible() -> bool:
 	return reservoir_visible
-
-
-func is_source_visible() -> bool:
-	return source_visible
-
-
-func get_visible_source_polygon_count() -> int:
-	return source_polygons.size() if source_visible else 0
 
 
 func get_visible_interaction_polygon_count() -> int:
@@ -94,11 +81,6 @@ func set_shoreline_obstacles(definitions: Array[Dictionary]) -> void:
 	queue_redraw()
 
 
-func set_source_polygons(definitions: Array[Dictionary]) -> void:
-	source_polygons = definitions.duplicate(true)
-	queue_redraw()
-
-
 func get_interaction_polygon_count() -> int:
 	return interaction_polygons.size()
 
@@ -107,17 +89,11 @@ func get_shoreline_obstacle_count() -> int:
 	return shoreline_obstacles.size()
 
 
-func get_source_polygon_count() -> int:
-	return source_polygons.size()
-
-
 func _draw() -> void:
 	if reservoir_visible:
 		_draw_reservoir()
 	_draw_interaction_polygons()
 	_draw_shoreline_obstacles()
-	if source_visible:
-		_draw_source_polygons()
 	draw_rect(Rect2(Vector2.ZERO, STAGE_SIZE), Color("1f3642"), false, 2.0)
 	if not show_status_label:
 		return
@@ -178,59 +154,6 @@ func _draw_shoreline_obstacles() -> void:
 		# Only the water-facing edge is visible. The offscreen land closure is
 		# deliberately absent so debug drawing matches the segments used by physics.
 		draw_polyline(vertices, color, 4.0, true)
-
-
-func _draw_source_polygons() -> void:
-	# Violet distinguishes sources from gold interactions and the cyan reservoir.
-	var outline_color := Color(0.78039216, 0.49019608, 1.0, 1.0)
-	for definition: Dictionary in source_polygons:
-		var vertices_variant: Variant = definition.get(
-			"vertices", PackedVector2Array()
-		)
-		if not vertices_variant is PackedVector2Array:
-			continue
-		var vertices: PackedVector2Array = vertices_variant
-		if vertices.size() < 3:
-			continue
-		var color := outline_color
-		if not bool(definition.get("enabled", true)):
-			color.a *= 0.35
-		var closed_vertices := vertices.duplicate()
-		closed_vertices.append(vertices[0])
-		draw_polyline(closed_vertices, color, 4.0, true)
-		var edges_variant: Variant = definition.get("downstream_edges", [])
-		if not edges_variant is Array:
-			continue
-		for edge_variant: Variant in edges_variant:
-			if not edge_variant is Dictionary:
-				continue
-			_draw_source_edge_marker(edge_variant, color)
-
-
-func _draw_source_edge_marker(edge: Dictionary, color: Color) -> void:
-	var start_variant: Variant = edge.get("start")
-	var end_variant: Variant = edge.get("end")
-	var normal_variant: Variant = edge.get("outward_normal")
-	if (
-		not start_variant is Vector2
-		or not end_variant is Vector2
-		or not normal_variant is Vector2
-	):
-		return
-	var start: Vector2 = start_variant
-	var end: Vector2 = end_variant
-	var outward: Vector2 = normal_variant
-	if outward.length_squared() <= 0.000000000001:
-		return
-	outward = outward.normalized()
-	var tangent := Vector2(-outward.y, outward.x)
-	var midpoint := start.lerp(end, 0.5)
-	var tick_start := midpoint - outward * 2.0
-	var tip := midpoint + outward * 13.0
-	var arrow_base := tip - outward * 5.0
-	draw_line(tick_start, tip, color, 3.0, true)
-	draw_line(tip, arrow_base + tangent * 3.5, color, 3.0, true)
-	draw_line(tip, arrow_base - tangent * 3.5, color, 3.0, true)
 
 
 func _draw_reservoir() -> void:

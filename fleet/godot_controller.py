@@ -192,6 +192,7 @@ def perform(target: str, action: str) -> tuple[str, bool, str]:
             "flow/data/regimes/water_projects.txt",
             "flow/data/regimes/hydropower.txt",
             "flow/data/regimes/tech.txt",
+            "flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt",
             *(f"scene_{stage}.tscn" for stage in computer["stages"]),
         ]
         if computer["local"]:

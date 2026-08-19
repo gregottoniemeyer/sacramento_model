@@ -38,7 +38,6 @@ signal watershed_data_row_changed(
 	model_date_time: String
 )
 signal interaction_geometry_changed(screen_id: StringName, polygon_count: int)
-signal source_geometry_changed(screen_id: StringName, source_count: int)
 signal salmon_released(
 	screen_id: StringName,
 	requested_count: int,
@@ -81,12 +80,6 @@ const LEAF_SCRIPT := preload(
 const GPUFlowInteractionPolygon = preload(
 	"res://flow/gpu_stage/gpu_flow_interaction_polygon.gd"
 )
-const GPUFlowSourcePolygon = preload(
-	"res://flow/gpu_stage/gpu_flow_source_polygon.gd"
-)
-const SOURCE_TEXTURE_PACKER_SCRIPT := preload(
-	"res://flow/gpu_stage/gpu_flow_source_texture_packer.gd"
-)
 const STAGE_TITLE_FONT := preload(
 	"res://flow/assets/fonts/BarlowCondensed-Medium.ttf"
 )
@@ -118,7 +111,6 @@ const INTERACTION_TEXELS_PER_POLYGON := 16
 const INTERACTION_TEXTURE_WIDTH := (
 	MAX_INTERACTION_POLYGONS * INTERACTION_TEXELS_PER_POLYGON
 )
-const MAX_SOURCE_POLYGONS := 8
 const SHORELINE_OBSTACLE_COUNT := 2
 const SHORELINE_EDGE_SPAN_COUNT := 16
 const SHORELINE_EDGE_VERTEX_COUNT := SHORELINE_EDGE_SPAN_COUNT + 1
@@ -140,7 +132,16 @@ const REGIME_RESERVOIR_X_FRACTION_RANGE := Vector2(0.32, 0.82)
 const REGIME_RESERVOIR_Y_FRACTION_RANGE := Vector2(0.24, 0.76)
 const REGIME_DRAIN_SLOT_CAPACITY := 5
 const REGIME_OBSTACLE_SLOT_CAPACITY := 2
-const REGIME_SOURCE_SLOT_CAPACITY := 4
+const REGIME_FIELD_X_RANGE := Vector2(1.50, 14.50)
+const REGIME_FIELD_LANE_PADDING_WORLD := 0.18
+const REGIME_FIELD_ROOT_WIDTH_RANGE := Vector2(0.90, 1.30)
+const REGIME_FIELD_MOUTH_WIDTH_RANGE := Vector2(0.65, 0.95)
+const REGIME_FIELD_DEPTH_RANGE := Vector2(1.55, 2.15)
+const BANK_FIELD_SUCTION_REACH_PIXELS := 180.0
+const BANK_FIELD_SUCTION_CROSSFLOW_RATIO := 1.25
+const BANK_FIELD_SUCTION_STREAMWISE_RATIO := 0.06
+const BANK_FIELD_CAPTURE_DEPTH_PIXELS := 10.0
+const INTERACTION_BANK_EDGE_EPSILON_PIXELS := 1.0
 const TYPE_ROTATION_RADIANS := -PI * 0.5
 const TYPE_ROTATION_DEGREES := -90.0
 const STAGE_TITLE_POSITION := Vector2(60.0, 540.0)
@@ -149,6 +150,12 @@ const STAGE_TITLE_FONT_SIZE := 60
 const MODEL_DATE_FONT_SIZE := 48
 const MODEL_DATE_OPENTYPE_FEATURE := "tnum"
 const MODEL_DATE_POSITION := Vector2(1860.0, 540.0)
+const WATER_TEMPERATURE_FONT_SIZE := 48
+const WATER_TEMPERATURE_POSITION := Vector2(1740.0, 540.0)
+const WATER_TEMPERATURE_EXPECTED_ROW_COUNT := 720
+const WATER_TEMPERATURE_INTERPOLATION_MODE := (
+	"HALF_OPEN_ANNUAL_LINEAR_WRAP"
+)
 const REGIME_PANEL_POSITION := Vector2(1324.0, 1050.0)
 const REGIME_HEADING_TEXT := "Regime"
 const REGIME_HEADING_FONT_SIZE := 48
@@ -222,6 +229,10 @@ const DEFAULT_GRID_COLOR := Color(
 	set(value):
 		stage_date_visible = value
 		_apply_model_date(false)
+@export var stage_temperature_visible: bool = false:
+	set(value):
+		stage_temperature_visible = value
+		_apply_water_temperature()
 @export_range(1.0, 86400.0, 1.0) var model_year_duration_seconds: float = 720.0
 @export_range(0, MODEL_CALENDAR_DAY_COUNT - 1, 1) var model_start_day_index: int = 0
 @export var model_calendar_auto_advance: bool = true
@@ -230,6 +241,20 @@ const DEFAULT_GRID_COLOR := Color(
 @export_file("*.txt") var watershed_data_path: String = ""
 @export var watershed_data_drives_flow_rate: bool = true
 @export var watershed_interpolate_flow_rate: bool = true
+
+@export_group("Water Temperature")
+@export_file("*.txt") var temperature_data_path: String = "":
+	set(value):
+		temperature_data_path = value
+		if is_node_ready():
+			_load_temperature_data()
+			_update_temperature_timeline()
+@export var temperature_data_column: String = "":
+	set(value):
+		temperature_data_column = value
+		if is_node_ready():
+			_load_temperature_data()
+			_update_temperature_timeline()
 
 @export_group("Runtime")
 @export var auto_start: bool = true
@@ -297,10 +322,6 @@ var _requested_gate_width: float = 0.25
 @export var install_default_interaction_examples: bool = true
 @export var interaction_polygons: Array[GPUFlowInteractionPolygon] = []
 
-@export_group("Water Sources")
-@export var install_default_source_examples: bool = true
-@export var source_polygons: Array[GPUFlowSourcePolygon] = []
-
 @export_group("Salmon")
 @export var salmon_enabled: bool = true
 @export_range(1, 300, 1) var salmon_per_release: int = 25
@@ -361,6 +382,7 @@ var _stage_title_layer: Node2D
 var _stage_title_label: Label
 var _model_date_label: Label
 var _model_date_font: FontVariation
+var _water_temperature_label: Label
 var _model_timeline: Node
 var _model_regimes: Node
 var _regime_panel: Node2D
@@ -382,17 +404,14 @@ var _regime_drain_override_enabled: bool = false
 var _regime_drain_power_override_enabled: bool = false
 var _regime_obstacle_override_enabled: bool = false
 var _regime_obstacle_power_override_enabled: bool = false
-var _regime_source_override_enabled: bool = false
 var _regime_reservoir_present: bool = true
 var _regime_drain_present: bool = true
 var _regime_obstacle_present: bool = true
-var _regime_source_present: bool = true
 var _regime_reservoir_weight: float = 1.0
 var _regime_drain_weight: float = 1.0
 var _regime_drain_power: float = 1.0
 var _regime_obstacle_weight: float = 1.0
 var _regime_obstacle_power: float = 1.0
-var _regime_source_weight: float = 1.0
 var _regime_reservoir_count: float = 0.0
 var _regime_gate_override_enabled: bool = false
 var _regime_gate_open_fraction: float = 1.0
@@ -407,22 +426,16 @@ var _authored_reservoir_center_pixels := Vector2.ZERO
 var _authored_interaction_vertices: Dictionary = {}
 var _authored_interaction_instance_ids: Dictionary = {}
 var _authored_interaction_enabled: Dictionary = {}
-var _authored_source_vertices: Dictionary = {}
-var _authored_source_instance_ids: Dictionary = {}
-var _authored_source_enabled: Dictionary = {}
 var _applied_regime_geometry_keys: Dictionary = {
 	"reservoir": "",
 	"drain": "",
 	"obstacle": "",
-	"source": "",
 }
 var _reservoir_geometry_revision: int = 0
 var _applied_regime_state_revision: int = -1
+var _regime_layout_generation: int = 0
+var _regime_layout_active_signature: String = ""
 var _regime_geometry_update_count: int = 0
-var _source_texture_packer: GPUFlowSourceTexturePacker
-var _source_data_texture: ImageTexture
-var _source_geometry_batch_depth: int = 0
-var _source_geometry_dirty: bool = false
 var _paused: bool = false
 var _pause_state_applied_to_runtime: bool = false
 var _gate_state_applied_to_runtime: bool = false
@@ -449,6 +462,13 @@ var _watershed_data_error: String = ""
 var _watershed_row_index: int = -1
 var _watershed_row_fraction: float = 0.0
 var _watershed_interpolated_flow_rate: float = 0.0
+var _temperature_values := PackedFloat32Array()
+var _temperature_data_error: String = ""
+var _temperature_data_status: String = "NOT_CONFIGURED"
+var _temperature_row_index: int = -1
+var _temperature_row_fraction: float = 0.0
+var _temperature_current_value_c: float = 0.0
+var _temperature_value_valid: bool = false
 
 
 func _ready() -> void:
@@ -457,16 +477,11 @@ func _ready() -> void:
 	_bind_model_regimes()
 	_apply_regime_features_from_state(_regime_snapshot)
 	_install_default_interaction_polygons_if_needed()
-	_install_default_source_polygons_if_needed()
 	_ensure_regime_feature_slot_banks()
 	_capture_authored_regime_geometry()
 	_apply_regime_geometry_from_state()
-	_source_texture_packer = SOURCE_TEXTURE_PACKER_SCRIPT.new(
-		STAGE_SIZE,
-		WORLD_SIZE
-	)
-	_source_data_texture = _source_texture_packer.get_texture()
 	_load_watershed_data()
+	_load_temperature_data()
 	_sync_from_model_timeline(false)
 	_build_background()
 	_build_background_grid()
@@ -477,12 +492,10 @@ func _ready() -> void:
 	_build_overlay()
 	_build_stage_title()
 	_bind_interaction_polygon_signals()
-	_bind_source_polygon_signals()
 	_apply_identity()
 	_apply_runtime_parameters()
 	_apply_interaction_geometry()
 	_apply_shoreline_geometry()
-	_apply_source_geometry()
 	_apply_gate()
 	_apply_debug_visibility()
 	_apply_stage_title()
@@ -754,19 +767,8 @@ func apply_interaction_polygons() -> void:
 	_apply_interaction_geometry()
 
 
-func apply_source_polygons() -> void:
-	## Re-upload exported source resources after direct runtime edits.
-	_bind_source_polygon_signals()
-	_source_geometry_dirty = false
-	_apply_source_geometry()
-
-
 func get_interaction_polygon(element_id: StringName) -> GPUFlowInteractionPolygon:
 	return _find_interaction_polygon(element_id)
-
-
-func get_source_polygon(element_id: StringName) -> GPUFlowSourcePolygon:
-	return _find_source_polygon(element_id)
 
 
 func release_salmon(count: int = -1) -> int:
@@ -844,6 +846,13 @@ func _bind_model_regimes() -> void:
 
 func _on_model_regimes_changed(state: Dictionary) -> void:
 	var next_regime_revision := int(state.get("revision", 0))
+	var next_active_signature := _regime_active_signature(state)
+	if (
+		_regime_geometry_initialized
+		and next_active_signature != _regime_layout_active_signature
+	):
+		_regime_layout_generation += 1
+	_regime_layout_active_signature = next_active_signature
 	if (
 		_regime_geometry_initialized
 		and next_regime_revision != _applied_regime_state_revision
@@ -866,6 +875,17 @@ func _on_model_regimes_changed(state: Dictionary) -> void:
 		)
 
 
+func _regime_active_signature(state: Dictionary) -> String:
+	var active_indices_variant: Variant = state.get("active_indices", [])
+	if not active_indices_variant is Array:
+		return ""
+	var parts := PackedStringArray()
+	for index_variant: Variant in active_indices_variant:
+		if typeof(index_variant) == TYPE_INT or typeof(index_variant) == TYPE_FLOAT:
+			parts.append(str(int(index_variant)))
+	return "|".join(parts)
+
+
 func _apply_regime_features_from_state(state: Dictionary) -> void:
 	_regime_feature_state_for_screen = _regime_screen_feature_state(state)
 	# The renderer remains opt-in so reusable/legacy stages preserve their authored
@@ -877,18 +897,15 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 		_regime_drain_power_override_enabled = false
 		_regime_obstacle_override_enabled = false
 		_regime_obstacle_power_override_enabled = false
-		_regime_source_override_enabled = false
 		_regime_gate_aperture_override_enabled = false
 		_regime_reservoir_present = true
 		_regime_drain_present = true
 		_regime_obstacle_present = true
-		_regime_source_present = true
 		_regime_reservoir_weight = 1.0
 		_regime_drain_weight = 1.0
 		_regime_drain_power = 1.0
 		_regime_obstacle_weight = 1.0
 		_regime_obstacle_power = 1.0
-		_regime_source_weight = 1.0
 		_regime_reservoir_count = 0.0
 		set_shoreline_randomness(0.0)
 		_apply_regime_geometry_from_state()
@@ -918,10 +935,6 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 		_regime_feature_state_for_screen,
 		"obstacle_power",
 	)
-	_regime_source_override_enabled = _regime_feature_is_defined(
-		_regime_feature_state_for_screen,
-		"source_area_fraction",
-	)
 	_regime_reservoir_weight = _regime_screen_fraction(
 		_regime_feature_state_for_screen,
 		"reservoir_area_fraction",
@@ -945,11 +958,6 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 	_regime_obstacle_power = _regime_screen_fraction(
 		_regime_feature_state_for_screen,
 		"obstacle_power",
-		1.0,
-	)
-	_regime_source_weight = _regime_screen_fraction(
-		_regime_feature_state_for_screen,
-		"source_area_fraction",
 		1.0,
 	)
 	_regime_reservoir_count = _regime_screen_number(
@@ -976,10 +984,6 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 	_regime_obstacle_present = (
 		not _regime_obstacle_override_enabled
 		or _regime_obstacle_weight > 0.000001
-	)
-	_regime_source_present = (
-		not _regime_source_override_enabled
-		or _regime_source_weight > 0.000001
 	)
 	_regime_gate_aperture_override_enabled = _regime_feature_is_defined(
 		_regime_feature_state_for_screen,
@@ -1101,27 +1105,6 @@ func _ensure_regime_feature_slot_banks() -> void:
 		interaction_polygons.append(clone)
 		obstacle_count += 1
 
-	var source_template: GPUFlowSourcePolygon
-	var source_count := 0
-	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
-		source_count += 1
-		if source_template == null:
-			source_template = source
-	while (
-		source_template != null
-		and source_count < REGIME_SOURCE_SLOT_CAPACITY
-		and source_polygons.size() < MAX_SOURCE_POLYGONS
-	):
-		var clone := GPUFlowSourcePolygon.new()
-		var definition := source_template.to_dictionary()
-		definition["element_id"] = "regime_source_slot_%d" % (source_count + 1)
-		definition["enabled"] = false
-		definition["seed"] = 1701 + (source_count + 1) * 977
-		if clone == null or not clone.apply_dictionary(definition):
-			break
-		source_polygons.append(clone)
-		source_count += 1
-
 
 func _capture_authored_regime_geometry() -> void:
 	## Keep immutable fallbacks for a cleared/undefined regime. Runtime switching
@@ -1140,18 +1123,8 @@ func _capture_authored_regime_geometry() -> void:
 			polygon.get_instance_id()
 		)
 		_authored_interaction_enabled[String(polygon.element_id)] = polygon.enabled
-	_authored_source_vertices.clear()
-	_authored_source_instance_ids.clear()
-	_authored_source_enabled.clear()
-	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
-		_authored_source_vertices[String(source.element_id)] = (
-			source.vertices.duplicate()
-		)
-		_authored_source_instance_ids[String(source.element_id)] = (
-			source.get_instance_id()
-		)
-		_authored_source_enabled[String(source.element_id)] = source.enabled
 	_regime_geometry_initialized = true
+	_regime_layout_active_signature = _regime_active_signature(_regime_snapshot)
 	_applied_regime_state_revision = int(_regime_snapshot.get("revision", 0))
 
 
@@ -1183,9 +1156,10 @@ func _regime_geometry_key(feature_name: String) -> String:
 	var contributors := _regime_layout_contributor_ids()
 	if contributors.is_empty():
 		return REGIME_GEOMETRY_BASELINE_KEY
-	return "active:%s:%s" % [
+	return "active:%s:%s:g%d" % [
 		feature_name,
 		"|".join(PackedStringArray(contributors)),
+		_regime_layout_generation,
 	]
 
 
@@ -1198,7 +1172,6 @@ func _regime_layout_contributor_ids() -> Array[String]:
 		"reservoir_area_fraction",
 		"drain_area_fraction",
 		"obstacle_area_fraction",
-		"source_area_fraction",
 		"shoreline_randomness",
 	]:
 		for contributor_id: String in _regime_feature_contributor_ids(feature_name):
@@ -1224,11 +1197,6 @@ func _regime_applied_feature_slot_count(feature_kind: String) -> int:
 			present = _regime_obstacle_present
 			override_enabled = _regime_obstacle_override_enabled
 			weight = _regime_obstacle_weight
-		"source":
-			capacity = REGIME_SOURCE_SLOT_CAPACITY
-			present = _regime_source_present
-			override_enabled = _regime_source_override_enabled
-			weight = _regime_source_weight
 	if not present:
 		return 0
 	if not override_enabled:
@@ -1241,13 +1209,6 @@ func _regime_managed_feature_slot_count(
 	enabled_only: bool = false,
 ) -> int:
 	var result := 0
-	if feature_kind == "source":
-		for source: GPUFlowSourcePolygon in _gpu_source_polygons():
-			if not _is_regime_managed_source_polygon(source):
-				continue
-			if not enabled_only or source.enabled:
-				result += 1
-		return result
 	if feature_kind != "drain" and feature_kind != "obstacle":
 		return 0
 	var expected_mode := (
@@ -1277,15 +1238,6 @@ func _is_regime_managed_interaction_polygon(
 	)
 
 
-func _is_regime_managed_source_polygon(source: GPUFlowSourcePolygon) -> bool:
-	var element_id := String(source.element_id)
-	return (
-		_authored_source_instance_ids.has(element_id)
-		and int(_authored_source_instance_ids[element_id])
-			== source.get_instance_id()
-	)
-
-
 func _regime_seeded_center_world(
 	feature_kind: String,
 	contributors: Array[String],
@@ -1304,8 +1256,6 @@ func _regime_seeded_center_world(
 			region = Rect2(Vector2(2.0, 1.0), Vector2(11.5, 3.1))
 		"obstacle":
 			region = Rect2(Vector2(3.0, 4.7), Vector2(11.0, 3.2))
-		"source":
-			region = Rect2(Vector2(0.8, 1.4), Vector2(4.8, 6.2))
 	var minimum_center := region.position + half_extent
 	var maximum_center := region.end - half_extent
 	if maximum_center.x < minimum_center.x:
@@ -1320,23 +1270,33 @@ func _regime_seeded_center_world(
 			slot_capacity = REGIME_DRAIN_SLOT_CAPACITY
 		"obstacle":
 			slot_capacity = REGIME_OBSTACLE_SLOT_CAPACITY
-		"source":
-			slot_capacity = REGIME_SOURCE_SLOT_CAPACITY
+	var effective_slot_index := slot_index
+	if slot_capacity > 1 and not contributors.is_empty():
+		# Every real active-set transition reverses the visible lane assignment.
+		# Contributor/generation seeds still vary positions within those lanes.
+		var reverse_lanes := _regime_layout_generation % 2 == 1
+		if reverse_lanes:
+			effective_slot_index = slot_capacity - 1 - slot_index
 	if slot_capacity > 1 and maximum_center.x > minimum_center.x:
 		var complete_minimum_x := minimum_center.x
 		var complete_width := maximum_center.x - minimum_center.x
 		var slot_width := complete_width / float(slot_capacity)
-		minimum_center.x = complete_minimum_x + slot_width * float(slot_index)
-		maximum_center.x = complete_minimum_x + slot_width * float(slot_index + 1)
+		minimum_center.x = (
+			complete_minimum_x + slot_width * float(effective_slot_index)
+		)
+		maximum_center.x = (
+			complete_minimum_x + slot_width * float(effective_slot_index + 1)
+		)
 	if contributors.is_empty():
 		return region.get_center()
 	var blended_center := Vector2.ZERO
 	for contributor_id: String in contributors:
-		var seed_prefix := "%s:%s:%s:%d" % [
+		var seed_prefix := "%s:%s:%s:%d:g%d" % [
 			String(screen_id),
 			contributor_id,
 			feature_kind,
 			slot_index,
+			_regime_layout_generation,
 		]
 		blended_center += Vector2(
 			lerpf(
@@ -1351,6 +1311,102 @@ func _regime_seeded_center_world(
 			),
 		)
 	return blended_center / float(contributors.size())
+
+
+func _regime_contributor_seed_average(
+	contributors: Array[String],
+	slot_index: int,
+	property_name: String,
+) -> float:
+	if contributors.is_empty():
+		return _stable_interaction_seed(StringName(
+			"%s:authored:drain:%d:%s:g%d" % [
+				String(screen_id),
+				slot_index,
+				property_name,
+				_regime_layout_generation,
+			]
+		))
+	var total := 0.0
+	for contributor_id: String in contributors:
+		total += _stable_interaction_seed(StringName(
+			"%s:%s:drain:%d:%s:g%d" % [
+				String(screen_id),
+				contributor_id,
+				slot_index,
+				property_name,
+				_regime_layout_generation,
+			]
+		))
+	return total / float(contributors.size())
+
+
+func _regime_field_bank_phase(_contributors: Array[String]) -> int:
+	# Adjacent real transitions always swap every field to the opposite bank.
+	return _regime_layout_generation % 2
+
+
+func _regime_seeded_field_vertices_world(
+	contributors: Array[String],
+	slot_index: int,
+	active_count: int,
+) -> PackedVector2Array:
+	## Each managed field is a stable trapezoid rooted in exactly one physical
+	## bank. Active slots are stratified across the river length, while a seeded
+	## phase alternates top/bottom so four Agriculture fields resolve to 2 + 2.
+	var lane_count := maxi(active_count, 1)
+	var active_slot_index := clampi(slot_index, 0, lane_count - 1)
+	var lane_width := (
+		REGIME_FIELD_X_RANGE.y - REGIME_FIELD_X_RANGE.x
+	) / float(lane_count)
+	var lane_left := (
+		REGIME_FIELD_X_RANGE.x + lane_width * float(active_slot_index)
+	)
+	var lane_right := lane_left + lane_width
+	var root_width := lerpf(
+		REGIME_FIELD_ROOT_WIDTH_RANGE.x,
+		REGIME_FIELD_ROOT_WIDTH_RANGE.y,
+		_regime_contributor_seed_average(contributors, slot_index, "root"),
+	)
+	var mouth_width := lerpf(
+		REGIME_FIELD_MOUTH_WIDTH_RANGE.x,
+		REGIME_FIELD_MOUTH_WIDTH_RANGE.y,
+		_regime_contributor_seed_average(contributors, slot_index, "mouth"),
+	)
+	var depth := lerpf(
+		REGIME_FIELD_DEPTH_RANGE.x,
+		REGIME_FIELD_DEPTH_RANGE.y,
+		_regime_contributor_seed_average(contributors, slot_index, "depth"),
+	)
+	var half_width := maxf(root_width, mouth_width) * 0.5
+	var center_minimum := lane_left + half_width + REGIME_FIELD_LANE_PADDING_WORLD
+	var center_maximum := lane_right - half_width - REGIME_FIELD_LANE_PADDING_WORLD
+	if center_maximum < center_minimum:
+		center_minimum = (lane_left + lane_right) * 0.5
+		center_maximum = center_minimum
+	var center_x := lerpf(
+		center_minimum,
+		center_maximum,
+		_regime_contributor_seed_average(contributors, slot_index, "x"),
+	)
+	var root_half_width := root_width * 0.5
+	var mouth_half_width := mouth_width * 0.5
+	var top_bank := (
+		(slot_index + _regime_field_bank_phase(contributors)) % 2 == 0
+	)
+	if top_bank:
+		return PackedVector2Array([
+			Vector2(center_x - mouth_half_width, WORLD_SIZE.y - depth),
+			Vector2(center_x + mouth_half_width, WORLD_SIZE.y - depth),
+			Vector2(center_x + root_half_width, WORLD_SIZE.y),
+			Vector2(center_x - root_half_width, WORLD_SIZE.y),
+		])
+	return PackedVector2Array([
+		Vector2(center_x - root_half_width, 0.0),
+		Vector2(center_x + root_half_width, 0.0),
+		Vector2(center_x + mouth_half_width, depth),
+		Vector2(center_x - mouth_half_width, depth),
+	])
 
 
 func _regime_seeded_reservoir_center_pixels(
@@ -1381,9 +1437,10 @@ func _regime_seeded_reservoir_center_pixels(
 	maximum_center = maximum_center.max(minimum_center)
 	var blended_center := Vector2.ZERO
 	for contributor_id: String in contributors:
-		var seed_prefix := "%s:%s:reservoir:0" % [
+		var seed_prefix := "%s:%s:reservoir:0:g%d" % [
 			String(screen_id),
 			contributor_id,
+			_regime_layout_generation,
 		]
 		blended_center += Vector2(
 			lerpf(
@@ -1455,11 +1512,9 @@ func _apply_regime_geometry_from_state() -> void:
 	var reservoir_key := _regime_geometry_key("reservoir_area_fraction")
 	var drain_key := _regime_geometry_key("drain_area_fraction")
 	var obstacle_key := _regime_geometry_key("obstacle_area_fraction")
-	var source_key := _regime_geometry_key("source_area_fraction")
 	var layout_contributors := _regime_layout_contributor_ids()
 	var drain_active_count := _regime_applied_feature_slot_count("drain")
 	var obstacle_active_count := _regime_applied_feature_slot_count("obstacle")
-	var source_active_count := _regime_applied_feature_slot_count("source")
 	var any_geometry_changed := false
 
 	if String(_applied_regime_geometry_keys.get("reservoir", "")) != reservoir_key:
@@ -1521,16 +1576,23 @@ func _apply_regime_geometry_from_state() -> void:
 				if feature_kind == "drain"
 				else obstacle_active_count
 			)
-			var bounds := _world_polygon_bounds(baseline_vertices)
-			target_vertices = _translated_polygon_vertices(
-				baseline_vertices,
-				_regime_seeded_center_world(
-					feature_kind,
+			if feature_kind == "drain":
+				target_vertices = _regime_seeded_field_vertices_world(
 					layout_contributors,
 					slot_index,
-					bounds.size * 0.5,
-				),
-			)
+					drain_active_count,
+				)
+			else:
+				var bounds := _world_polygon_bounds(baseline_vertices)
+				target_vertices = _translated_polygon_vertices(
+					baseline_vertices,
+					_regime_seeded_center_world(
+						feature_kind,
+						layout_contributors,
+						slot_index,
+						bounds.size * 0.5,
+					),
+				)
 		if not _packed_vector2_arrays_equal(polygon.vertices, target_vertices):
 			polygon.vertices = target_vertices
 			interaction_geometry_changed = true
@@ -1542,48 +1604,6 @@ func _apply_regime_geometry_from_state() -> void:
 	if interaction_geometry_changed:
 		if not _process_material_layers.is_empty():
 			_apply_interaction_geometry()
-		any_geometry_changed = true
-
-	var source_geometry_changed := false
-	var source_slot := 0
-	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
-		var element_id := String(source.element_id)
-		if (
-			not _authored_source_vertices.has(element_id)
-			or int(_authored_source_instance_ids.get(element_id, -1))
-				!= source.get_instance_id()
-		):
-			continue
-		var baseline_variant: Variant = _authored_source_vertices[element_id]
-		var baseline_vertices: PackedVector2Array = baseline_variant
-		var target_vertices := baseline_vertices.duplicate()
-		var target_enabled := bool(_authored_source_enabled.get(
-			element_id,
-			source.enabled,
-		))
-		if source_key != REGIME_GEOMETRY_BASELINE_KEY:
-			target_enabled = source_slot < source_active_count
-			var bounds := _world_polygon_bounds(baseline_vertices)
-			target_vertices = _translated_polygon_vertices(
-				baseline_vertices,
-				_regime_seeded_center_world(
-					"source",
-					layout_contributors,
-					source_slot,
-					bounds.size * 0.5,
-				),
-			)
-		if not _packed_vector2_arrays_equal(source.vertices, target_vertices):
-			source.vertices = target_vertices
-			source_geometry_changed = true
-		if source.enabled != target_enabled:
-			source.enabled = target_enabled
-			source_geometry_changed = true
-		source_slot += 1
-	_applied_regime_geometry_keys["source"] = source_key
-	if source_geometry_changed:
-		if not _process_material_layers.is_empty():
-			_apply_source_geometry()
 		any_geometry_changed = true
 
 	if any_geometry_changed:
@@ -1621,10 +1641,6 @@ func _apply_regime_shader_parameters() -> void:
 			_regime_obstacle_power_override_enabled
 		)
 		process_material.set_shader_parameter(
-			&"regime_source_override_enabled",
-			_regime_source_override_enabled
-		)
-		process_material.set_shader_parameter(
 			&"regime_reservoir_weight",
 			_regime_reservoir_weight
 		)
@@ -1645,10 +1661,6 @@ func _apply_regime_shader_parameters() -> void:
 			_regime_obstacle_power
 		)
 		process_material.set_shader_parameter(
-			&"regime_source_weight",
-			_regime_source_weight
-		)
-		process_material.set_shader_parameter(
 			&"reservoir_geometry_revision",
 			float(_reservoir_geometry_revision)
 		)
@@ -1658,7 +1670,6 @@ func _apply_regime_shader_parameters() -> void:
 			_regime_reservoir_present,
 			_regime_drain_present,
 			_regime_obstacle_present,
-			_regime_source_present,
 		)
 
 
@@ -1979,7 +1990,7 @@ func _sync_from_model_timeline(
 	var minute_changed := previous_minute_of_day != _model_minute_of_day
 	if day_changed or minute_changed:
 		_apply_model_date(emit_date_signal and day_changed)
-	_update_watershed_timeline()
+	_update_model_data_timelines()
 	# Ecology schedules and reservoir gate seasons have day precision. Regime
 	# changes apply them immediately through _on_model_regimes_changed(); timeline
 	# frames only need a reevaluation when the synthetic calendar day changes.
@@ -2007,7 +2018,7 @@ func set_model_date_mm_dd(model_date_time: String) -> bool:
 	_model_minute_of_day = parsed_time.y
 	_align_model_elapsed_to_current_day()
 	_apply_model_date()
-	_update_watershed_timeline()
+	_update_model_data_timelines()
 	_apply_regime_ecology_schedule()
 	return true
 
@@ -2027,7 +2038,7 @@ func set_model_calendar_auto_advance(value: bool) -> void:
 	elif _model_date_source == &"internal_clock":
 		_model_date_source = &"manual_hold"
 	_apply_model_date(false)
-	_update_watershed_timeline()
+	_update_model_data_timelines()
 
 
 func reset_model_calendar() -> void:
@@ -2097,6 +2108,18 @@ func set_runtime_parameter(
 		"stage.date_visible", "stage_date_visible":
 			stage_date_visible = bool(value)
 			return true
+		"stage.temperature_visible", "temperature.visible", \
+		"temperature_visible", "stage_temperature_visible":
+			stage_temperature_visible = bool(value)
+			return true
+		"temperature.data_path", "stage.temperature_data_path", \
+		"temperature_data_path":
+			temperature_data_path = String(value)
+			return _temperature_data_status == "READY"
+		"temperature.data_column", "stage.temperature_data_column", \
+		"temperature_data_column":
+			temperature_data_column = String(value)
+			return _temperature_data_status == "READY"
 		"stage.date", "calendar.date", "model_date":
 			return set_model_date_mm_dd(String(value))
 		"calendar.day_index", "model_day_index":
@@ -2115,7 +2138,7 @@ func set_runtime_parameter(
 				_model_date_source = &"external_day_index"
 				_set_model_day_index(parsed_day_index)
 				_align_model_elapsed_to_current_day()
-				_update_watershed_timeline()
+				_update_model_data_timelines()
 			return true
 		"calendar.auto_advance", "model_calendar_auto_advance":
 			set_model_calendar_auto_advance(bool(value))
@@ -2129,7 +2152,7 @@ func set_runtime_parameter(
 			else:
 				model_year_duration_seconds = parsed_year_duration
 				_align_model_elapsed_to_current_day()
-				_update_watershed_timeline()
+				_update_model_data_timelines()
 			return true
 		"calendar.start_day_index", "model_start_day_index":
 			var parsed_start_day := _strict_nonnegative_int(value)
@@ -2147,16 +2170,16 @@ func set_runtime_parameter(
 			watershed_data_path = String(value)
 			var data_loaded := _load_watershed_data()
 			if data_loaded:
-				_update_watershed_timeline()
+				_update_model_data_timelines()
 			return data_loaded
 		"watershed.drives_flow_rate", "watershed_data_drives_flow_rate":
 			watershed_data_drives_flow_rate = bool(value)
 			if watershed_data_drives_flow_rate:
-				_update_watershed_timeline()
+				_update_model_data_timelines()
 			return true
 		"watershed.interpolate_flow_rate", "watershed_interpolate_flow_rate":
 			watershed_interpolate_flow_rate = bool(value)
-			_update_watershed_timeline()
+			_update_model_data_timelines()
 			return true
 		"shoreline.randomness", "shorelines.randomness", "shoreline_randomness":
 			if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
@@ -2188,16 +2211,6 @@ func set_runtime_parameter(
 			return set_regime_active(5, bool(value))
 		"regimes.watershed":
 			return set_regime_active(6, bool(value))
-	if _is_source_parameter_path(path_string):
-		if not apply_immediately:
-			_source_geometry_batch_depth += 1
-		var source_changed := _set_source_parameter_by_path(path_string, value)
-		if not apply_immediately:
-			_source_geometry_batch_depth = maxi(
-				_source_geometry_batch_depth - 1,
-				0
-			)
-		return source_changed
 	if _is_interaction_parameter_path(path_string):
 		var interaction_changed := _set_interaction_parameter_by_path(
 			path_string,
@@ -2473,6 +2486,16 @@ func _is_direct_apply_parameter_path(path: String) -> bool:
 		"stage_grid_color",
 		"stage.date_visible",
 		"stage_date_visible",
+		"stage.temperature_visible",
+		"temperature.visible",
+		"temperature_visible",
+		"stage_temperature_visible",
+		"temperature.data_path",
+		"stage.temperature_data_path",
+		"temperature_data_path",
+		"temperature.data_column",
+		"stage.temperature_data_column",
+		"temperature_data_column",
 		"stage.date",
 		"calendar.date",
 		"model_date",
@@ -2541,13 +2564,11 @@ func runtime_summary() -> Dictionary:
 	var regime_drain_power_override_enabled_uniforms: Array[bool] = []
 	var regime_obstacle_override_enabled_uniforms: Array[bool] = []
 	var regime_obstacle_power_override_enabled_uniforms: Array[bool] = []
-	var regime_source_override_enabled_uniforms: Array[bool] = []
 	var regime_reservoir_weight_uniforms: Array[float] = []
 	var regime_drain_weight_uniforms: Array[float] = []
 	var regime_drain_power_uniforms: Array[float] = []
 	var regime_obstacle_weight_uniforms: Array[float] = []
 	var regime_obstacle_power_uniforms: Array[float] = []
-	var regime_source_weight_uniforms: Array[float] = []
 	var interaction_admission_enabled_uniforms: Array[bool] = []
 	var interaction_count_uniforms: Array[int] = []
 	var interaction_texture_bound_uniforms: Array[bool] = []
@@ -2557,8 +2578,10 @@ func runtime_summary() -> Dictionary:
 	var edge_turbulence_amount_uniforms: Array[float] = []
 	var edge_turbulence_band_uniforms: Array[float] = []
 	var edge_turbulence_wall_band_uniforms: Array[float] = []
-	var source_count_uniforms: Array[int] = []
-	var source_texture_bound_uniforms: Array[bool] = []
+	var bank_field_suction_reach_uniforms: Array[float] = []
+	var bank_field_suction_crossflow_uniforms: Array[float] = []
+	var bank_field_suction_streamwise_uniforms: Array[float] = []
+	var bank_field_capture_depth_uniforms: Array[float] = []
 	var trail_recording_enabled_uniforms: Array[bool] = []
 	var head_layer_speed_scales: Array[float] = []
 	var trail_segment_speed_scales: Array[float] = []
@@ -2640,9 +2663,6 @@ func runtime_summary() -> Dictionary:
 		regime_obstacle_power_override_enabled_uniforms.append(bool(
 			process_material.get_shader_parameter(&"regime_obstacle_power_override_enabled")
 		))
-		regime_source_override_enabled_uniforms.append(bool(
-			process_material.get_shader_parameter(&"regime_source_override_enabled")
-		))
 		regime_reservoir_weight_uniforms.append(float(
 			process_material.get_shader_parameter(&"regime_reservoir_weight")
 		))
@@ -2657,9 +2677,6 @@ func runtime_summary() -> Dictionary:
 		))
 		regime_obstacle_power_uniforms.append(float(
 			process_material.get_shader_parameter(&"regime_obstacle_power")
-		))
-		regime_source_weight_uniforms.append(float(
-			process_material.get_shader_parameter(&"regime_source_weight")
 		))
 		interaction_admission_enabled_uniforms.append(bool(
 			process_material.get_shader_parameter(&"interaction_admission_enabled")
@@ -2688,12 +2705,26 @@ func runtime_summary() -> Dictionary:
 				&"edge_turbulence_wall_band_pixels"
 			)
 		))
-		source_count_uniforms.append(int(
-			process_material.get_shader_parameter(&"source_count")
+		bank_field_suction_reach_uniforms.append(float(
+			process_material.get_shader_parameter(
+				&"bank_field_suction_reach_pixels"
+			)
 		))
-		source_texture_bound_uniforms.append(
-			process_material.get_shader_parameter(&"source_data_texture") != null
-		)
+		bank_field_suction_crossflow_uniforms.append(float(
+			process_material.get_shader_parameter(
+				&"bank_field_suction_crossflow_ratio"
+			)
+		))
+		bank_field_suction_streamwise_uniforms.append(float(
+			process_material.get_shader_parameter(
+				&"bank_field_suction_streamwise_ratio"
+			)
+		))
+		bank_field_capture_depth_uniforms.append(float(
+			process_material.get_shader_parameter(
+				&"bank_field_capture_depth_pixels"
+			)
+		))
 		trail_recording_enabled_uniforms.append(bool(
 			process_material.get_shader_parameter(&"trail_recording_enabled")
 		))
@@ -2705,19 +2736,51 @@ func runtime_summary() -> Dictionary:
 			any_segment_autonomous_emission or segment_layer.emitting
 		)
 	var interaction_definitions: Array[Dictionary] = []
+	var regime_field_bank_layouts: Array[Dictionary] = []
+	var regime_field_bank_counts := {
+		"top": 0,
+		"bottom": 0,
+		"connected": 0,
+		"enabled": 0,
+	}
 	for interaction_polygon: GPUFlowInteractionPolygon in _gpu_interaction_polygons():
 		var interaction_definition := interaction_polygon.to_dictionary()
-		interaction_definition["vertices_pixels"] = _polygon_native_vertices(
-			interaction_polygon.vertices
+		var native_vertices := _polygon_native_vertices(
+			interaction_polygon.vertices,
+		)
+		var native_bounds := _native_polygon_bounds(native_vertices)
+		var bank_drain_sign := _native_bank_drain_sign(
+			interaction_polygon.mode,
+			native_bounds,
+		)
+		var bank_connected := absf(bank_drain_sign) > 0.5
+		var bank_side := _bank_side_name(bank_drain_sign)
+		var regime_managed := _is_regime_managed_interaction_polygon(
+			interaction_polygon,
+		)
+		interaction_definition["vertices_pixels"] = native_vertices
+		interaction_definition["regime_managed"] = regime_managed
+		interaction_definition["bank_connected"] = bank_connected
+		interaction_definition["bank_side"] = bank_side
+		interaction_definition["intake_direction_pixels"] = Vector2(
+			0.0,
+			bank_drain_sign,
 		)
 		interaction_definitions.append(interaction_definition)
-	var source_definitions: Array[Dictionary] = []
-	for source_polygon: GPUFlowSourcePolygon in _gpu_source_polygons():
-		var source_definition := source_polygon.to_dictionary()
-		source_definition["vertices_pixels"] = _polygon_native_vertices(
-			source_polygon.vertices
-		)
-		source_definitions.append(source_definition)
+		if (
+			regime_managed
+			and interaction_polygon.mode == GPUFlowInteractionPolygon.Mode.ABSORB
+			and bank_connected
+		):
+			var layout := interaction_definition.duplicate(true)
+			regime_field_bank_layouts.append(layout)
+			regime_field_bank_counts["connected"] += 1
+			if interaction_polygon.enabled:
+				regime_field_bank_counts["enabled"] += 1
+				if bank_side == "TOP":
+					regime_field_bank_counts["top"] += 1
+				elif bank_side == "BOTTOM":
+					regime_field_bank_counts["bottom"] += 1
 	var salmon_summary: Dictionary = (
 		_salmon_school.runtime_summary()
 		if _salmon_school != null
@@ -2802,7 +2865,6 @@ func runtime_summary() -> Dictionary:
 			"drain_power": _regime_drain_power,
 			"obstacle_area_fraction": _regime_obstacle_weight,
 			"obstacle_power": _regime_obstacle_power,
-			"source_area_fraction": _regime_source_weight,
 			"shoreline_randomness": _shoreline_randomness,
 		},
 		"regime_applied_feature_overrides": {
@@ -2812,14 +2874,12 @@ func runtime_summary() -> Dictionary:
 			"drain_power": _regime_drain_power_override_enabled,
 			"obstacle_area": _regime_obstacle_override_enabled,
 			"obstacle_power": _regime_obstacle_power_override_enabled,
-			"source": _regime_source_override_enabled,
 			"reservoir_gate": _regime_gate_override_enabled,
 		},
 		"regime_feature_presence": {
 			"reservoir": _regime_reservoir_present,
 			"drain": _regime_drain_present,
 			"obstacle": _regime_obstacle_present,
-			"source": _regime_source_present,
 		},
 		"regime_gate_open_fraction": _regime_gate_open_fraction,
 		"regime_reservoir_count_desired_raw": _regime_reservoir_count,
@@ -2828,40 +2888,48 @@ func runtime_summary() -> Dictionary:
 		"regime_feature_slot_capacities": {
 			"drain": REGIME_DRAIN_SLOT_CAPACITY,
 			"obstacle": REGIME_OBSTACLE_SLOT_CAPACITY,
-			"source": REGIME_SOURCE_SLOT_CAPACITY,
 		},
 		"regime_feature_slot_counts_desired": {
 			"drain": _regime_applied_feature_slot_count("drain"),
 			"obstacle": _regime_applied_feature_slot_count("obstacle"),
-			"source": _regime_applied_feature_slot_count("source"),
 		},
 		"regime_feature_slot_counts_rendered": {
 			"drain": _regime_managed_feature_slot_count("drain", true),
 			"obstacle": _regime_managed_feature_slot_count("obstacle", true),
-			"source": _regime_managed_feature_slot_count("source", true),
 		},
 		"regime_feature_slot_counts_resident": {
 			"drain": _regime_managed_feature_slot_count("drain"),
 			"obstacle": _regime_managed_feature_slot_count("obstacle"),
-			"source": _regime_managed_feature_slot_count("source"),
 		},
 		"regime_feature_controller_spare_capacity": {
 			"interaction": maxi(
 				MAX_INTERACTION_POLYGONS - _gpu_interaction_polygons().size(),
 				0,
 			),
-			"source": maxi(
-				MAX_SOURCE_POLYGONS - _gpu_source_polygons().size(),
-				0,
-			),
 		},
-		"regime_geometry_mode": "DETERMINISTIC_BOUNDED_SLOT_BANKS",
+		"regime_geometry_mode": "GENERATION_SALTED_BOUNDED_SLOT_BANKS",
+		"regime_layout_generation": _regime_layout_generation,
+		"regime_layout_active_signature": _regime_layout_active_signature,
 		"regime_geometry_keys": _applied_regime_geometry_keys.duplicate(true),
 		"regime_geometry_update_count": _regime_geometry_update_count,
 		"regime_geometry_undefined_fallback": "AUTHORED_GEOMETRY",
-		"regime_geometry_mixed_contributors": "SORTED_CONTRIBUTOR_CENTER_BLEND",
+		"regime_geometry_mixed_contributors": "SORTED_CONTRIBUTOR_GENERATION_SEED",
 		"regime_geometry_layout_contributor_ids": _regime_layout_contributor_ids(),
 		"regime_geometry_preserves_particle_pools": true,
+		"field_intake_mode": "BANK_CONNECTED_LATERAL_SUCTION",
+		"field_absorption_edge_mode": "RIVER_FACING_MOUTH",
+		"field_draining_state_policy": "RECORD_THROUGH_FIELD_THEN_RECYCLE_OFFSCREEN",
+		"field_tail_policy": "IMMUTABLE_SEGMENTS_FADE_WITHOUT_TELEPORT",
+		"regime_field_bank_layouts": regime_field_bank_layouts,
+		"regime_field_bank_counts": regime_field_bank_counts,
+		"bank_field_suction_reach_pixels": BANK_FIELD_SUCTION_REACH_PIXELS,
+		"bank_field_suction_crossflow_ratio": (
+			BANK_FIELD_SUCTION_CROSSFLOW_RATIO
+		),
+		"bank_field_suction_streamwise_ratio": (
+			BANK_FIELD_SUCTION_STREAMWISE_RATIO
+		),
+		"bank_field_capture_depth_pixels": BANK_FIELD_CAPTURE_DEPTH_PIXELS,
 		"regime_salmon_activity": _regime_salmon_activity,
 		"regime_leaf_activity": _regime_leaf_activity,
 		"regime_last_salmon_release_day_index": _last_regime_salmon_release_day,
@@ -2915,6 +2983,81 @@ func runtime_summary() -> Dictionary:
 		"stage_date_tabular_numerals": true,
 		"stage_date_opentype_feature": MODEL_DATE_OPENTYPE_FEATURE,
 		"stage_date_z_index": STAGE_TITLE_Z_INDEX,
+		"water_temperature_visible": (
+			_water_temperature_label.visible
+			if _water_temperature_label != null
+			else false
+		),
+		"water_temperature_text": (
+			_water_temperature_label.text
+			if _water_temperature_label != null
+			else "WATER — °C"
+		),
+		"water_temperature_value_c": (
+			_temperature_current_value_c if _temperature_value_valid else null
+		),
+		"water_temperature_value_valid": _temperature_value_valid,
+		"water_temperature_position": WATER_TEMPERATURE_POSITION,
+		"water_temperature_position_anchor": "CENTERLINE",
+		"water_temperature_rotation_degrees": TYPE_ROTATION_DEGREES,
+		"water_temperature_color": STAGE_TITLE_COLOR,
+		"water_temperature_font_size": WATER_TEMPERATURE_FONT_SIZE,
+		"water_temperature_font_resource": STAGE_TITLE_FONT.resource_path,
+		"water_temperature_font_shared_with_date": true,
+		"water_temperature_font_instance_id": (
+			_model_date_font.get_instance_id()
+			if _model_date_font != null
+			else 0
+		),
+		"water_temperature_tabular_numerals": true,
+		"water_temperature_opentype_feature": MODEL_DATE_OPENTYPE_FEATURE,
+		"water_temperature_z_index": STAGE_TITLE_Z_INDEX,
+		"water_temperature_format": "WATER %.1f °C",
+		"water_temperature_fallback_text": "WATER — °C",
+		"water_temperature_data_path": temperature_data_path,
+		"water_temperature_data_column": temperature_data_column,
+		"water_temperature_data_loaded": _temperature_data_status == "READY",
+		"water_temperature_data_status": _temperature_data_status,
+		"water_temperature_data_error": _temperature_data_error,
+		"water_temperature_data_row_count": _temperature_values.size(),
+		"water_temperature_data_expected_row_count": (
+			WATER_TEMPERATURE_EXPECTED_ROW_COUNT
+		),
+		"water_temperature_data_row_count_matches_expected": (
+			_temperature_values.size() == WATER_TEMPERATURE_EXPECTED_ROW_COUNT
+		),
+		"water_temperature_data_row_index": _temperature_row_index,
+		"water_temperature_data_row_fraction": _temperature_row_fraction,
+		"water_temperature_interpolation_mode": (
+			WATER_TEMPERATURE_INTERPOLATION_MODE
+		),
+		"water_temperature_node_path": "StageTitleLayer/WaterTemperature",
+		"water_temperature_outside_water_viewport": true,
+		# Stage-prefixed aliases keep presentation inspection consistent with the
+		# existing stage title/date keys while the data keys remain grouped under
+		# water_temperature_data_*.
+		"stage_temperature_visible": (
+			_water_temperature_label.visible
+			if _water_temperature_label != null
+			else false
+		),
+		"stage_temperature_text": (
+			_water_temperature_label.text
+			if _water_temperature_label != null
+			else "WATER — °C"
+		),
+		"stage_temperature_value_c": (
+			_temperature_current_value_c if _temperature_value_valid else null
+		),
+		"stage_temperature_position": WATER_TEMPERATURE_POSITION,
+		"stage_temperature_position_anchor": "CENTERLINE",
+		"stage_temperature_rotation_degrees": TYPE_ROTATION_DEGREES,
+		"stage_temperature_color": STAGE_TITLE_COLOR,
+		"stage_temperature_font_size": WATER_TEMPERATURE_FONT_SIZE,
+		"stage_temperature_font_resource": STAGE_TITLE_FONT.resource_path,
+		"stage_temperature_tabular_numerals": true,
+		"stage_temperature_opentype_feature": MODEL_DATE_OPENTYPE_FEATURE,
+		"stage_temperature_z_index": STAGE_TITLE_Z_INDEX,
 		"model_day_index": _model_day_index,
 		"model_day_of_year": _model_day_index + 1,
 		"model_minute_of_day": _model_minute_of_day,
@@ -2976,6 +3119,7 @@ func runtime_summary() -> Dictionary:
 		"water_texture_excludes_debug_overlay": true,
 		"water_texture_excludes_stage_title": true,
 		"water_texture_excludes_stage_date": true,
+		"water_texture_excludes_stage_temperature": true,
 		"water_texture_excludes_regime_panel": true,
 		"amount": particle_slots,
 		"amount_ratio": particles.amount_ratio,
@@ -3029,15 +3173,11 @@ func runtime_summary() -> Dictionary:
 		"regime_obstacle_power_override_enabled_uniforms": (
 			regime_obstacle_power_override_enabled_uniforms
 		),
-		"regime_source_override_enabled_uniforms": (
-			regime_source_override_enabled_uniforms
-		),
 		"regime_reservoir_weight_uniforms": regime_reservoir_weight_uniforms,
 		"regime_drain_weight_uniforms": regime_drain_weight_uniforms,
 		"regime_drain_power_uniforms": regime_drain_power_uniforms,
 		"regime_obstacle_weight_uniforms": regime_obstacle_weight_uniforms,
 		"regime_obstacle_power_uniforms": regime_obstacle_power_uniforms,
-		"regime_source_weight_uniforms": regime_source_weight_uniforms,
 		"interaction_admission_enabled_uniforms": (
 			interaction_admission_enabled_uniforms
 		),
@@ -3051,8 +3191,14 @@ func runtime_summary() -> Dictionary:
 		"edge_turbulence_wall_band_uniforms": (
 			edge_turbulence_wall_band_uniforms
 		),
-		"source_count_uniforms": source_count_uniforms,
-		"source_texture_bound_uniforms": source_texture_bound_uniforms,
+		"bank_field_suction_reach_uniforms": bank_field_suction_reach_uniforms,
+		"bank_field_suction_crossflow_uniforms": (
+			bank_field_suction_crossflow_uniforms
+		),
+		"bank_field_suction_streamwise_uniforms": (
+			bank_field_suction_streamwise_uniforms
+		),
+		"bank_field_capture_depth_uniforms": bank_field_capture_depth_uniforms,
 		"interaction_polygon_count": interaction_definitions.size(),
 		"polygon_object_count": interaction_definitions.size(),
 		"interaction_polygons": interaction_definitions,
@@ -3073,28 +3219,6 @@ func runtime_summary() -> Dictionary:
 		"shoreline_preserves_interaction_capacity": true,
 		"shoreline_overlay_count": (
 			int(_overlay.call(&"get_shoreline_obstacle_count"))
-			if _overlay != null
-			else 0
-		),
-		"source_polygon_count": source_definitions.size(),
-		"source_polygons": source_definitions,
-		"source_texture_packer": (
-			_source_texture_packer.runtime_summary()
-			if _source_texture_packer != null
-			else {}
-		),
-		"source_overlay_count": (
-			int(_overlay.call(&"get_source_polygon_count"))
-			if _overlay != null
-			else 0
-		),
-		"source_overlay_visible": (
-			bool(_overlay.call(&"is_source_visible"))
-			if _overlay != null
-			else false
-		),
-		"source_overlay_visible_count": (
-			int(_overlay.call(&"get_visible_source_polygon_count"))
 			if _overlay != null
 			else 0
 		),
@@ -3297,17 +3421,6 @@ func runtime_summary() -> Dictionary:
 		),
 		"shoreline_data_texture_bound": false,
 		"shoreline_data_texture_size": Vector2.ZERO,
-		"source_count_uniform": _process_material.get_shader_parameter(
-			&"source_count"
-		),
-		"source_data_texture_bound": (
-			_process_material.get_shader_parameter(&"source_data_texture") != null
-		),
-		"source_data_texture_size": (
-			_source_data_texture.get_size()
-			if _source_data_texture != null
-			else Vector2.ZERO
-		),
 		"paused": _paused,
 		"debug_visible": debug_visible,
 		"debug_overlay_visible": _overlay.visible if _overlay != null else false,
@@ -3315,7 +3428,6 @@ func runtime_summary() -> Dictionary:
 
 
 func _apply_control_message(message: Dictionary) -> void:
-	_begin_source_geometry_batch()
 	var runtime_parameters_changed := false
 	var command := String(message.get("command", ""))
 	if command == "set_gate":
@@ -3420,7 +3532,6 @@ func _apply_control_message(message: Dictionary) -> void:
 						_salmon_school.reset_salmon()
 					if _leaf_field != null:
 						_leaf_field.reset_leaves()
-	_end_source_geometry_batch()
 
 
 func _apply_geometry_operation(operation: Dictionary) -> bool:
@@ -3444,21 +3555,6 @@ func _apply_geometry_operation(operation: Dictionary) -> bool:
 						continue
 					if String(definition_variant.get("element_id", RESERVOIR_ID)) == String(RESERVOIR_ID):
 						return _apply_reservoir_definition(definition_variant)
-		return false
-
-	if _canonical_source_kind(raw_kind) != "":
-		match operation_name:
-			"upsert", "add", "update":
-				return _upsert_source_polygon(operation)
-			"remove", "delete":
-				return _remove_source_polygon(StringName(String(operation.get(
-					"id",
-					operation.get("element_id", "")
-				))))
-			"replace":
-				var source_values: Variant = operation.get("values", [])
-				if source_values is Array:
-					return _replace_source_polygons(source_values)
 		return false
 
 	var kind := _canonical_interaction_kind(raw_kind)
@@ -3516,53 +3612,12 @@ func _canonical_interaction_kind(kind: String) -> String:
 	return ""
 
 
-func _canonical_source_kind(kind: String) -> String:
-	match kind.strip_edges().to_lower():
-		"source", "sources", "source_polygon", "source_polygons", \
-		"water_source", "water_sources":
-			return "source"
-	return ""
-
-
 func _is_interaction_parameter_path(path: String) -> bool:
 	var components := path.split(".", false)
 	return (
 		components.size() == 3
 		and _canonical_interaction_kind(components[0]) != ""
 	)
-
-
-func _is_source_parameter_path(path: String) -> bool:
-	var components := path.split(".", false)
-	return (
-		components.size() == 3
-		and _canonical_source_kind(components[0]) != ""
-	)
-
-
-func _set_source_parameter_by_path(path: String, value: Variant) -> bool:
-	var components := path.split(".", false)
-	if components.size() != 3:
-		return false
-	var source := _find_source_polygon(StringName(components[1]))
-	if source == null:
-		return false
-	var field := components[2].to_lower()
-	match field:
-		"fraction", "emission", "rate":
-			field = "emission_fraction"
-		"direction":
-			field = "flow_direction"
-		"id", "element_id":
-			return false
-	var updated := source.apply_dictionary({field: value})
-	if updated and field in ["vertices", "enabled"]:
-		_release_source_from_regime_geometry(source.element_id)
-		# The resource's changed signal fires synchronously before ownership is
-		# released. Apply once more so a controller-owned disabled record remains
-		# packed instead of being mistaken for an inactive internal bank slot.
-		_request_source_geometry_apply()
-	return updated
 
 
 func _set_interaction_parameter_by_path(path: String, value: Variant) -> bool:
@@ -3586,8 +3641,8 @@ func _set_interaction_parameter_by_path(path: String, value: Variant) -> bool:
 	var updated := polygon.apply_dictionary({field: value})
 	if updated and field in ["vertices", "enabled", "mode"]:
 		_release_interaction_from_regime_geometry(polygon.element_id)
-		# See the source counterpart above: the synchronous first upload still saw
-		# this polygon as regime-owned, so repack after transferring ownership.
+		# The resource's changed signal fires synchronously before ownership is
+		# released, so repack once after transferring ownership.
 		_apply_interaction_geometry()
 	return updated
 
@@ -3597,13 +3652,6 @@ func _release_interaction_from_regime_geometry(element_id: StringName) -> void:
 	_authored_interaction_vertices.erase(key)
 	_authored_interaction_instance_ids.erase(key)
 	_authored_interaction_enabled.erase(key)
-
-
-func _release_source_from_regime_geometry(element_id: StringName) -> void:
-	var key := String(element_id)
-	_authored_source_vertices.erase(key)
-	_authored_source_instance_ids.erase(key)
-	_authored_source_enabled.erase(key)
 
 
 func _upsert_interaction_polygon(operation: Dictionary, kind: String) -> bool:
@@ -3696,93 +3744,6 @@ func _replace_interaction_polygons(values: Array) -> bool:
 	return true
 
 
-func _upsert_source_polygon(operation: Dictionary) -> bool:
-	var element_id := StringName(String(operation.get(
-		"id",
-		operation.get("element_id", "")
-	)))
-	if element_id == &"":
-		return false
-	var definition_variant: Variant = operation.get("value", {})
-	if not definition_variant is Dictionary:
-		return false
-	var definition: Dictionary = definition_variant.duplicate(true)
-	definition.erase("id")
-	definition.erase("element_id")
-	definition["element_id"] = String(element_id)
-	var existing := _find_source_polygon(element_id)
-	if existing != null:
-		var updated := existing.apply_dictionary(definition)
-		if updated and (definition.has("vertices") or definition.has("enabled")):
-			_release_source_from_regime_geometry(element_id)
-		return updated
-	if source_polygons.size() >= MAX_SOURCE_POLYGONS:
-		return false
-	var created := GPUFlowSourcePolygon.new()
-	if created == null or not created.apply_dictionary(definition):
-		return false
-	source_polygons.append(created)
-	_connect_source_polygon(created)
-	_request_source_geometry_apply()
-	return true
-
-
-func _remove_source_polygon(element_id: StringName) -> bool:
-	var source_index := _find_source_polygon_index(element_id)
-	if source_index < 0:
-		return false
-	var source := source_polygons[source_index]
-	_disconnect_source_polygon(source)
-	source_polygons.remove_at(source_index)
-	_release_source_from_regime_geometry(element_id)
-	_request_source_geometry_apply()
-	return true
-
-
-func _replace_source_polygons(values: Array) -> bool:
-	if values.size() > MAX_SOURCE_POLYGONS:
-		return false
-	var replacements: Array[GPUFlowSourcePolygon] = []
-	var replacement_ids: Dictionary = {}
-	for definition_variant: Variant in values:
-		if not definition_variant is Dictionary:
-			return false
-		var definition: Dictionary = definition_variant.duplicate(true)
-		var element_id := StringName(String(
-			definition.get("element_id", definition.get("id", ""))
-		))
-		if element_id == &"" or replacement_ids.has(element_id):
-			return false
-		definition.erase("id")
-		definition.erase("element_id")
-		definition["element_id"] = String(element_id)
-		var source := GPUFlowSourcePolygon.new()
-		if source == null or not source.apply_dictionary(definition):
-			return false
-		replacement_ids[element_id] = true
-		replacements.append(source)
-	for old_source: GPUFlowSourcePolygon in source_polygons:
-		_disconnect_source_polygon(old_source)
-	source_polygons = replacements
-	_authored_source_vertices.clear()
-	_authored_source_instance_ids.clear()
-	_authored_source_enabled.clear()
-	_bind_source_polygon_signals()
-	_request_source_geometry_apply()
-	return true
-
-
-func _find_source_polygon(element_id: StringName) -> GPUFlowSourcePolygon:
-	var source_index := _find_source_polygon_index(element_id)
-	return source_polygons[source_index] if source_index >= 0 else null
-
-
-func _find_source_polygon_index(element_id: StringName) -> int:
-	for source_index in range(source_polygons.size()):
-		var source := source_polygons[source_index]
-		if source != null and source.element_id == element_id:
-			return source_index
-	return -1
 
 
 func _find_interaction_polygon(element_id: StringName) -> GPUFlowInteractionPolygon:
@@ -3823,48 +3784,6 @@ func _on_interaction_polygon_changed() -> void:
 	_apply_interaction_geometry()
 
 
-func _bind_source_polygon_signals() -> void:
-	for source: GPUFlowSourcePolygon in source_polygons:
-		_connect_source_polygon(source)
-
-
-func _begin_source_geometry_batch() -> void:
-	_source_geometry_batch_depth += 1
-
-
-func _end_source_geometry_batch() -> void:
-	_source_geometry_batch_depth = maxi(_source_geometry_batch_depth - 1, 0)
-	if _source_geometry_batch_depth == 0 and _source_geometry_dirty:
-		_source_geometry_dirty = false
-		_apply_source_geometry()
-
-
-func _request_source_geometry_apply() -> void:
-	if _source_geometry_batch_depth > 0:
-		_source_geometry_dirty = true
-		return
-	_source_geometry_dirty = false
-	_apply_source_geometry()
-
-
-func _connect_source_polygon(source: GPUFlowSourcePolygon) -> void:
-	if source == null:
-		return
-	var callback := Callable(self, &"_on_source_polygon_changed")
-	if not source.changed.is_connected(callback):
-		source.changed.connect(callback)
-
-
-func _disconnect_source_polygon(source: GPUFlowSourcePolygon) -> void:
-	if source == null:
-		return
-	var callback := Callable(self, &"_on_source_polygon_changed")
-	if source.changed.is_connected(callback):
-		source.changed.disconnect(callback)
-
-
-func _on_source_polygon_changed() -> void:
-	_request_source_geometry_apply()
 
 
 func _install_default_interaction_polygons_if_needed() -> void:
@@ -3906,24 +3825,6 @@ func _install_default_interaction_polygons_if_needed() -> void:
 		interaction_polygons.append(repeller)
 
 
-func _install_default_source_polygons_if_needed() -> void:
-	if not install_default_source_examples or not source_polygons.is_empty():
-		return
-	var source := GPUFlowSourcePolygon.new()
-	if source != null and source.apply_dictionary({
-		"element_id": "source_test",
-		"vertices": [
-			[1.20, 3.60],
-			[2.00, 3.60],
-			[2.00, 5.40],
-			[1.20, 5.40],
-		],
-		"enabled": true,
-		"emission_fraction": 0.18,
-		"flow_direction": [1.0, 0.0],
-		"seed": 1701,
-	}):
-		source_polygons.append(source)
 
 
 func _variant_to_vector2(value: Variant, fallback: Vector2) -> Vector2:
@@ -4034,6 +3935,22 @@ func _apply_runtime_parameters() -> void:
 		process_material.set_shader_parameter(
 			&"trail_segment_max_length_pixels",
 			trail_segment_max_length_pixels
+		)
+		process_material.set_shader_parameter(
+			&"bank_field_suction_reach_pixels",
+			BANK_FIELD_SUCTION_REACH_PIXELS,
+		)
+		process_material.set_shader_parameter(
+			&"bank_field_suction_crossflow_ratio",
+			BANK_FIELD_SUCTION_CROSSFLOW_RATIO,
+		)
+		process_material.set_shader_parameter(
+			&"bank_field_suction_streamwise_ratio",
+			BANK_FIELD_SUCTION_STREAMWISE_RATIO,
+		)
+		process_material.set_shader_parameter(
+			&"bank_field_capture_depth_pixels",
+			BANK_FIELD_CAPTURE_DEPTH_PIXELS,
 		)
 		process_material.set_shader_parameter(&"reservoir_center", reservoir_center_pixels)
 		process_material.set_shader_parameter(&"reservoir_radius", reservoir_radius_pixels)
@@ -4484,6 +4401,7 @@ func _apply_interaction_geometry() -> void:
 		var orientation := (
 			1.0 if _native_polygon_signed_area(native_vertices) >= 0.0 else -1.0
 		)
+		var bank_drain_sign := _native_bank_drain_sign(polygon.mode, bounds)
 		var record_start := polygon_index * INTERACTION_TEXELS_PER_POLYGON
 		data_image.set_pixel(
 			record_start,
@@ -4513,7 +4431,12 @@ func _apply_interaction_geometry() -> void:
 		data_image.set_pixel(
 			record_start + 3,
 			0,
-			Color(centroid.x, centroid.y, 0.0, 1.0 if polygon.enabled else 0.0)
+			Color(
+				centroid.x,
+				centroid.y,
+				bank_drain_sign,
+				1.0 if polygon.enabled else 0.0,
+			)
 		)
 		for vertex_index in range(native_vertices.size()):
 			var vertex := native_vertices[vertex_index]
@@ -4527,6 +4450,9 @@ func _apply_interaction_geometry() -> void:
 			"vertices": native_vertices,
 			"mode": GPUFlowInteractionPolygon.mode_name(polygon.mode),
 			"enabled": polygon.enabled,
+			"bank_connected": absf(bank_drain_sign) > 0.5,
+			"bank_side": _bank_side_name(bank_drain_sign),
+			"intake_direction_pixels": Vector2(0.0, bank_drain_sign),
 		})
 	if _interaction_data_texture == null:
 		_interaction_data_texture = ImageTexture.create_from_image(data_image)
@@ -4547,56 +4473,6 @@ func _apply_interaction_geometry() -> void:
 		interaction_geometry_changed.emit(screen_id, active_polygons.size())
 
 
-func _apply_source_geometry() -> void:
-	_source_geometry_dirty = false
-	if _source_texture_packer == null:
-		_source_texture_packer = SOURCE_TEXTURE_PACKER_SCRIPT.new(
-			STAGE_SIZE,
-			WORLD_SIZE
-		)
-	var active_sources: Array[GPUFlowSourcePolygon] = []
-	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
-		if (
-			source.enabled
-			or not _is_regime_managed_source_polygon(source)
-		):
-			active_sources.append(source)
-	_source_texture_packer.pack_sources(active_sources)
-	_source_data_texture = _source_texture_packer.get_texture()
-	var packed_count := _source_texture_packer.get_record_count()
-	for process_material in _process_material_layers:
-		process_material.set_shader_parameter(
-			&"source_data_texture",
-			_source_data_texture
-		)
-		process_material.set_shader_parameter(&"source_count", packed_count)
-		process_material.set_shader_parameter(&"source_admission_enabled", true)
-
-	var overlay_definitions: Array[Dictionary] = []
-	for record: Dictionary in _source_texture_packer.get_record_definitions():
-		var vertices: PackedVector2Array = record["vertices_pixels"]
-		var downstream_edges: Array[Dictionary] = []
-		var edge_records: Array[Dictionary] = record["edge_records"]
-		for edge_record: Dictionary in edge_records:
-			if float(edge_record.get("weight", 0.0)) <= 0.000001:
-				continue
-			var edge_index := int(edge_record["edge_index"])
-			downstream_edges.append({
-				"edge_index": edge_index,
-				"start": vertices[edge_index],
-				"end": vertices[(edge_index + 1) % vertices.size()],
-				"outward_normal": edge_record["outward_normal"],
-			})
-		overlay_definitions.append({
-			"element_id": String(record["element_id"]),
-			"vertices": vertices,
-			"enabled": bool(record["enabled"]),
-			"downstream_edges": downstream_edges,
-		})
-	if _overlay != null:
-		_overlay.call(&"set_source_polygons", overlay_definitions)
-	if is_node_ready():
-		source_geometry_changed.emit(screen_id, packed_count)
 
 
 func _gpu_interaction_polygons() -> Array[GPUFlowInteractionPolygon]:
@@ -4617,22 +4493,6 @@ func _gpu_interaction_polygons() -> Array[GPUFlowInteractionPolygon]:
 	return result
 
 
-func _gpu_source_polygons() -> Array[GPUFlowSourcePolygon]:
-	var result: Array[GPUFlowSourcePolygon] = []
-	var seen_ids: Dictionary = {}
-	for source: GPUFlowSourcePolygon in source_polygons:
-		if result.size() >= MAX_SOURCE_POLYGONS:
-			break
-		if (
-			source == null
-			or source.element_id == &""
-			or seen_ids.has(source.element_id)
-			or not source.validate().is_empty()
-		):
-			continue
-		seen_ids[source.element_id] = true
-		result.append(source)
-	return result
 
 
 func _polygon_native_vertices(world_vertices: PackedVector2Array) -> PackedVector2Array:
@@ -4668,6 +4528,29 @@ func _native_polygon_signed_area(vertices: PackedVector2Array) -> float:
 		var following := vertices[(vertex_index + 1) % vertices.size()]
 		twice_area += current.x * following.y - following.x * current.y
 	return twice_area * 0.5
+
+
+func _native_bank_drain_sign(mode: int, bounds: Rect2) -> float:
+	if mode != GPUFlowInteractionPolygon.Mode.ABSORB:
+		return 0.0
+	var touches_top := (
+		bounds.position.y <= INTERACTION_BANK_EDGE_EPSILON_PIXELS
+	)
+	var touches_bottom := (
+		bounds.end.y >= STAGE_SIZE.y - INTERACTION_BANK_EDGE_EPSILON_PIXELS
+	)
+	if touches_top == touches_bottom:
+		return 0.0
+	# Native coordinates point down: top-bank suction is -Y, bottom-bank +Y.
+	return -1.0 if touches_top else 1.0
+
+
+func _bank_side_name(bank_drain_sign: float) -> String:
+	if bank_drain_sign < -0.5:
+		return "TOP"
+	if bank_drain_sign > 0.5:
+		return "BOTTOM"
+	return "NONE"
 
 
 func _stable_interaction_seed(element_id: StringName) -> float:
@@ -4779,12 +4662,6 @@ func _build_particles() -> void:
 			_interaction_data_texture
 		)
 		process_material.set_shader_parameter(&"shoreline_count", 0)
-		process_material.set_shader_parameter(&"source_count", 0)
-		process_material.set_shader_parameter(&"source_admission_enabled", true)
-		process_material.set_shader_parameter(
-			&"source_data_texture",
-			_source_data_texture
-		)
 		process_material.set_shader_parameter(
 			&"particle_index_stride", float(PALETTE_LAYER_COUNT)
 		)
@@ -5069,9 +4946,32 @@ func _build_stage_title() -> void:
 		STAGE_TITLE_COLOR
 	)
 	_stage_title_layer.add_child(_model_date_label)
+
+	_water_temperature_label = Label.new()
+	_water_temperature_label.name = "WaterTemperature"
+	_water_temperature_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_water_temperature_label.focus_mode = Control.FOCUS_NONE
+	_water_temperature_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	_water_temperature_label.clip_text = false
+	# Share the date's exact FontVariation resource so both readouts use the
+	# same tabular-numeral OpenType configuration.
+	_water_temperature_label.add_theme_font_override(
+		&"font",
+		_model_date_font,
+	)
+	_water_temperature_label.add_theme_font_size_override(
+		&"font_size",
+		WATER_TEMPERATURE_FONT_SIZE,
+	)
+	_water_temperature_label.add_theme_color_override(
+		&"font_color",
+		STAGE_TITLE_COLOR,
+	)
+	_stage_title_layer.add_child(_water_temperature_label)
 	_build_regime_panel()
 	_apply_stage_title()
 	_apply_model_date()
+	_apply_water_temperature()
 
 
 func _build_regime_panel() -> void:
@@ -5157,6 +5057,172 @@ func _apply_stage_title() -> void:
 	_apply_regime_panel()
 	if is_node_ready():
 		stage_title_changed.emit(screen_id, stage_title, stage_title_visible)
+
+
+func _load_temperature_data() -> bool:
+	_temperature_values = PackedFloat32Array()
+	_temperature_data_error = ""
+	_temperature_data_status = "NOT_CONFIGURED"
+	_temperature_row_index = -1
+	_temperature_row_fraction = 0.0
+	_temperature_current_value_c = 0.0
+	_temperature_value_valid = false
+
+	if temperature_data_path.is_empty() or temperature_data_column.is_empty():
+		_apply_water_temperature()
+		return false
+	if not FileAccess.file_exists(temperature_data_path):
+		return _fail_temperature_data_load(
+			"FILE_NOT_FOUND",
+			"Water temperature data file not found: %s" % temperature_data_path,
+		)
+
+	var header_found := false
+	var temperature_column_index := -1
+	var data_line_number := 0
+	var contents := FileAccess.get_file_as_string(temperature_data_path)
+	for raw_line in contents.split("\n", false):
+		data_line_number += 1
+		var line := String(raw_line).strip_edges()
+		if line.is_empty() or line.begins_with("#"):
+			continue
+		var columns := _split_temperature_data_line(line)
+		if not header_found:
+			if columns.is_empty() or String(columns[0]).strip_edges() != "frame":
+				continue
+			header_found = true
+			for column_index in range(columns.size()):
+				if String(columns[column_index]).strip_edges() == temperature_data_column:
+					temperature_column_index = column_index
+					break
+			if temperature_column_index < 0:
+				return _fail_temperature_data_load(
+					"COLUMN_NOT_FOUND",
+					"Water temperature column '%s' not found in: %s" % [
+						temperature_data_column,
+						temperature_data_path,
+					],
+				)
+			continue
+		if columns.size() <= temperature_column_index:
+			return _fail_temperature_data_load(
+				"INVALID_ROW",
+				"Water temperature row %d is missing column '%s': %s" % [
+					data_line_number,
+					temperature_data_column,
+					temperature_data_path,
+				],
+			)
+		var frame_text := String(columns[0]).strip_edges()
+		var temperature_text := String(
+			columns[temperature_column_index]
+		).strip_edges()
+		if not frame_text.is_valid_int() or not temperature_text.is_valid_float():
+			return _fail_temperature_data_load(
+				"INVALID_ROW",
+				"Water temperature row %d has invalid numeric data: %s" % [
+					data_line_number,
+					temperature_data_path,
+				],
+			)
+		var frame_index := int(frame_text)
+		if frame_index != _temperature_values.size():
+			return _fail_temperature_data_load(
+				"INVALID_FRAME_SEQUENCE",
+				"Water temperature frame %d should be %d: %s" % [
+					frame_index,
+					_temperature_values.size(),
+					temperature_data_path,
+				],
+			)
+		var temperature_value := float(temperature_text)
+		if not is_finite(temperature_value):
+			return _fail_temperature_data_load(
+				"INVALID_ROW",
+				"Water temperature row %d is not finite: %s" % [
+					data_line_number,
+					temperature_data_path,
+				],
+			)
+		_temperature_values.append(temperature_value)
+
+	if not header_found:
+		return _fail_temperature_data_load(
+			"INVALID_HEADER",
+			"Water temperature data has no frame header: %s" % temperature_data_path,
+		)
+	if _temperature_values.is_empty():
+		return _fail_temperature_data_load(
+			"NO_VALID_ROWS",
+			"Water temperature data has no valid rows: %s" % temperature_data_path,
+		)
+	if _temperature_values.size() != WATER_TEMPERATURE_EXPECTED_ROW_COUNT:
+		return _fail_temperature_data_load(
+			"INVALID_ROW_COUNT",
+			"Water temperature data has %d rows; expected %d: %s" % [
+				_temperature_values.size(),
+				WATER_TEMPERATURE_EXPECTED_ROW_COUNT,
+				temperature_data_path,
+			],
+		)
+	_temperature_data_status = "READY"
+	return true
+
+
+func _split_temperature_data_line(line: String) -> PackedStringArray:
+	# Production data is comma-delimited. Accept the pipeline's earlier tabular
+	# export too so an already-provisioned installation does not lose its label.
+	if line.contains(","):
+		return line.split(",", true)
+	return line.split("\t", true)
+
+
+func _fail_temperature_data_load(status: String, message: String) -> bool:
+	_temperature_values = PackedFloat32Array()
+	_temperature_data_status = status
+	_temperature_data_error = message
+	_temperature_row_index = -1
+	_temperature_row_fraction = 0.0
+	_temperature_current_value_c = 0.0
+	_temperature_value_valid = false
+	_apply_water_temperature()
+	push_warning(message)
+	return false
+
+
+func _update_model_data_timelines() -> void:
+	_update_watershed_timeline()
+	_update_temperature_timeline()
+
+
+func _update_temperature_timeline() -> void:
+	var row_count := _temperature_values.size()
+	if row_count <= 0:
+		_temperature_row_index = -1
+		_temperature_row_fraction = 0.0
+		_temperature_current_value_c = 0.0
+		_temperature_value_valid = false
+		_apply_water_temperature()
+		return
+	var year_seconds := maxf(model_year_duration_seconds, 0.001)
+	var year_progress := clampf(
+		_model_year_elapsed_seconds / year_seconds,
+		0.0,
+		0.999999,
+	)
+	var row_position := year_progress * float(row_count)
+	var next_row_index := mini(floori(row_position), row_count - 1)
+	var row_fraction := row_position - floorf(row_position)
+	var following_row_index := (next_row_index + 1) % row_count
+	_temperature_row_index = next_row_index
+	_temperature_row_fraction = row_fraction
+	_temperature_current_value_c = lerpf(
+		float(_temperature_values[next_row_index]),
+		float(_temperature_values[following_row_index]),
+		row_fraction,
+	)
+	_temperature_value_valid = is_finite(_temperature_current_value_c)
+	_apply_water_temperature()
 
 
 func _load_watershed_data() -> bool:
@@ -5298,7 +5364,7 @@ func _advance_model_calendar(delta: float) -> void:
 	_model_minute_of_day = next_minute_of_day
 	if time_changed:
 		_apply_model_date(day_changed)
-	_update_watershed_timeline()
+	_update_model_data_timelines()
 	if day_changed:
 		_apply_regime_ecology_schedule()
 
@@ -5319,7 +5385,7 @@ func _reset_model_calendar() -> void:
 	elif _model_date_source not in [&"external_mm_dd", &"external_day_index"]:
 		_model_date_source = &"manual_hold"
 	_apply_model_date()
-	_update_watershed_timeline()
+	_update_model_data_timelines()
 	_apply_regime_ecology_schedule()
 
 
@@ -5335,7 +5401,7 @@ func _set_model_day_index(day_index: int) -> void:
 	_model_day_index = posmod(day_index, MODEL_CALENDAR_DAY_COUNT)
 	_model_minute_of_day = 0
 	_apply_model_date()
-	_update_watershed_timeline()
+	_update_model_data_timelines()
 	_apply_regime_ecology_schedule()
 
 
@@ -5373,6 +5439,23 @@ func _apply_model_date(emit_date_signal: bool = true) -> void:
 			_format_model_date(_model_day_index),
 			_model_day_index + 1
 		)
+
+
+func _apply_water_temperature() -> void:
+	if _water_temperature_label == null:
+		return
+	var next_text := "WATER — °C"
+	if _temperature_value_valid:
+		next_text = "WATER %.1f °C" % _temperature_current_value_c
+	# Text changes are relatively infrequent after one-decimal formatting. Avoid
+	# reset_size()/pivot recalculation on every shared-timeline frame.
+	if _water_temperature_label.text != next_text:
+		_water_temperature_label.text = next_text
+		_center_label_on_rotated_centerline(
+			_water_temperature_label,
+			WATER_TEMPERATURE_POSITION,
+		)
+	_water_temperature_label.visible = stage_temperature_visible
 
 
 func _center_label_on_rotated_centerline(

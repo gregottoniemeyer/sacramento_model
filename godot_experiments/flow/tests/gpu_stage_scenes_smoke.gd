@@ -17,15 +17,28 @@ const EXPECTED_TITLE_FONT_PATH := (
 )
 const EXPECTED_TITLE_POSITION := Vector2(60.0, 540.0)
 const EXPECTED_DATE_POSITION := Vector2(1860.0, 540.0)
+const EXPECTED_TEMPERATURE_POSITION := Vector2(1740.0, 540.0)
 const EXPECTED_TITLE_COLOR := Color("4ab0e1")
 const EXPECTED_TITLE_FONT_SIZE := 60
 const EXPECTED_DATE_FONT_SIZE := 48
 const EXPECTED_DATE_OPENTYPE_FEATURE := "tnum"
+const EXPECTED_TEMPERATURE_DATA_PATH := (
+	"res://flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt"
+)
+const EXPECTED_TEMPERATURE_ROW_COUNT := 720
+const EXPECTED_TEMPERATURE_INTERPOLATION := "HALF_OPEN_ANNUAL_LINEAR_WRAP"
+const EXPECTED_TEMPERATURE_COLUMNS := {
+	"mount_shasta": "shasta_keswick_release_temp_c",
+	"delta": "delta_freeport_temp_c",
+}
+const EXPECTED_SHARED_TEMPERATURE_TEXT := {
+	"mount_shasta": "WATER 11.1 °C",
+	"delta": "WATER 21.3 °C",
+}
 const EXPECTED_REGIME_PROFILE_PATH := "res://regime_feature_profiles.txt"
 const EXPECTED_REGIME_SLOT_CAPACITIES := {
 	"drain": 5,
 	"obstacle": 2,
-	"source": 4,
 }
 const EXPECTED_REGIME_NAMES := [
 	"Kinship",
@@ -78,6 +91,7 @@ var _failures := PackedStringArray()
 var _seen_ids: Dictionary = {}
 var _expected_timeline_snapshot: Dictionary = {}
 var _regime_geometry_signature_by_screen: Dictionary = {}
+var _temperature_values_by_column: Dictionary = {}
 
 
 func _ready() -> void:
@@ -86,6 +100,7 @@ func _ready() -> void:
 
 func _run() -> void:
 	_check_project_configuration()
+	_check_temperature_data_fixture()
 	_prepare_shared_timeline()
 	_check_regime_profile_matrix()
 	for scene_spec in SCENES:
@@ -132,6 +147,80 @@ func _check_project_configuration() -> void:
 			== "*res://flow/model_regimes.gd",
 		"project.godot must install the persistent ModelRegimes autoload."
 	)
+
+
+func _check_temperature_data_fixture() -> void:
+	_expect(
+		FileAccess.file_exists(EXPECTED_TEMPERATURE_DATA_PATH),
+		"The shared 720-row water-temperature file must be packaged in res://."
+	)
+	if not FileAccess.file_exists(EXPECTED_TEMPERATURE_DATA_PATH):
+		return
+	var expected_column_names: Array = EXPECTED_TEMPERATURE_COLUMNS.values()
+	var column_indices: Dictionary = {}
+	for column_name: String in expected_column_names:
+		_temperature_values_by_column[column_name] = PackedFloat64Array()
+	var header_found := false
+	for raw_line: String in FileAccess.get_file_as_string(
+		EXPECTED_TEMPERATURE_DATA_PATH
+	).split("\n", false):
+		var line := raw_line.strip_edges()
+		if line.is_empty() or line.begins_with("#"):
+			continue
+		var delimiter := "," if line.contains(",") else "\t"
+		var columns := line.split(delimiter, false)
+		if not header_found:
+			header_found = true
+			_expect(
+				columns.size() >= 4
+				and String(columns[0]) == "frame"
+				and String(columns[1]) == "timestamp_pacific",
+				"The temperature fixture must begin with frame and timestamp_pacific.",
+			)
+			for column_name: String in expected_column_names:
+				var column_index := columns.find(column_name)
+				_expect(
+					column_index >= 0,
+					"The temperature fixture is missing column %s." % column_name,
+				)
+				column_indices[column_name] = column_index
+			continue
+		var expected_frame := int(PackedFloat64Array(
+			_temperature_values_by_column[expected_column_names[0]]
+		).size())
+		_expect(
+			columns.size() >= 4
+			and String(columns[0]).is_valid_int()
+			and int(columns[0]) == expected_frame,
+			"Temperature frame indices must be contiguous from 0 through 719.",
+		)
+		for column_name: String in expected_column_names:
+			var column_index := int(column_indices.get(column_name, -1))
+			var value_is_valid := (
+				column_index >= 0
+				and column_index < columns.size()
+				and String(columns[column_index]).is_valid_float()
+			)
+			_expect(
+				value_is_valid,
+				"Temperature fixture has invalid %s data at frame %d."
+					% [column_name, expected_frame],
+			)
+			if value_is_valid:
+				var values := PackedFloat64Array(
+					_temperature_values_by_column[column_name]
+				)
+				values.append(float(columns[column_index]))
+				_temperature_values_by_column[column_name] = values
+	_expect(header_found, "The temperature fixture header is missing.")
+	for column_name: String in expected_column_names:
+		_expect(
+			PackedFloat64Array(
+				_temperature_values_by_column[column_name]
+			).size() == EXPECTED_TEMPERATURE_ROW_COUNT,
+			"Temperature column %s must contain exactly 720 values."
+				% column_name,
+		)
 
 
 func _prepare_shared_timeline() -> void:
@@ -191,6 +280,12 @@ func _check_regime_profile_matrix() -> void:
 		and Array(loaded_snapshot.get("profile_diagnostics", [])).is_empty(),
 		"The seven regime profiles must load without diagnostics.",
 	)
+	_expect(
+		not Dictionary(loaded_snapshot.get("effective_features", {})).has(
+			"source_area_fraction"
+		),
+		"The removed supplemental-source feature is still present in regime state.",
+	)
 	for regime_spec: Dictionary in [
 		{"name": "Kinship", "id": "kinship"},
 		{"name": "Agriculture", "id": "ranch"},
@@ -219,6 +314,11 @@ func _check_regime_profile_matrix() -> void:
 		for scene_spec: Dictionary in SCENES:
 			var screen_id := String(scene_spec["id"])
 			var screen_features: Dictionary = features_by_screen.get(screen_id, {})
+			_expect(
+				not screen_features.has("source_area_fraction"),
+				"%s still exposes supplemental-source state for %s."
+					% [regime_name, screen_id],
+			)
 			var expected_features := _regime_matrix_expected_features(
 				regime_id,
 				screen_id,
@@ -282,7 +382,6 @@ func _regime_matrix_expected_features(
 				"drain_power": 0.0,
 				"obstacle_area_fraction": 0.0,
 				"obstacle_power": 0.0,
-				"source_area_fraction": 0.1,
 				"shoreline_randomness": 1.0,
 				"salmon_activity": 1.0,
 				"leaf_activity": 1.0,
@@ -304,7 +403,6 @@ func _regime_matrix_expected_features(
 				"reservoir_count": reservoir_counts[screen_id],
 				"drain_area_fraction": 0.75,
 				"obstacle_area_fraction": 0.10,
-				"source_area_fraction": null,
 				"shoreline_randomness": (
 					0.30
 					if screen_id in [
@@ -324,7 +422,6 @@ func _regime_matrix_expected_features(
 				"drain_power": 1.0 if affected else null,
 				"obstacle_area_fraction": 0.30 if affected else null,
 				"obstacle_power": 1.0 if affected else null,
-				"source_area_fraction": null,
 				"shoreline_randomness": 1.0 if affected else null,
 				"salmon_activity": 1.0 if affected else null,
 				"leaf_activity": 1.0 if affected else null,
@@ -364,7 +461,6 @@ func _regime_matrix_expected_features(
 				"drain_area_fraction": 0.75,
 				"drain_power": 1.0,
 				"obstacle_area_fraction": null,
-				"source_area_fraction": null,
 				"shoreline_randomness": 0.0,
 			}
 		"watershed":
@@ -377,7 +473,6 @@ func _regime_matrix_expected_features(
 				"drain_power",
 				"obstacle_area_fraction",
 				"obstacle_power",
-				"source_area_fraction",
 				"shoreline_randomness",
 				"salmon_activity",
 				"leaf_activity",
@@ -545,18 +640,6 @@ func _check_two_stage_texture_isolation() -> void:
 				and first_leaf_texture.get_rid() != second_leaf_texture.get_rid(),
 				"Two leaf fields must bind their own stage texture."
 			)
-		var first_source: Resource = first_stage.call(
-			&"get_source_polygon", &"source_test"
-		)
-		var second_source: Resource = second_stage.call(
-			&"get_source_polygon", &"source_test"
-		)
-		_expect(
-			first_source != null
-			and second_source != null
-			and first_source.get_instance_id() != second_source.get_instance_id(),
-			"Default source resources must be local to each stage instance."
-		)
 	else:
 		_expect(false, "Two-stage isolation check could not find both GPU stages.")
 	first_root.queue_free()
@@ -593,6 +676,7 @@ func _check_scene(scene_spec: Dictionary) -> void:
 		_check_stage_id(stage, expected_id, scene_path)
 		_check_stage_size(stage, scene_path)
 		_check_stage_title(stage, expected_title, scene_path)
+		_check_water_temperature(stage, expected_id, scene_path)
 		_check_regime_panel(stage, expected_id == &"delta", scene_path)
 		_check_shoreline(stage, expected_id, scene_path)
 		_check_shared_timeline_state(stage, scene_path)
@@ -903,6 +987,200 @@ func _check_stage_title(
 	stage.call(&"set_debug_visible", initial_debug_visible)
 
 
+func _check_water_temperature(
+	stage: Node,
+	expected_id: StringName,
+	scene_path: String
+) -> void:
+	var screen_id := String(expected_id)
+	var expected_visible := EXPECTED_TEMPERATURE_COLUMNS.has(screen_id)
+	var expected_column := String(EXPECTED_TEMPERATURE_COLUMNS.get(
+		screen_id,
+		"",
+	))
+	var summary: Dictionary = stage.call(&"runtime_summary")
+	var water_viewport := stage.get_node_or_null(
+		"WaterOnlyViewport"
+	) as SubViewport
+	var title_layer := stage.get_node_or_null("StageTitleLayer") as Node2D
+	var date_label := stage.get_node_or_null(
+		"StageTitleLayer/ModelDate"
+	) as Label
+	var temperature_label := stage.get_node_or_null(
+		"StageTitleLayer/WaterTemperature"
+	) as Label
+	_expect(
+		temperature_label != null,
+		"%s must expose StageTitleLayer/WaterTemperature." % scene_path,
+	)
+	if temperature_label == null:
+		return
+	_expect(
+		temperature_label.get_parent() == title_layer,
+		"%s temperature must remain in StageTitleLayer." % scene_path,
+	)
+	_expect(
+		temperature_label.visible == expected_visible,
+		"%s temperature visibility must be Mount Shasta/Delta only."
+			% scene_path,
+	)
+	_expect(
+		bool(stage.get("stage_temperature_visible")) == expected_visible
+		and bool(summary.get("water_temperature_visible", not expected_visible))
+			== expected_visible,
+		"%s temperature export and summary visibility disagree." % scene_path,
+	)
+	_expect(
+		(temperature_label.position + temperature_label.pivot_offset)
+			.is_equal_approx(EXPECTED_TEMPERATURE_POSITION),
+		"%s temperature must be centered at (1740, 540)." % scene_path,
+	)
+	_expect(
+		is_equal_approx(temperature_label.rotation_degrees, -90.0),
+		"%s temperature must be rotated -90 degrees." % scene_path,
+	)
+	_expect(
+		temperature_label.get_theme_font_size(&"font_size")
+			== EXPECTED_DATE_FONT_SIZE,
+		"%s temperature must be 48 px." % scene_path,
+	)
+	_expect(
+		temperature_label.get_theme_color(&"font_color").is_equal_approx(
+			EXPECTED_TITLE_COLOR
+		),
+		"%s temperature color must be #4AB0E1." % scene_path,
+	)
+	var date_font := (
+		date_label.get_theme_font(&"font") as FontVariation
+		if date_label != null
+		else null
+	)
+	var temperature_font := temperature_label.get_theme_font(
+		&"font"
+	) as FontVariation
+	var tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
+		EXPECTED_DATE_OPENTYPE_FEATURE
+	)
+	_expect(
+		date_font != null
+		and temperature_font != null
+		and temperature_font.get_instance_id() == date_font.get_instance_id()
+		and temperature_font.base_font != null
+		and temperature_font.base_font.resource_path == EXPECTED_TITLE_FONT_PATH
+		and int(temperature_font.opentype_features.get(tnum_tag, 0)) == 1,
+		"%s temperature must share the date's Barlow tnum FontVariation."
+			% scene_path,
+	)
+	_expect(
+		water_viewport == null
+		or not water_viewport.is_ancestor_of(temperature_label),
+		"%s temperature must remain outside WaterOnlyViewport." % scene_path,
+	)
+	_expect(
+		bool(summary.get("water_texture_excludes_stage_temperature", false)),
+		"%s water texture must exclude temperature text." % scene_path,
+	)
+	_expect(
+		Vector2(summary.get(
+			"water_temperature_position",
+			Vector2.ZERO,
+		)) == EXPECTED_TEMPERATURE_POSITION
+		and String(summary.get("water_temperature_position_anchor", ""))
+			== "CENTERLINE"
+		and is_equal_approx(
+			float(summary.get("water_temperature_rotation_degrees", 0.0)),
+			-90.0,
+		)
+		and Color(summary.get(
+			"water_temperature_color",
+			Color.TRANSPARENT,
+		)).is_equal_approx(EXPECTED_TITLE_COLOR)
+		and int(summary.get("water_temperature_font_size", 0))
+			== EXPECTED_DATE_FONT_SIZE
+		and String(summary.get("water_temperature_font_resource", ""))
+			== EXPECTED_TITLE_FONT_PATH
+		and bool(summary.get("water_temperature_font_shared_with_date", false))
+		and bool(summary.get("water_temperature_tabular_numerals", false))
+		and String(summary.get("water_temperature_opentype_feature", ""))
+			== EXPECTED_DATE_OPENTYPE_FEATURE,
+		"%s summary must expose the complete temperature typography contract."
+			% scene_path,
+	)
+	if not expected_visible:
+		return
+
+	_expect(
+		bool(summary.get("water_temperature_value_valid", false))
+		and bool(summary.get("water_temperature_data_loaded", false))
+		and String(summary.get("water_temperature_data_error", "")).is_empty()
+		and String(summary.get("water_temperature_data_path", ""))
+			== EXPECTED_TEMPERATURE_DATA_PATH
+		and String(summary.get("water_temperature_data_column", ""))
+			== expected_column
+		and int(summary.get("water_temperature_data_row_count", 0))
+			== EXPECTED_TEMPERATURE_ROW_COUNT
+		and String(summary.get("water_temperature_interpolation_mode", ""))
+			== EXPECTED_TEMPERATURE_INTERPOLATION,
+		"%s did not load the correct 720-row temperature column." % scene_path,
+	)
+	if _expected_timeline_snapshot.is_empty():
+		return
+	var row_position := (
+		float(_expected_timeline_snapshot.get("year_progress", 0.0))
+		* float(EXPECTED_TEMPERATURE_ROW_COUNT)
+	)
+	var expected_row := mini(
+		floori(row_position),
+		EXPECTED_TEMPERATURE_ROW_COUNT - 1,
+	)
+	var expected_fraction := row_position - floorf(row_position)
+	var actual_row := int(summary.get("water_temperature_data_row_index", -1))
+	var actual_fraction := float(summary.get(
+		"water_temperature_data_row_fraction",
+		-1.0,
+	))
+	_expect(
+		actual_row == expected_row
+		and is_equal_approx(actual_fraction, expected_fraction),
+		"%s temperature row must stay synchronized with ModelTimeline."
+			% scene_path,
+	)
+	var values := PackedFloat64Array(
+		_temperature_values_by_column.get(
+			expected_column,
+			PackedFloat64Array(),
+		)
+	)
+	if values.size() != EXPECTED_TEMPERATURE_ROW_COUNT:
+		return
+	var following_row := (expected_row + 1) % EXPECTED_TEMPERATURE_ROW_COUNT
+	var expected_value := lerpf(
+		float(values[expected_row]),
+		float(values[following_row]),
+		expected_fraction,
+	)
+	_expect(
+		is_equal_approx(
+			float(summary.get("water_temperature_value_c", NAN)),
+			expected_value,
+		),
+		"%s temperature must interpolate the selected measured-data column."
+			% scene_path,
+	)
+	var expected_text := "WATER %.1f °C" % expected_value
+	_expect(
+		expected_text == String(EXPECTED_SHARED_TEMPERATURE_TEXT[screen_id]),
+		"%s smoke fixture temperature changed unexpectedly; got %s."
+			% [scene_path, expected_text],
+	)
+	_expect(
+		temperature_label.text == expected_text
+		and String(summary.get("water_temperature_text", "")) == expected_text,
+		"%s temperature must display exactly '%s'."
+			% [scene_path, expected_text],
+	)
+
+
 func _check_regime_panel(
 	stage: Node,
 	expected_visible: bool,
@@ -996,10 +1274,13 @@ func _check_regime_panel(
 func _check_ecology(stage: Node, scene_path: String) -> void:
 	var summary: Dictionary = stage.call(&"runtime_summary")
 	_expect(
-		int(summary.get("source_polygon_count", 0)) == 4,
-		"%s must contain the fixed four-slot source bank." % scene_path
+		not stage.has_method(&"get_source_polygon")
+		and not summary.has("source_polygon_count")
+		and not summary.has("source_polygons")
+		and not summary.has("source_count_uniforms")
+		and not summary.has("source_data_texture_bound"),
+		"%s still exposes the removed supplemental-source system." % scene_path,
 	)
-
 
 	var salmon_summary: Dictionary = summary.get("salmon_summary", {})
 	_expect(
@@ -1170,6 +1451,12 @@ func _check_shoreline(
 		and int(summary.get("regime_profile_count", 0)) == 7,
 		"%s must load all seven profiles from the root text table." % scene_path
 	)
+	_expect(
+		String(summary.get("regime_geometry_mode", ""))
+			== "GENERATION_SALTED_BOUNDED_SLOT_BANKS"
+		and int(summary.get("regime_layout_generation", -1)) >= 0,
+		"%s must expose generation-salted fixed feature placement." % scene_path,
+	)
 	var natural_agriculture_shoreline := expected_id in [
 		&"mount_shasta",
 		&"mccloud_pit",
@@ -1200,11 +1487,6 @@ func _check_shoreline(
 			"defined": true,
 			"value": 0.10,
 			"contributors": ["ranch"],
-		},
-		"source_area_fraction": {
-			"defined": false,
-			"value": 0.0,
-			"contributors": [],
 		},
 		"shoreline_randomness": {
 			"defined": true,
@@ -1248,12 +1530,11 @@ func _check_shoreline(
 		"regime_applied_feature_budgets",
 		{}
 	)
-	var expected_budget_values := [expected_reservoir_weight, 0.75, 0.10, 1.0]
+	var expected_budget_values := [expected_reservoir_weight, 0.75, 0.10]
 	var budget_names := [
 		"reservoir_area_fraction",
 		"drain_area_fraction",
 		"obstacle_area_fraction",
-		"source_area_fraction",
 	]
 	for budget_index in range(budget_names.size()):
 		_expect(
@@ -1270,13 +1551,12 @@ func _check_shoreline(
 	_expect(
 		bool(applied_overrides.get("reservoir", false))
 		and bool(applied_overrides.get("drain_area", false))
-		and bool(applied_overrides.get("obstacle_area", false))
-		and not bool(applied_overrides.get("source", true)),
-		"%s must distinguish defined budgets from authored fallbacks." % scene_path
+		and bool(applied_overrides.get("obstacle_area", false)),
+		"%s must apply the defined interaction budgets." % scene_path
 	)
 	_expect_feature_slots(
 		summary,
-		{"drain": 4, "obstacle": 1, "source": 1},
+		{"drain": 4, "obstacle": 1},
 		scene_path,
 	)
 	_check_edge_turbulence(summary, expected_shoreline_weight, scene_path)
@@ -1295,7 +1575,7 @@ func _expect_feature_slots(
 			== EXPECTED_REGIME_SLOT_CAPACITIES
 		and Dictionary(summary.get("regime_feature_slot_counts_resident", {}))
 			== EXPECTED_REGIME_SLOT_CAPACITIES,
-		"%s must retain fixed 5-drain, 2-obstacle, 4-source banks." % context,
+		"%s must retain fixed 5-drain and 2-obstacle banks." % context,
 	)
 	_expect(
 		Dictionary(summary.get("regime_feature_slot_counts_desired", {})) == expected
@@ -1305,17 +1585,13 @@ func _expect_feature_slots(
 	_expect(
 		Dictionary(summary.get("regime_feature_controller_spare_capacity", {})) == {
 			"interaction": 1,
-			"source": 4,
 		},
 		"%s did not preserve controller capacity outside the fixed banks." % context,
 	)
 	_expect(
 		int(summary.get("interaction_polygon_count", 0)) == 7
-		and int(summary.get("source_polygon_count", 0)) == 4
 		and int(summary.get("interaction_overlay_count", 0))
-			== int(expected.get("drain", 0)) + int(expected.get("obstacle", 0))
-		and int(summary.get("source_overlay_count", 0))
-			== int(expected.get("source", 0)),
+			== int(expected.get("drain", 0)) + int(expected.get("obstacle", 0)),
 		"%s does not retain the complete resident feature resources." % context,
 	)
 	var expected_interaction_count := int(expected.get("drain", 0)) + int(
@@ -1325,11 +1601,6 @@ func _expect_feature_slots(
 		_expect(
 			int(count_variant) == expected_interaction_count,
 			"%s interaction count did not reach every shader." % context,
-		)
-	for count_variant: Variant in Array(summary.get("source_count_uniforms", [])):
-		_expect(
-			int(count_variant) == int(expected.get("source", 0)),
-			"%s source count did not reach every shader." % context,
 		)
 
 
@@ -1433,24 +1704,23 @@ func _regime_geometry_signature(summary: Dictionary) -> String:
 	var parts := PackedStringArray()
 	var center := Vector2(summary.get("reservoir_center_pixels", Vector2.ZERO))
 	parts.append("reservoir=%.6f,%.6f" % [center.x, center.y])
-	for collection_name: String in ["interaction_polygons", "source_polygons"]:
-		for definition_variant: Variant in Array(summary.get(collection_name, [])):
-			if not definition_variant is Dictionary:
-				continue
-			var definition: Dictionary = definition_variant
-			parts.append(String(definition.get("element_id", "")))
-			var vertices_variant: Variant = definition.get(
-				"vertices",
-				PackedVector2Array(),
-			)
-			if not vertices_variant is Array:
-				continue
-			for point_variant: Variant in Array(vertices_variant):
-				if point_variant is Array and Array(point_variant).size() >= 2:
-					parts.append("%.6f,%.6f" % [
-						float(Array(point_variant)[0]),
-						float(Array(point_variant)[1]),
-					])
+	for definition_variant: Variant in Array(summary.get("interaction_polygons", [])):
+		if not definition_variant is Dictionary:
+			continue
+		var definition: Dictionary = definition_variant
+		parts.append(String(definition.get("element_id", "")))
+		var vertices_variant: Variant = definition.get(
+			"vertices",
+			PackedVector2Array(),
+		)
+		if not vertices_variant is Array:
+			continue
+		for point_variant: Variant in Array(vertices_variant):
+			if point_variant is Array and Array(point_variant).size() >= 2:
+				parts.append("%.6f,%.6f" % [
+					float(Array(point_variant)[0]),
+					float(Array(point_variant)[1]),
+				])
 	return "|".join(parts)
 
 
@@ -1537,26 +1807,10 @@ func _check_control_route(
 	)
 	stage.call(&"set_flow_rate", 0.50)
 
-	var source_id := "integration_source_%s" % String(expected_id)
 	var salmon_before: Dictionary = summary.get("salmon_summary", {})
 	var leaves_before: Dictionary = summary.get("leaf_summary", {})
 	recipients = int(bus.call(&"route_control_message", {
 		"target": String(expected_id),
-		"geometry_ops": [{
-			"op": "upsert",
-			"kind": "source",
-			"id": source_id,
-			"value": {
-				"vertices": [
-					[9.0, 2.0],
-					[10.0, 2.0],
-					[10.0, 3.0],
-					[9.0, 3.0],
-				],
-				"emission_fraction": 0.20,
-				"flow_direction": [1.0, 0.0],
-			},
-		}],
 		"actions": [{
 			"name": "release_salmon",
 			"arguments": {"count": 3},
@@ -1567,19 +1821,10 @@ func _check_control_route(
 	}))
 	_expect(
 		recipients == 1,
-		"%s routed source/salmon packet must reach exactly one stage." % scene_path
+		"%s routed ecology packet must reach exactly one stage." % scene_path
 	)
 	await get_tree().process_frame
 	summary = stage.call(&"runtime_summary")
-	_expect(
-		int(summary.get("source_polygon_count", 0)) == 5,
-		"%s routed source upsert must add outside the resident source bank." % scene_path
-	)
-	for count_variant: Variant in Array(summary.get("source_count_uniforms", [])):
-		_expect(
-			int(count_variant) == 2,
-			"%s routed source did not reach every shader." % scene_path,
-		)
 	var salmon_after: Dictionary = summary.get("salmon_summary", {})
 	_expect(
 		int(salmon_after.get("release_serial", 0))
@@ -1609,22 +1854,6 @@ func _check_control_route(
 		"%s routed leaf action must schedule both top and bottom cohorts."
 			% scene_path
 	)
-	bus.call(&"route_control_message", {
-		"target": String(expected_id),
-		"geometry_ops": [{
-			"op": "remove",
-			"kind": "source",
-			"id": source_id,
-		}],
-		"actions": [],
-	})
-	await get_tree().process_frame
-	summary = stage.call(&"runtime_summary")
-	_expect(
-		int(summary.get("source_polygon_count", 0)) == 4,
-		"%s routed source removal must restore the resident source bank." % scene_path
-	)
-
 	var polygon_id := "integration_%s" % String(expected_id)
 	recipients = int(bus.call(&"route_control_message", {
 		"target": String(expected_id),
@@ -1736,8 +1965,9 @@ func _finish() -> void:
 		print(
 			"GPU_STAGE_SCENES_SMOKE: PASS "
 			+ "(7 scenes, unique IDs/titles, 1920x1080, Mobile, "
+			+ "Shasta/Delta temperature, "
 			+ "persistent timeline/regimes + gate + routed "
-			+ "polygons/sources/salmon/leaves)"
+			+ "polygons/salmon/leaves)"
 		)
 		get_tree().quit(0)
 		return

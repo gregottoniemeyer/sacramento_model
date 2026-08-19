@@ -45,8 +45,6 @@ const MIN_GATE_WIDTH := 0.0
 const MAX_GATE_WIDTH := 10.0
 const MAX_PENDING_CONTROL_MESSAGES := 256
 const MAX_INTERACTION_POLYGONS := 8
-const MAX_SOURCE_POLYGONS := 8
-const SOURCE_SPAWN_EPSILON_WORLD := 1.5 / PIXELS_PER_WORLD_UNIT
 
 @export_group("Identity")
 @export var stage_index: int = 0:
@@ -119,9 +117,6 @@ var _requested_gate_width: float = 0.25
 @export_group("Polygon Interactions")
 @export var interaction_polygons: Array[GPUFlowInteractionPolygon] = []
 
-@export_group("Water Sources")
-@export var source_polygons: Array[CPUFlowSourcePolygon] = []
-
 @export_group("Salmon")
 @export var salmon_enabled: bool = true
 @export_range(1, 300, 1) var salmon_per_release: int = 25
@@ -148,7 +143,6 @@ func _ready() -> void:
 	_apply_identity()
 	_apply_runtime_parameters()
 	_apply_interaction_geometry()
-	_apply_source_geometry()
 	_apply_gate()
 	_apply_debug_visibility()
 	reset_simulation()
@@ -343,13 +337,6 @@ func get_interaction_polygon(element_id: StringName) -> GPUFlowInteractionPolygo
 	return null
 
 
-func get_source_polygon(element_id: StringName) -> CPUFlowSourcePolygon:
-	for source: CPUFlowSourcePolygon in source_polygons:
-		if source != null and source.element_id == element_id:
-			return source
-	return null
-
-
 func set_runtime_parameter(
 	path: String,
 	value: Variant,
@@ -437,10 +424,6 @@ func runtime_summary() -> Dictionary:
 	for polygon: GPUFlowInteractionPolygon in interaction_polygons:
 		if polygon != null:
 			interaction_definitions.append(polygon.to_dictionary())
-	var source_definitions: Array[Dictionary] = []
-	for source: CPUFlowSourcePolygon in source_polygons:
-		if source != null:
-			source_definitions.append(source.to_dictionary())
 	return {
 		"backend": "cpu_heads_multimesh",
 		"simulation_authority": "cpu",
@@ -466,13 +449,8 @@ func runtime_summary() -> Dictionary:
 		"reservoir_radius_pixels": reservoir_radius_pixels,
 		"interaction_polygon_count": interaction_definitions.size(),
 		"interaction_polygons": interaction_definitions,
-		"source_polygon_count": source_definitions.size(),
-		"source_polygons": source_definitions,
 		"overlay_interaction_count": (
 			_overlay.get_interaction_polygon_count() if _overlay != null else 0
-		),
-		"overlay_source_count": (
-			_overlay.get_source_polygon_count() if _overlay != null else 0
 		),
 		"pending_salmon_release_count": _pending_salmon_releases.size(),
 		"salmon_last_release_count": _last_salmon_release_count,
@@ -494,7 +472,6 @@ func _build_backend() -> void:
 	_water_model.auto_step = false
 	add_child(_water_model)
 	_water_model.set_segment_sink(Callable(_water_renderer, "append_segment"))
-	_water_model.set_spawn_provider(Callable(self, "_source_spawn_position"))
 
 	_salmon_school = SALMON_SCHOOL_SCRIPT.new() as SALMON_SCHOOL_SCRIPT
 	_salmon_school.name = "CPUSalmonSchool2D"
@@ -587,17 +564,10 @@ func _bind_geometry_signals() -> void:
 	for polygon: GPUFlowInteractionPolygon in interaction_polygons:
 		if polygon != null and not polygon.changed.is_connected(_on_interaction_changed):
 			polygon.changed.connect(_on_interaction_changed)
-	for source: CPUFlowSourcePolygon in source_polygons:
-		if source != null and not source.changed.is_connected(_on_source_changed):
-			source.changed.connect(_on_source_changed)
 
 
 func _on_interaction_changed() -> void:
 	_apply_interaction_geometry()
-
-
-func _on_source_changed() -> void:
-	_apply_source_geometry()
 
 
 func _apply_interaction_geometry() -> void:
@@ -614,83 +584,6 @@ func _apply_interaction_geometry() -> void:
 			"enabled": polygon.enabled,
 		})
 	_overlay.set_interaction_polygons(definitions)
-
-
-func _apply_source_geometry() -> void:
-	if _overlay == null:
-		return
-	var definitions: Array[Dictionary] = []
-	for source: CPUFlowSourcePolygon in source_polygons:
-		if source == null:
-			continue
-		var native_vertices := _world_vertices_to_native(source.vertices)
-		var native_edges: Array[Dictionary] = []
-		var world_edges: Array[Dictionary] = CPUFlowSourcePolygon.selected_downstream_edges(
-			source.vertices,
-			source.flow_direction
-		)
-		for edge: Dictionary in world_edges:
-			var world_normal: Vector2 = edge["outward_normal"]
-			native_edges.append({
-				"edge_index": int(edge["edge_index"]),
-				"outward_normal": Vector2(world_normal.x, -world_normal.y).normalized(),
-			})
-		definitions.append({
-			"vertices": native_vertices,
-			"enabled": source.enabled,
-			"downstream_edges": native_edges,
-		})
-	_overlay.set_source_polygons(definitions)
-
-
-func _source_spawn_position(
-	head_id: int,
-	generation: int,
-	lane_seed: float
-) -> Variant:
-	var enabled_sources: Array[CPUFlowSourcePolygon] = []
-	var total_fraction := 0.0
-	for source: CPUFlowSourcePolygon in source_polygons:
-		if (
-			source == null
-			or not source.enabled
-			or source.emission_fraction <= 0.0
-			or not source.validate().is_empty()
-		):
-			continue
-		enabled_sources.append(source)
-		total_fraction += source.emission_fraction
-	if enabled_sources.is_empty():
-		return null
-	var selector := _hash11(
-		float(head_id) * 17.137
-		+ float(generation) * 3.119
-		+ lane_seed * 37.0
-		+ float(stage_index) * 11.0
-	)
-	var source_probability := minf(total_fraction, 1.0)
-	if selector >= source_probability:
-		return null
-	var weighted_target := selector / maxf(source_probability, 0.000001) * total_fraction
-	var accumulated := 0.0
-	var selected_source: CPUFlowSourcePolygon = enabled_sources[-1]
-	for source: CPUFlowSourcePolygon in enabled_sources:
-		accumulated += source.emission_fraction
-		if weighted_target <= accumulated:
-			selected_source = source
-			break
-	var sample_value := _hash11(
-		float(head_id) * 5.271
-		+ float(generation) * 19.731
-		+ lane_seed * 173.0
-	)
-	var world_point := selected_source.sample_emission_point(
-		sample_value,
-		SOURCE_SPAWN_EPSILON_WORLD
-	)
-	if not is_finite(world_point.x) or not is_finite(world_point.y):
-		return null
-	return _world_to_native(world_point)
 
 
 func _process_pending_salmon_releases(
@@ -799,7 +692,3 @@ func _variant_to_vector2(value: Variant, fallback: Vector2) -> Vector2:
 	if value is Dictionary and value.has("x") and value.has("y"):
 		return Vector2(float(value["x"]), float(value["y"]))
 	return fallback
-
-
-func _hash11(value: float) -> float:
-	return fposmod(sin(value * 127.1 + 311.7) * 43758.5453123, 1.0)

@@ -2,7 +2,7 @@
 
 > **Production GPU update:** The seven selectable `scene_N.tscn` wrappers now
 > instance `res://flow/gpu_stage/gpu_flow_stage_2d.tscn` directly. Production
-> water, reservoirs, interactions, source polygons, and salmon are GPU systems.
+> water, reservoirs, interactions, and salmon are GPU systems.
 > See `res://flow/gpu_stage/README.md` for their deployed rendering details,
 > controls, supported controller fields, tests, and bounded schemas. The CPU
 > `FlowModel2D` described in much of this document is retained only as a
@@ -13,11 +13,11 @@ chevron/ring scenes with independent ports of the water-line simulation in
 `ink_flow_lines_v04.py`.
 
 The production GPU milestone includes immutable water trails, coherent noise,
-addressable absorb/repel polygons, reservoirs, live gates, addressable water
-sources, GPU salmon, GPU leaves, a screen-fixed model grid and calendar, runtime
-geometry replacement, a process-persistent historical-regime switcher, UDP
-control, and debug drawing. The GPU stage implements both `release_salmon` and
-`release_leaves`.
+addressable absorb/repel polygons, reservoirs, live gates, GPU salmon, GPU
+leaves, a screen-fixed model grid and calendar, runtime
+geometry replacement, measured water-temperature text on Mount Shasta and
+Delta, a process-persistent historical-regime switcher, UDP control, and debug
+drawing. The GPU stage implements both `release_salmon` and `release_leaves`.
 
 ## Architecture
 
@@ -27,15 +27,17 @@ control, and debug drawing. The GPU stage implements both `release_salmon` and
 Its original seven-layer GPU water renderer runs once inside a transparent,
 native 1920 x 1080 `WaterOnlyViewport`. The stage composites that viewport back
 to the root with premultiplied alpha. The black background, model grid, cyan
-reservoir guide, gold interaction polygons, violet source polygons, stage title,
-model date, active-regime panel, salmon, and leaves are kept outside that
-viewport, so the water texture contains only water and no visual feedback.
+reservoir guide, gold interaction polygons, stage title, model date,
+water-temperature label, active-regime panel, salmon, and leaves are kept
+outside that viewport, so the water texture contains only water and no visual
+feedback.
 
 The presentation stack uses absolute canvas Z values: `Background` is `-100`,
 the stage-owned `BackgroundGrid` `Node2D` is `-75`, and `StageTitleLayer` is
-`-50`; water, salmon, and leaves are `0` or higher. `StageTitleLayer` owns both
-the river title and model date plus the optional active-regime panel. Neither it
-nor the grid is part of the debug overlay, so `V` does not hide them.
+`-50`; water, salmon, and leaves are `0` or higher. `StageTitleLayer` owns the
+river title, model date, optional measured water temperature, and optional
+active-regime panel. None of it is part of the debug overlay, so `V` does not
+hide it.
 
 Salmon and leaves sample this water texture's alpha directly in their
 particle-process shaders. No frame is copied to an `Image`, no CPU occupancy
@@ -47,10 +49,9 @@ periodically resampled, cached-local-heading probes with multi-radius
 center/flank support. Leaves render as head-only antialiased disks and have no
 segment pool or motion trail.
 
-Water source definitions and absorb/repel definitions are configuration data
-packed into separate fixed 128 x 1 `RGBAF` textures. The GPU water-head process
-shader reads them and owns all live positions; the CanvasItem shaders only draw
-immutable completed segments.
+Absorb/repel definitions are configuration data packed into one fixed 128 x 1
+`RGBAF` texture. The GPU water-head process shader reads it and owns all live
+positions; the CanvasItem shaders only draw immutable completed segments.
 
 ### Retained CPU reference
 
@@ -157,6 +158,9 @@ link through `river_profile_path` to exact seven-screen tables at
 `res://flow/data/regimes/kinship.txt`, `ranch.txt` (Agriculture),
 `gold_rush.txt`, `water_projects.txt`, `hydropower.txt`, and `tech.txt`.
 `profile_status` is descriptive metadata and never suppresses populated data.
+The master and linked tables use schema version `2`. The former supplemental
+source columns are absent. Ordinary water still enters through the fixed,
+full-height left river inlet; that lifecycle boundary is not a regime feature.
 
 A populated river cell overrides its master value. A blank river cell inherits
 a populated master value; if both are blank, the feature is undefined. An
@@ -169,24 +173,24 @@ opt in; the active-regime panel remains Delta-only presentation.
 
 Screen abbreviations below are S = Mount Shasta, Mc = McCloud/Pit, C =
 Cottonwood Creek, Mi = Mill Creek, F = Feather River, A = American River, and
-D = Delta. `R`, `Dr`, `Ob`, `So`, and `Sh` mean reservoir area, drain area,
-obstacle area, source area, and shoreline randomness; `c` is desired reservoir
-count and `p` is interaction power.
+D = Delta. `R`, `Dr`, `Ob`, and `Sh` mean reservoir area, drain area, obstacle
+area, and shoreline randomness; `c` is desired reservoir count and `p` is
+interaction power.
 
 | Regime | Current per-river matrix and schedule |
 |---|---|
-| Kinship | All: `R 0/c0`, `Dr 0/p0`, `Ob 0/p0`, `So .10`, `Sh 1`; salmon `11/01–01/31` daily, leaves `10/01–10/31` every 2 days. |
+| Kinship | All: `R 0/c0`, `Dr 0/p0`, `Ob 0/p0`, `Sh 1`; salmon `11/01–01/31` daily, leaves `10/01–10/31` every 2 days. |
 | Agriculture (`ranch`) | `R .20/c1` S/Mi/F/A, `.20/c2` Mc/D, `0/c0` C; `Dr .75` and `Ob .10` all; `Sh .30` S/Mc/C, `0` elsewhere. Positive-area gates open `06/01–08/31`; aperture blank. |
 | Gold Rush | F/A/D only: `R .10` with count blank, `Dr .30/p1`, `Ob .30/p1`, `Sh 1`, and the Kinship salmon/leaf seasons. S/Mc/C/Mi are blank. |
 | Water Projects | S/Mc/F/A/D: `R .33/c1`, `Dr .50`; C/Mi: explicit `R 0/c0`, `Dr 0`; five of seven whole-river stages is the nearest discrete allocation to 75%; all: `Sh 0`, leaves `0`; no gate schedule. |
 | Hydropower | S/Mc/Mi/F/A/D: `R .50/c2`, aperture `.33`, open `01/01–12/31`; C: `R 0/c0`, no gate. `Dr .25` all; `Sh .20` Mc/C and `0` elsewhere. |
-| Tech | All: `R .75/c2`, `Dr .75/p1`, `Sh 0`; gate, obstacle, source, salmon, and leaf fields blank. |
+| Tech | All: `R .75/c2`, `Dr .75/p1`, `Sh 0`; gate, obstacle, salmon, and leaf fields blank. |
 | Watershed | Reserved for the future AI watershed model; no linked river table and no runtime effects yet. |
 
 Area fractions are deterministic admission/encounter budgets, not literal
-geometry or guaranteed screen-area coverage. A positive drain, obstacle, or
-source weight also chooses a count from its bounded resident bank with
-`ceil(weight * capacity)`: five drains, two obstacles, and four sources.
+geometry or guaranteed screen-area coverage. A positive drain or obstacle
+weight also chooses a count from its bounded resident bank with
+`ceil(weight * capacity)`: five drains and two obstacles.
 Agriculture's `.75` drain weight therefore activates four field/drain polygons,
 while its `.10` obstacle weight activates one obstacle. A feature-wide stable
 selector applies each budget once across the complete bank; four drains do not
@@ -196,31 +200,36 @@ activates no bank slots. An undefined feature preserves one authored fallback
 slot and its authored budget.
 
 The seven resident interaction resources—five drains and two obstacles—fit in
-the eight-record interaction texture and leave one controller slot. Four
-resident sources use four records in their separate eight-record source
-texture. The banks are allocated once during startup. Regime changes enable,
-disable, and translate those resources without allocating another node,
-resource, particle pool, or texture.
+the eight-record interaction texture and leave one controller slot. This bank is
+allocated once during startup. Regime changes enable, disable, and reshape or
+translate those resources without allocating another node, resource, particle
+pool, or texture.
 
-Feature centers are derived deterministically from the stable `screen_id`,
-feature kind, slot index, and the sorted IDs of all active regimes that define a
-physical feature for that screen. Slot X ranges are stratified, so multiple
-fields and sources spread across the stage. Each distinct set of contributing
-active regimes gets its own stable, per-screen complete layout; an undefined
-feature follows that new layout at authored strength, while a truly
-unaffected/no-op regime retains the authored layout. Geometry is always
-translated from captured authored shapes, never from its previous live
-position, so `A -> B -> A` returns to the exact same A placement without drift.
-An explicit zero remains in the layout key but activates no physics or debug
-guide for that feature.
+Every real change to the absolute active set advances a layout generation. The
+seed combines `screen_id`, sorted physical contributors, feature kind, slot
+index, and generation. Active drain lanes and obstacle positions are therefore
+fresh on every real transition, including `Tech -> Agriculture` and a later
+`A -> B -> A`. Re-sending an identical absolute set is idempotent: it publishes
+no change, advances no generation, and uploads no replacement geometry. Fields
+remain stratified along X, alternate top/bottom bank assignment between adjacent
+generations, and receive newly seeded mouths, widths, depths, and lane
+positions. Obstacles retain their immutable captured shape and move to newly
+seeded positions. An explicit zero activates no physics or debug guide.
+
+Each active regime field is a trapezoid rooted at exactly one top or bottom
+screen edge. Eligible heads curve laterally toward the strongest nearby
+river-facing mouth, cross through that mouth, continue through the field toward
+the bank, and leave the screen. Offscreen recycling remains bounded and waits
+for the immutable trail to fade; no field teleports water or adds particle
+slots.
 
 A defined zero reservoir area or count removes the reservoir constraint and
 guide. When a live regime removes or relocates a reservoir, retained heads are
 released into downstream flow and their already-recorded orbit trails fade over
 the ordinary trail lifetime. Obstacles affect moving heads on the next step;
-sources affect future or recycled lifecycles; heads stopped in a removed field
-recycle after their immutable trail lifetime. No transition restarts the water
-particles. The GPU stage has one physical `reservoir_main`;
+heads already committed to a field continue to its bank exit and recycle after
+their immutable trail lifetime. No transition restarts the water particles. The
+GPU stage has one physical `reservoir_main`;
 `reservoir_count=2` remains desired-state data and does not produce a second
 reservoir.
 
@@ -243,8 +252,7 @@ cross-stream turbulence plus a smaller streamwise component; only the outermost
 at `1.0` it is at full strength. No production shoreline polygon, collision
 chain, debug outline, or data texture is created, so the effect does not narrow
 the river. Ordinary left-edge lifecycles retain the full `y = 28…1052` inlet at
-every setting, while explicit interior sources retain their own spawning
-behavior. Existing immutable water history is never rewritten. The uniform
+every setting. Existing immutable water history is never rewritten. The uniform
 field is cheaper than the former shoreline force and swept-crossing passes.
 
 ### Regime-transition work and bounded state
@@ -262,9 +270,11 @@ reservoir-owned heads in place into downstream flow before they can respond to
 the new-center reservoir physics. Already-recorded orbit trails stay at their
 old positions and fade over the ordinary trail lifetime. Reservoir and bounded
 feature-bank placement is evaluated only during initial stage hydration or a
-real regime transition; it is not recomputed or uploaded every frame. The single
-physical reservoir capacity is unchanged even when the profile's desired
-`reservoir_count` is `2`.
+real regime transition. Each real active-set change advances the layout
+generation and gives resident drains and obstacles fresh positions; an identical
+absolute set does neither. Placement is not recomputed or uploaded every frame.
+The single physical reservoir capacity is unchanged even when the profile's
+desired `reservoir_count` is `2`.
 
 Edge turbulence is one bounded uniform calculation in the water-head shader. It
 does not scan shoreline segments or perform swept-polygon collisions. Regime
@@ -305,17 +315,11 @@ Production edge turbulence consumes no interaction record and no configuration
 texture. The legacy shoreline geometry diagnostic fields remain available for
 compatibility but report zero/empty/unbound values.
 
-`GPUFlowSourcePolygon` uses an independent 128 x 1 `RGBAF` texture with the
-same maximum of eight polygons and 12 vertices per polygon. Production allocates
-four resident source slots once, leaving four records for controller geometry;
-only active slots are packed. A source stores its enabled state, emission
-fraction, flow direction, optional deterministic seed, and edge-weight data.
-New/recycled water heads first enter one feature-wide source cohort, then choose
-among its active sources on the GPU and use a weighted downstream-edge sample
-for Y. In the production +X model, an independent deterministic sample spreads
-X across the polygon's bounding-box minimum and maximum, eliminating a hard
-vertical launch seam. Heads not selected by the active source fraction continue
-to use the ordinary full-height left inlet.
+Resident absorb records used as regime fields are generated as top- or
+bottom-bank trapezoids. Their suction field turns eligible heads toward the
+river-facing mouth, the swept crossing accepts only that mouth, and the field
+draining state carries accepted heads across the bank and offscreen. Freeform
+controller absorbers retain their legacy upstream-facing swept-entry behavior.
 
 ## Screen IDs and stage presentation
 
@@ -343,6 +347,14 @@ proportional spacing. These are the physical top and bottom centerlines after
 the displays are mounted vertically. The font is part of the project rather
 than resolved from the host operating system.
 
+Mount Shasta and Delta additionally enable `WaterTemperature`, a 48-pixel label
+centered on native point `(1740, 540)`. It is centerline anchored, rotated
+`-90` degrees, colored `#4AB0E1`, and uses the exact same bundled
+`FontVariation` and OpenType `tnum` feature as the model date. A valid value is
+formatted to one decimal place as `WATER 10.4 °C`; an unconfigured, missing,
+malformed, or otherwise invalid series displays the explicit fallback
+`WATER — °C`. The other five production stages do not show this label.
+
 Only `scene_7.tscn`, the Delta screen, enables the
 active-regime panel. It is a child of `StageTitleLayer`, reads at `-90`
 degrees, and uses the same Barlow Condensed Medium font and `#4AB0E1` color.
@@ -362,8 +374,8 @@ world unit to native pixels, so the grid directly describes the 16 x 9 model
 coordinate system. The first and last boundary lines are omitted on both axes,
 so the grid does not form a frame around the screen. The explicit background is
 at absolute Z `-100`, the grid is
-at `-75`, the title, date, and regime panel are at `-50`, and water/ecology are
-at `0` or higher.
+at `-75`, the title, date, temperature, and regime panel are at `-50`, and
+water/ecology are at `0` or higher.
 Active features can therefore pass visibly over both the grid and text. The grid
 and text remain outside `WaterOnlyViewport`, so their alpha never counts as
 water, and outside `ReservoirAndStatusOverlay`, so the `V` debug toggle does not
@@ -378,11 +390,12 @@ continuous year fraction rather than accumulated integer frame counts. When
 auto-advance is enabled and the global timeline is not paused, it keeps running
 while the selector is visible; switching scenes does not snap it back.
 
-On creation, a production stage loads its river data and immediately consumes
-the current `ModelTimeline` snapshot before building its water particles. Its
-date label, watershed row, interpolated water rate, and runtime summary all
-start at the shared instant rather than row zero. Multiple stages in the same
-process share that instant exactly. Calling `set_paused()` or pressing Space on
+On creation, a production stage loads its river data and optional temperature
+series, then immediately consumes the current `ModelTimeline` snapshot before
+building its water particles. Its date label, watershed row, interpolated water
+rate and temperature, and runtime summary all start at the shared instant
+rather than row zero. Multiple stages in the same process share that instant
+exactly. Calling `set_paused()` or pressing Space on
 any one of them changes the process-global pause state, so all active stages and
 the calendar pause or resume together. Pause does not change the independent
 auto-advance setting.
@@ -425,15 +438,15 @@ every display process when cross-process phase lock is required.
 
 The production scene-to-data assignments are:
 
-| Scene | Display | Data file |
-|---|---|---|
-| `scene_1.tscn` | Mount Shasta | `shasta_720.txt` |
-| `scene_2.tscn` | McCloud-Pit Rivers | `mccloud_720.txt` |
-| `scene_3.tscn` | Cottonwood Creek | `cottonwood_720.txt` |
-| `scene_4.tscn` | Mill Creek | `mill_creek_720.txt` |
-| `scene_5.tscn` | Feather River | `feather_720.txt` |
-| `scene_6.tscn` | American River | `american_720.txt` |
-| `scene_7.tscn` | Delta | `delta_720.txt` |
+| Scene | Display | Watershed data | Temperature series |
+|---|---|---|---|
+| `scene_1.tscn` | Mount Shasta | `shasta_720.txt` | Keswick release |
+| `scene_2.tscn` | McCloud-Pit Rivers | `mccloud_720.txt` | none |
+| `scene_3.tscn` | Cottonwood Creek | `cottonwood_720.txt` | none |
+| `scene_4.tscn` | Mill Creek | `mill_creek_720.txt` | none |
+| `scene_5.tscn` | Feather River | `feather_720.txt` | none |
+| `scene_6.tscn` | American River | `american_720.txt` | none |
+| `scene_7.tscn` | Delta | `delta_720.txt` | Freeport |
 
 The combined McCloud-Pit display currently uses the McCloud series. The current
 Delta source is a short November 6, 2025–January 17, 2026 gauge-height window in
@@ -441,6 +454,38 @@ feet, not full-year CFS. The pipeline has resampled it to 720 normalized rows an
 the stage stretches those rows across the display year, so its seasonality is
 provisional. Runtime APIs expose the pipeline's nominal `cfs` column under the
 unit-neutral name `raw_value`.
+
+Mount Shasta and Delta also share the comma-delimited project resource
+`res://flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt`. It
+contains 720 evenly spaced half-open Pacific-time rows from July 1, 2025 through
+June 30, 2026 at 11:50, one every 730 model minutes, and all published values
+are degrees Celsius. Mount Shasta reads
+`shasta_keswick_release_temp_c`, based on hourly CDEC KWK sensor 25 water
+temperature observations from the Sacramento River about 0.8 miles below
+Keswick Dam. The source Fahrenheit values were converted to Celsius before
+averaging and interpolation. Delta reads `delta_freeport_temp_c`, based on
+15-minute USGS parameter 00010 observations at station 11447650, Sacramento
+River at Freeport, Right Bank Pump Stand; that source is natively Celsius.
+
+The pipeline calculates calendar-day means from the measured observations and
+linearly interpolates those daily means to the 720 file rows. At runtime the
+stage independently performs continuous linear interpolation between adjacent
+rows using the shared annual `ModelTimeline`. Thus the displayed temperature
+and date remain phase-aligned throughout the July-to-June cycle; no regime or
+flow value is used to estimate missing temperature. The mapping is half-open
+and cyclic, so row 719 interpolates toward row 0 at the annual wrap; the runtime
+names this mode `HALF_OPEN_ANNUAL_LINEAR_WRAP`. The loader requires exactly 720
+numeric rows with contiguous frame IDs `0…719`; it also accepts the earlier
+tab-delimited copy for provisioned installations. A missing file, absent
+selected column, malformed row, or non-finite result produces
+`WATER — °C` rather than a fabricated number. Freeport observations carrying
+USGS qualifier `P` are provisional and subject to revision, so the Delta series
+and its displayed values must be treated as provisional.
+
+This milestone is text-only. Temperature does not alter the black background,
+water-trail palette or luminance, flow physics, salmon, leaves, or any regime
+feature. A future water-only tint can be evaluated separately without changing
+the measured numeric label or using color as the sole temperature encoding.
 
 ## Coordinate system
 
@@ -489,7 +534,6 @@ The runtime configuration uses typed Godot resources:
 | `FlowAbsorber` | `flow_absorber.gd` | Rectangular partial line absorber |
 | `FlowReservoir` | `flow_reservoir.gd` | Circular capture pool and downstream gate |
 | `GPUFlowInteractionPolygon` | `gpu_stage/gpu_flow_interaction_polygon.gd` | Unified bounded GPU absorb/repel polygon |
-| `GPUFlowSourcePolygon` | `gpu_stage/gpu_flow_source_polygon.gd` | Bounded GPU water-emission polygon |
 
 The default preset contains these stable geometry IDs:
 
@@ -509,12 +553,6 @@ installs two examples when `install_default_interaction_examples` is enabled:
   `influence = 0.80`
 
 Supplying any GPU interaction polygon suppresses both examples.
-
-A production GPU stage whose `source_polygons` array is empty installs
-`source_test` when `install_default_source_examples` is enabled. It is a
-violet-debugged rectangle from `[1.2, 3.6]` to `[2.0, 5.4]`, emits toward +X,
-has `emission_fraction = 0.18`, and uses seed `1701`. Supplying any valid source
-array suppresses that example.
 
 Every geometry element needs a nonempty stable ID. IDs must be unique within a
 geometry kind. Controllers should keep IDs stable and update the element under
@@ -624,10 +662,9 @@ Do not replace these arrays through `changes`. Use `geometry_ops`, which parses
 JSON dictionaries into typed resources and validates the entire candidate
 configuration atomically.
 
-The production GPU stage instead owns `interaction_polygons` and
-`source_polygons`. Each collection has an independent budget of eight polygons,
-and each polygon may contain three through 12 vertices. Use the same
-`geometry_ops` envelope to manage those arrays; do not add them to the CPU
+The production GPU stage instead owns `interaction_polygons`, with a budget of
+eight polygons containing three through 12 vertices each. Use the same
+`geometry_ops` envelope to manage that array; do not add it to the CPU
 `FlowProfile` collections.
 
 ### Reset-required fields
@@ -751,18 +788,12 @@ All GPU kind aliases address one interaction array, so IDs must be unique across
 absorb and repel modes. Canonical names are recommended for saved controller
 regimes.
 
-`source.<id>.<field>` addresses a `GPUFlowSourcePolygon`. Mutable fields are
-`vertices`, `enabled`, `emission_fraction`, `flow_direction`, and `seed`;
-`element_id` is immutable. `sources`, `source_polygon`, `source_polygons`,
-`water_source`, and `water_sources` are accepted kind aliases. Field aliases
-are `fraction`/`emission`/`rate` for `emission_fraction` and `direction` for
-`flow_direction`.
-
-Production GPU presentation, regime, calendar, and watershed paths are:
+Production GPU presentation, regime, calendar, watershed, and temperature
+paths are:
 
 | Runtime path | Compatibility alias | Value/effect |
 |---|---|---|
-| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir, drain/obstacle, and source debug geometry without changing physics |
+| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir and drain/obstacle debug geometry without changing physics |
 | `stage.title` | `stage_title` | River display text |
 | `stage.title_visible` | `stage_title_visible` | Title visibility |
 | `stage.regime_panel_visible` | `regime_panel_visible` | Active-regime panel visibility on this screen |
@@ -771,6 +802,9 @@ Production GPU presentation, regime, calendar, and watershed paths are:
 | `stage.grid_line_width_pixels` | `stage_grid_line_width_pixels` | Native width, clamped to `0.1…8` |
 | `stage.grid_color` | `stage_grid_color` | Grid color including alpha |
 | `stage.date_visible` | `stage_date_visible` | `MM/DD-HH:MM` visibility |
+| `stage.temperature_visible` or `temperature.visible` | `temperature_visible`, `stage_temperature_visible` | Water-temperature-label visibility |
+| `temperature.data_path` or `stage.temperature_data_path` | `temperature_data_path` | Load the temperature table and align it to the current timeline |
+| `temperature.data_column` or `stage.temperature_data_column` | `temperature_data_column` | Select a Celsius series by exact header name |
 | `calendar.date` or `stage.date` | `model_date` | Set process-wide `MM/DD-HH:MM` (or date-only `MM/DD`); disables auto-advance |
 | `calendar.day_index` | `model_day_index` | Set process-wide day `0…364`; disables auto-advance |
 | `calendar.auto_advance` | `model_calendar_auto_advance` | Shared internal clock enabled/disabled |
@@ -798,8 +832,8 @@ python3 fleet/godot_controller.py set --geo FALSE
 python3 fleet/godot_controller.py set --geo TRUE
 ```
 
-`FALSE` hides guides/outlines only; reservoirs, drains, obstacles, sources, and
-the non-geometric edge-turbulence field keep their current physics. `--geo` can
+`FALSE` hides guides/outlines only; reservoirs, drains, obstacles, and the
+non-geometric edge-turbulence field keep their current physics. `--geo` can
 be combined with one or more `--regime` arguments in the same `set` command.
 
 The public `set_model_date_time(model_date_time)` method provides the same
@@ -832,7 +866,8 @@ these and publishes its resolved `regime_effective_feature_state`,
 `regime_feature_presence`, `regime_gate_open_fraction`,
 `regime_reservoir_count_desired_raw`,
 `regime_reservoir_count_rendered`, `regime_reservoir_renderer_capacity`,
-`regime_geometry_mode`, `regime_geometry_keys`,
+`regime_geometry_mode`, `regime_layout_generation`,
+`regime_layout_active_signature`, `regime_geometry_keys`,
 `regime_geometry_update_count`, `regime_geometry_undefined_fallback`,
 `regime_geometry_mixed_contributors`, and
 `regime_geometry_preserves_particle_pools`. Feature-bank diagnostics are
@@ -840,8 +875,12 @@ these and publishes its resolved `regime_effective_feature_state`,
 `regime_feature_slot_counts_rendered`, `regime_feature_slot_counts_resident`,
 and `regime_feature_controller_spare_capacity`. Together they expose the
 profile-derived counts, enabled regime-bank counts, the resident startup banks,
-and the remaining one interaction/four source controller slots. Reservoir
-diagnostics also expose
+and the remaining one interaction controller slot. Bank-field diagnostics add
+`regime_field_bank_layouts`, `regime_field_bank_counts`,
+`bank_field_suction_reach_pixels`, `bank_field_suction_crossflow_ratio`,
+`bank_field_suction_streamwise_ratio`, and `bank_field_capture_depth_pixels`
+plus their seven-layer uniform mirrors. `regime_geometry_mode` reports
+`GENERATION_SALTED_BOUNDED_SLOT_BANKS`. Reservoir diagnostics also expose
 `reservoir_center_pixels`, `reservoir_center_pixels_authored`,
 `reservoir_geometry_revision`, and `reservoir_geometry_revision_uniforms`.
 These fields distinguish an undefined feature that preserves authored behavior
@@ -1052,40 +1091,6 @@ only with the neutral `polygon`/`interaction` kinds, so it cannot unexpectedly
 erase objects of the opposite mode. Every accepted change repacks the one
 shared texture used by all seven palette layers.
 
-#### Production GPU source operations
-
-Use `source` as the canonical kind. Source operations are independent of the
-unified interaction-polygon array:
-
-```json
-{
-  "op": "upsert",
-  "kind": "source",
-  "id": "tributary_west",
-  "value": {
-    "vertices": [[1.2, 3.6], [2.0, 3.6], [2.0, 5.4], [1.2, 5.4]],
-    "enabled": true,
-    "emission_fraction": 0.18,
-    "flow_direction": [1.0, 0.0],
-    "seed": 1701
-  }
-}
-```
-
-Remove it with:
-
-```json
-{"op": "remove", "kind": "source", "id": "tributary_west"}
-```
-
-Replace the complete source set atomically with `op: "replace"`,
-`kind: "source"`, and a `values` array whose entries each contain a unique
-`id` or `element_id`. `add`/`update` alias `upsert`; `delete` aliases `remove`.
-The stage accepts `source`, `sources`, `source_polygon`, `source_polygons`,
-`water_source`, and `water_sources` as case-insensitive kind aliases. Every
-accepted change repacks the source texture consumed by all seven water-head
-process materials.
-
 ## Geometry dictionary schemas
 
 For `upsert`, the operation's `id` is authoritative; the `value` dictionary may
@@ -1165,54 +1170,22 @@ zero-length edge, nonzero area, and no self-intersection.
 `0.0…1.0`; `influence >= 0`; and `mode` is `"absorb"` or `"repel"`. Across one
 stage, at most eight valid enabled or disabled resources can be configured.
 
-Absorb mode considers only swept entries through upstream-facing edges whose
-outward normal points toward -X. It makes exactly one deterministic choice from
-the stable polygon ID and global particle identity. An accepted head stops just
-inside the crossed edge while its immutable tail fades, then its slot recycles
-cleanly. A rejected head receives one wave impulse and continues; it is not
-re-evaluated from a tail segment. `absorption_fraction = 0.0` accepts no heads
-and `1.0` accepts every qualifying head.
+Regime-owned absorb polygons are bank-connected fields. The shader applies
+lateral suction toward the strongest eligible river-facing mouth, accepts only
+a swept crossing of that mouth, then carries the head through the field and
+offscreen. Root and side edges are not intakes. The feature-wide cohort selector
+prevents multiple active fields from multiplying the regime budget, and the
+immutable trail records the visible turn without teleportation. Freeform
+controller absorbers keep the legacy upstream-facing swept-entry rule; an
+accepted head stops just inside the crossed edge until its tail fades.
+`absorption_fraction = 0.0` accepts no heads and `1.0` accepts every qualifying
+head.
 
 Repel mode changes heads only. It applies a soft redirect across `influence` and
 a swept boundary correction to prevent a fixed step from tunneling through the
 polygon. `repellent_force = 0.0` contributes no redirect and `1.0` applies the
 maximum configured response. Already emitted trail segments are immutable and
 never evaluate either mode.
-
-### GPU water-source polygon
-
-```json
-{
-  "element_id": "tributary_west",
-  "vertices": [[1.2, 3.6], [2.0, 3.6], [2.0, 5.4], [1.2, 5.4]],
-  "enabled": true,
-  "emission_fraction": 0.18,
-  "flow_direction": [1.0, 0.0],
-  "seed": 1701
-}
-```
-
-The ID must be nonempty. A source needs three through 12 finite vertices, no
-zero-length edge, nonzero area, and no self-intersection. `emission_fraction`
-is normalized `0.0…1.0`; `flow_direction` must be finite and nonzero. `seed` is
-optional and accepts `null`, `-1`, or a nonnegative 32-bit integer. Across one
-stage, at most eight valid resources can be configured.
-
-On each new or recycled water-head lifecycle, the GPU sums enabled source
-fractions and clamps the sum to `1.0` to decide whether that head starts at a
-source or the ordinary left inlet. A selected source is weighted by its
-fraction. Emission then samples all downstream-facing edges according to edge
-length times positive outward-normal alignment with `flow_direction`. In the
-production +X model, the selected edge sample supplies Y, while a second,
-independent deterministic lifecycle sample supplies X between the polygon's
-packed bounding-box minimum and maximum X. The source therefore emits across
-its horizontal area instead of placing every new head on one vertical seam.
-The head starts in the configured direction. Disabled and zero-fraction records
-produce no water.
-
-The packed source image is configuration data, not a rendered occupancy mask.
-It is rebuilt only when source geometry/policy changes. Live water positions
-remain GPU-owned, and no particle or water frame is read back to the CPU.
 
 ### Shoreline
 
@@ -1593,7 +1566,7 @@ When `accept_keyboard_input` is enabled on a model:
 | Key | Runtime effect |
 |---|---|
 | `0`, `8`, `9` | Production GPU: set `flow_rate` to `0/9`, `8/9`, or `9/9` |
-| `V` | Apply one synchronized absolute drain/obstacle, source, and reservoir debug-visibility state to every active stage in the process; edge turbulence has no geometry guide |
+| `V` | Apply one synchronized absolute drain/obstacle and reservoir debug-visibility state to every active stage in the process; edge turbulence has no geometry guide |
 | `G` | Toggle the first reservoir's gate |
 | `[` | Narrow the first reservoir gate by `gate_width_step` |
 | `]` | Widen the first reservoir gate by `gate_width_step` |
@@ -1620,11 +1593,9 @@ debug actions remain target-specific.
 
 In the production GPU host, `V` computes one absolute debug-visibility state and
 applies it to all active stages together: the reservoir guide is cyan,
-absorb/repel polygons are gold, and water-source polygons plus
-downstream-emission arrows are violet. Disabled polygons use a faint version of
-their class color so they can still be found while debugging. The background
-grid, stage title, and model date remain visible because they are not debug
-geometry.
+and absorb/repel polygons are gold. Disabled polygons use a faint version of
+that color so they can still be found while debugging. The background grid,
+stage title, and model date remain visible because they are not debug geometry.
 
 ## Screenshots
 
@@ -1658,6 +1629,30 @@ Grid fields are `stage_grid_visible`, `stage_grid_spacing_pixels`,
 `stage_date_font_size`, `stage_date_font_resource`, `stage_date_z_index`,
 `stage_date_position_anchor`, `stage_date_rotation_degrees`,
 `stage_date_tabular_numerals`, and `stage_date_opentype_feature`.
+The complete water-temperature namespace is `water_temperature_visible`,
+`water_temperature_text`, `water_temperature_value_c`,
+`water_temperature_value_valid`, `water_temperature_position`,
+`water_temperature_position_anchor`, `water_temperature_rotation_degrees`,
+`water_temperature_color`, `water_temperature_font_size`,
+`water_temperature_font_resource`, `water_temperature_font_shared_with_date`,
+`water_temperature_font_instance_id`,
+`water_temperature_tabular_numerals`,
+`water_temperature_opentype_feature`, `water_temperature_z_index`,
+`water_temperature_format`, `water_temperature_fallback_text`,
+`water_temperature_data_path`, `water_temperature_data_column`,
+`water_temperature_data_loaded`, `water_temperature_data_status`,
+`water_temperature_data_error`, `water_temperature_data_row_count`,
+`water_temperature_data_expected_row_count`,
+`water_temperature_data_row_count_matches_expected`,
+`water_temperature_data_row_index`, `water_temperature_data_row_fraction`,
+`water_temperature_interpolation_mode`, `water_temperature_node_path`, and
+`water_temperature_outside_water_viewport`. Presentation also has the
+stage-family aliases `stage_temperature_visible`, `stage_temperature_text`,
+`stage_temperature_value_c`, `stage_temperature_position`,
+`stage_temperature_position_anchor`, `stage_temperature_rotation_degrees`,
+`stage_temperature_color`, `stage_temperature_font_size`,
+`stage_temperature_font_resource`, `stage_temperature_tabular_numerals`,
+`stage_temperature_opentype_feature`, and `stage_temperature_z_index`.
 Clock fields are `model_day_index`, `model_day_of_year`,
 `model_minute_of_day`, `model_elapsed_seconds`, `model_year_progress`,
 `model_year_duration_seconds`, `model_year_frames_at_30_fps`,
@@ -1681,12 +1676,13 @@ Layering can be inspected through `background_z_index`, `stage_title_z_index`,
 `stage_text_above_grid`. The corresponding occupancy guarantees are
 `water_texture_excludes_background`, `water_texture_excludes_stage_grid`,
 `water_texture_excludes_debug_overlay`, `water_texture_excludes_stage_title`,
-and `water_texture_excludes_stage_date`.
+`water_texture_excludes_stage_date`, and
+`water_texture_excludes_stage_temperature`.
 
 This state/control layer is the intended seam for a later control scene. The
-production GPU stage adds salmon, leaves, and water-source polygons through that
-seam. Both ecological overlays sample the same water-only texture without
-changing the water-profile, geometry targeting, or UDP envelope described here.
+production GPU stage adds salmon and leaves through that seam. Both ecological
+overlays sample the same water-only texture without changing the water-profile,
+geometry targeting, or UDP envelope described here.
 
 ## Automated validation suites
 
@@ -1704,24 +1700,22 @@ ends with `FLOW_RUNTIME_SMOKE: PASS`. It deliberately submits one over-budget
 configuration to verify rollback, so the corresponding rejection warning is
 expected.
 
-The retained validation set has exactly six suites:
+The retained validation set has exactly five suites:
 
 | Suite | Scene |
 |---|---|
 | Controller transport and retained runtime | `res://flow/tests/flow_runtime_smoke.tscn` |
 | Reusable production GPU stage | `res://flow/gpu_stage/gpu_flow_stage_smoke.tscn` |
-| GPU source texture packing | `res://flow/gpu_stage/gpu_flow_source_texture_smoke.tscn` |
 | GPU salmon | `res://flow/gpu_stage/gpu_salmon_smoke.tscn` |
 | GPU leaves | `res://flow/gpu_stage/gpu_leaf_smoke.tscn` |
 | Seven production wrappers | `res://flow/tests/gpu_stage_scenes_smoke.tscn` |
 
-The five deployed GPU suites verify the water-only viewport, the two
-bounded 128 x 1 `RGBAF` configuration textures, propagation to all seven water
-particle-process materials, source weighted-edge Y plus independent
-bounding-box X sampling, source and interaction controller operations, salmon
-and leaf release/control without CPU readback, fixed circular ecology pools and
-stable resident allocations during their high-volume release stress passes,
-targeted screen isolation, and the shared Barlow Condensed Medium resource. The
+The four deployed GPU suites verify the water-only viewport, the bounded
+interaction texture and its propagation to all seven water particle-process
+materials, interaction controller operations, salmon and leaf release/control
+without CPU readback, fixed circular ecology pools and stable resident
+allocations during their high-volume release stress passes, targeted screen
+isolation, and the shared Barlow Condensed Medium resource. The
 grid, date-time, and watershed
 timeline described above are runtime contracts; the current smoke scenes do not
 assert their complete behavior.

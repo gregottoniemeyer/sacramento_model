@@ -12,14 +12,20 @@ const EXPECTED_TITLE_FONT_PATH := (
 )
 const EXPECTED_TITLE_POSITION := Vector2(60.0, 540.0)
 const EXPECTED_DATE_POSITION := Vector2(1860.0, 540.0)
+const EXPECTED_TEMPERATURE_POSITION := Vector2(1740.0, 540.0)
 const EXPECTED_TITLE_COLOR := Color("4ab0e1")
 const EXPECTED_TITLE_FONT_SIZE := 60
 const EXPECTED_DATE_FONT_SIZE := 48
 const EXPECTED_DATE_OPENTYPE_FEATURE := "tnum"
+const EXPECTED_TEMPERATURE_DATA_PATH := (
+	"res://flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt"
+)
+const EXPECTED_DELTA_TEMPERATURE_COLUMN := "delta_freeport_temp_c"
+const EXPECTED_TEMPERATURE_ROW_COUNT := 720
+const EXPECTED_TEMPERATURE_INTERPOLATION := "HALF_OPEN_ANNUAL_LINEAR_WRAP"
 const EXPECTED_REGIME_SLOT_CAPACITIES := {
 	"drain": 5,
 	"obstacle": 2,
-	"source": 4,
 }
 const EXPECTED_REGIME_PANEL_POSITION := Vector2(1324.0, 1050.0)
 const EXPECTED_REGIME_NAMES := [
@@ -59,6 +65,9 @@ func _ready() -> void:
 	stage.set(&"regime_panel_visible", true)
 	stage.set(&"regime_profile_physics_enabled", true)
 	stage.set(&"model_start_day_index", 181)
+	stage.set(&"stage_temperature_visible", true)
+	stage.set(&"temperature_data_path", EXPECTED_TEMPERATURE_DATA_PATH)
+	stage.set(&"temperature_data_column", EXPECTED_DELTA_TEMPERATURE_COLUMN)
 	add_child(stage)
 	var startup_summary: Dictionary = stage.call(&"runtime_summary")
 	for admission_enabled: Variant in Array(
@@ -98,6 +107,9 @@ func _ready() -> void:
 	var title_layer := stage.get_node_or_null("StageTitleLayer") as Node2D
 	var title_label := stage.get_node_or_null("StageTitleLayer/StageTitle") as Label
 	var date_label := stage.get_node_or_null("StageTitleLayer/ModelDate") as Label
+	var temperature_label := stage.get_node_or_null(
+		"StageTitleLayer/WaterTemperature"
+	) as Label
 	var regime_panel := stage.get_node_or_null(
 		"StageTitleLayer/ActiveRegimes"
 	) as Node2D
@@ -192,6 +204,14 @@ func _ready() -> void:
 			== EXPECTED_DATE_OPENTYPE_FEATURE
 	):
 		errors.append("runtime summary does not report tabular date numerals")
+	_check_water_temperature_label(
+		stage,
+		water_viewport,
+		date_label,
+		temperature_label,
+		summary,
+		errors,
+	)
 	_check_regime_panel(
 		stage,
 		water_viewport,
@@ -595,20 +615,44 @@ func _ready() -> void:
 			errors.append("a head shader still binds the legacy shoreline texture")
 			break
 	_check_edge_turbulence_contract(summary, 0.0, errors)
-	if int(summary.get("source_polygon_count", 0)) != 4:
-		errors.append("expected four resident water-source slots")
-	if int(summary.get("source_overlay_count", 0)) != 1:
-		errors.append("debug overlay did not receive the active fallback source")
-	if not bool(summary.get("source_data_texture_bound", false)):
-		errors.append("source geometry texture is not bound")
-	if Vector2(summary.get("source_data_texture_size", Vector2.ZERO)) != Vector2(
-		128.0, 1.0
-	):
-		errors.append("source geometry texture is not the 128x1 production layout")
-	for source_count: Variant in Array(summary.get("source_count_uniforms", [])):
-		if int(source_count) != 1:
-			errors.append("default source did not reach all seven head shaders")
-			break
+	for removed_source_key: String in [
+		"source_polygon_count",
+		"source_polygons",
+		"source_overlay_count",
+		"source_count_uniforms",
+		"source_data_texture_bound",
+		"source_data_texture_size",
+		"source_texture_packer",
+		"regime_source_override_enabled_uniforms",
+		"regime_source_weight_uniforms",
+	]:
+		if summary.has(removed_source_key):
+			errors.append(
+				"removed supplemental-source diagnostic is still exposed: %s"
+					% removed_source_key
+			)
+	if stage.has_method(&"get_source_polygon"):
+		errors.append("removed supplemental-source API is still exposed")
+	for removed_regime_source_spec: Array in [
+		["regime_effective_features", "source_area_fraction"],
+		["regime_effective_feature_state", "source_area_fraction"],
+		["regime_applied_feature_budgets", "source_area_fraction"],
+		["regime_applied_feature_overrides", "source"],
+		["regime_feature_presence", "source"],
+		["regime_feature_slot_capacities", "source"],
+		["regime_feature_slot_counts_desired", "source"],
+		["regime_feature_slot_counts_rendered", "source"],
+		["regime_feature_slot_counts_resident", "source"],
+	]:
+		var collection := Dictionary(summary.get(
+			String(removed_regime_source_spec[0]),
+			{},
+		))
+		if collection.has(String(removed_regime_source_spec[1])):
+			errors.append(
+				"removed regime source field is still exposed: %s.%s"
+					% removed_regime_source_spec
+			)
 	for polygon_count: Variant in Array(summary.get("interaction_count_uniforms", [])):
 		if int(polygon_count) != 2:
 			errors.append("the two authored fallback polygons did not reach every shader")
@@ -616,7 +660,7 @@ func _ready() -> void:
 	if Dictionary(summary.get("regime_feature_slot_capacities", {})) != (
 		EXPECTED_REGIME_SLOT_CAPACITIES
 	):
-		errors.append("regime feature slot capacities are not 5 drains, 2 obstacles, 4 sources")
+		errors.append("regime feature slot capacities are not 5 drains and 2 obstacles")
 	if Dictionary(summary.get("regime_feature_slot_counts_resident", {})) != (
 		EXPECTED_REGIME_SLOT_CAPACITIES
 	):
@@ -626,22 +670,19 @@ func _ready() -> void:
 		)
 	if Dictionary(summary.get("regime_feature_controller_spare_capacity", {})) != {
 		"interaction": 1,
-		"source": 4,
 	}:
 		errors.append("the fixed banks did not preserve controller spare capacity")
 	if Dictionary(summary.get("regime_feature_slot_counts_desired", {})) != {
 		"drain": 1,
 		"obstacle": 1,
-		"source": 1,
 	}:
-		errors.append("undefined baseline state did not request one authored slot per feature")
+		errors.append("undefined baseline state did not request one authored interaction slot per feature")
 	if Dictionary(summary.get("regime_feature_slot_counts_rendered", {})) != {
 		"drain": 1,
 		"obstacle": 1,
-		"source": 1,
 	}:
 		errors.append(
-			"undefined baseline state did not render one authored slot per feature: %s"
+			"undefined baseline state did not render one authored interaction slot per feature: %s"
 				% summary.get("regime_feature_slot_counts_rendered", {})
 		)
 	if Vector2(summary.get("stage_size", Vector2.ZERO)) != Vector2(1920.0, 1080.0):
@@ -1219,57 +1260,6 @@ func _ready() -> void:
 	if int(summary.get("interaction_polygon_count", 0)) != 7:
 		errors.append("plural-kind polygon removal did not restore the slot bank")
 
-	var source_packer_before: Dictionary = summary.get("source_texture_packer", {})
-	var source_revision_before := int(source_packer_before.get("revision", -1))
-	stage.call(&"queue_control_message", {
-		"geometry_ops": [{
-			"op": "upsert",
-			"kind": "source_polygon",
-			"id": "smoke_source",
-			"value": {
-				"id": "payload_must_not_rename_source",
-				"vertices": [
-					[10.0, 3.0],
-					[11.0, 3.0],
-					[11.0, 4.0],
-					[10.0, 4.0],
-				],
-				"emission_fraction": 0.25,
-				"flow_direction": [1.0, 0.0],
-			},
-		}],
-	})
-	await get_tree().process_frame
-	summary = stage.call(&"runtime_summary")
-	var source_packer_after: Dictionary = summary.get("source_texture_packer", {})
-	if int(source_packer_after.get("revision", -1)) != source_revision_before + 1:
-		errors.append("one source controller batch did not produce exactly one upload")
-	if int(summary.get("source_polygon_count", 0)) != 5:
-		errors.append("controller source upsert did not add an addressable source")
-	var source_ids: Array[String] = []
-	for source_variant: Variant in Array(summary.get("source_polygons", [])):
-		if source_variant is Dictionary:
-			source_ids.append(String(source_variant.get("element_id", "")))
-	if not source_ids.has("smoke_source"):
-		errors.append("source operation ID was not authoritative")
-	if source_ids.has("payload_must_not_rename_source"):
-		errors.append("source payload overrode its stable operation ID")
-	for source_count: Variant in Array(summary.get("source_count_uniforms", [])):
-		if int(source_count) != 2:
-			errors.append("controller source did not reach all seven head shaders")
-			break
-	stage.call(&"queue_control_message", {
-		"geometry_ops": [{
-			"op": "remove",
-			"kind": "sources",
-			"element_id": "smoke_source",
-		}],
-	})
-	await get_tree().process_frame
-	summary = stage.call(&"runtime_summary")
-	if int(summary.get("source_polygon_count", 0)) != 4:
-		errors.append("controller source removal did not restore the resident source bank")
-
 	# Width appears before radius on purpose. The raw request must survive its
 	# temporary clamp against the old radius, then become a true full aperture
 	# after an arbitrary runtime radius larger than the editor's 600 px hint.
@@ -1334,7 +1324,7 @@ func _ready() -> void:
 			+ "slots=300 active=~150 render_paced=true max_fps=30 interpolation=true "
 				+ "immutable_segments=22500 palette_layers=7 fixed_z=true "
 				+ "identity=true gate=true pause=true "
-				+ "debug=true title=true regimes=true controller=true "
+				+ "debug=true title=true temperature=true regimes=true controller=true "
 				+ "polygons=true salmon=true leaves=true"
 		)
 		get_tree().quit(0)
@@ -1342,6 +1332,194 @@ func _ready() -> void:
 	for error in errors:
 		push_error("GPU_STAGE_SMOKE: %s" % error)
 	get_tree().quit(1)
+
+
+func _check_water_temperature_label(
+	stage: Node,
+	water_viewport: SubViewport,
+	date_label: Label,
+	temperature_label: Label,
+	summary: Dictionary,
+	errors: PackedStringArray
+) -> void:
+	if temperature_label == null:
+		errors.append("water temperature Label is missing")
+		return
+	if not temperature_label.visible:
+		errors.append("Delta water temperature Label is not visible")
+	if not (
+		temperature_label.position + temperature_label.pivot_offset
+	).is_equal_approx(EXPECTED_TEMPERATURE_POSITION):
+		errors.append("water temperature is not centered at (1740, 540)")
+	if not is_equal_approx(temperature_label.rotation_degrees, -90.0):
+		errors.append("water temperature is not rotated -90 degrees")
+	if temperature_label.get_theme_font_size(&"font_size") != (
+		EXPECTED_DATE_FONT_SIZE
+	):
+		errors.append("water temperature font size is not 48")
+	if not temperature_label.get_theme_color(&"font_color").is_equal_approx(
+		EXPECTED_TITLE_COLOR
+	):
+		errors.append("water temperature color is not #4AB0E1")
+
+	var date_font := (
+		date_label.get_theme_font(&"font") as FontVariation
+		if date_label != null
+		else null
+	)
+	var temperature_font := temperature_label.get_theme_font(
+		&"font"
+	) as FontVariation
+	if temperature_font == null:
+		errors.append("water temperature does not use a FontVariation")
+	elif date_font == null or temperature_font.get_instance_id() != (
+		date_font.get_instance_id()
+	):
+		errors.append("water temperature does not share the date FontVariation")
+	else:
+		var tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
+			EXPECTED_DATE_OPENTYPE_FEATURE
+		)
+		if int(temperature_font.opentype_features.get(tnum_tag, 0)) != 1:
+			errors.append("water temperature does not enable tabular numerals")
+		if (
+			temperature_font.base_font == null
+			or temperature_font.base_font.resource_path != EXPECTED_TITLE_FONT_PATH
+		):
+			errors.append("water temperature does not retain the Barlow base font")
+
+	if water_viewport != null and water_viewport.is_ancestor_of(temperature_label):
+		errors.append("water temperature is inside the water-only viewport")
+	if not bool(summary.get("water_texture_excludes_stage_temperature", false)):
+		errors.append("water texture does not exclude the temperature label")
+	if not (
+		bool(summary.get("water_temperature_visible", false))
+		and bool(summary.get("water_temperature_value_valid", false))
+		and bool(summary.get("water_temperature_data_loaded", false))
+		and String(summary.get("water_temperature_data_error", "")).is_empty()
+		and String(summary.get("water_temperature_data_path", ""))
+			== EXPECTED_TEMPERATURE_DATA_PATH
+		and String(summary.get("water_temperature_data_column", ""))
+			== EXPECTED_DELTA_TEMPERATURE_COLUMN
+		and int(summary.get("water_temperature_data_row_count", 0))
+			== EXPECTED_TEMPERATURE_ROW_COUNT
+		and String(summary.get("water_temperature_interpolation_mode", ""))
+			== EXPECTED_TEMPERATURE_INTERPOLATION
+	):
+		errors.append("runtime summary does not expose the loaded Delta temperature")
+	if not (
+		Vector2(summary.get(
+			"water_temperature_position",
+			Vector2.ZERO,
+		)) == EXPECTED_TEMPERATURE_POSITION
+		and String(summary.get("water_temperature_position_anchor", ""))
+			== "CENTERLINE"
+		and is_equal_approx(
+			float(summary.get("water_temperature_rotation_degrees", 0.0)),
+			-90.0,
+		)
+		and Color(summary.get(
+			"water_temperature_color",
+			Color.TRANSPARENT,
+		)).is_equal_approx(EXPECTED_TITLE_COLOR)
+		and int(summary.get("water_temperature_font_size", 0))
+			== EXPECTED_DATE_FONT_SIZE
+		and String(summary.get("water_temperature_font_resource", ""))
+			== EXPECTED_TITLE_FONT_PATH
+		and bool(summary.get("water_temperature_font_shared_with_date", false))
+		and bool(summary.get("water_temperature_tabular_numerals", false))
+		and String(summary.get("water_temperature_opentype_feature", ""))
+			== EXPECTED_DATE_OPENTYPE_FEATURE
+	):
+		errors.append("runtime summary does not expose temperature typography")
+
+	var fixture_values := _load_temperature_fixture_column(
+		EXPECTED_DELTA_TEMPERATURE_COLUMN,
+		errors,
+	)
+	if fixture_values.size() != EXPECTED_TEMPERATURE_ROW_COUNT:
+		return
+	var row_index := int(summary.get("water_temperature_data_row_index", -1))
+	var row_fraction := float(summary.get(
+		"water_temperature_data_row_fraction",
+		-1.0,
+	))
+	var timeline := get_node_or_null("/root/ModelTimeline")
+	if timeline == null:
+		errors.append("temperature check cannot find the shared timeline")
+		return
+	var timeline_snapshot: Dictionary = timeline.call(&"snapshot")
+	var row_position := (
+		float(timeline_snapshot.get("year_progress", 0.0))
+		* float(EXPECTED_TEMPERATURE_ROW_COUNT)
+	)
+	var expected_row := mini(
+		floori(row_position),
+		EXPECTED_TEMPERATURE_ROW_COUNT - 1,
+	)
+	var expected_fraction := row_position - floorf(row_position)
+	if row_index != expected_row or not is_equal_approx(
+		row_fraction,
+		expected_fraction,
+	):
+		errors.append("temperature row is not synchronized to ModelTimeline")
+		return
+	var following_row := (row_index + 1) % EXPECTED_TEMPERATURE_ROW_COUNT
+	var expected_value := lerpf(
+		float(fixture_values[row_index]),
+		float(fixture_values[following_row]),
+		row_fraction,
+	)
+	var actual_value := float(summary.get("water_temperature_value_c", NAN))
+	if not is_equal_approx(actual_value, expected_value):
+		errors.append("Delta temperature does not interpolate its selected column")
+	var expected_text := "WATER %.1f °C" % expected_value
+	if temperature_label.text != expected_text:
+		errors.append(
+			"water temperature text must be '%s'; got '%s'"
+				% [expected_text, temperature_label.text]
+		)
+	if String(summary.get("water_temperature_text", "")) != expected_text:
+		errors.append("runtime summary temperature text does not match the Label")
+
+
+func _load_temperature_fixture_column(
+	column_name: String,
+	errors: PackedStringArray
+) -> PackedFloat64Array:
+	var values := PackedFloat64Array()
+	if not FileAccess.file_exists(EXPECTED_TEMPERATURE_DATA_PATH):
+		errors.append("temperature fixture is missing")
+		return values
+	var column_index := -1
+	for raw_line: String in FileAccess.get_file_as_string(
+		EXPECTED_TEMPERATURE_DATA_PATH
+	).split("\n", false):
+		var line := raw_line.strip_edges()
+		if line.is_empty() or line.begins_with("#"):
+			continue
+		var delimiter := "," if line.contains(",") else "\t"
+		var columns := line.split(delimiter, false)
+		if column_index < 0:
+			column_index = columns.find(column_name)
+			if column_index < 0:
+				errors.append(
+					"temperature fixture is missing column %s" % column_name
+				)
+				return values
+			continue
+		if columns.size() <= column_index or not String(
+			columns[column_index]
+		).is_valid_float():
+			errors.append("temperature fixture contains an invalid data row")
+			return PackedFloat64Array()
+		values.append(float(columns[column_index]))
+	if values.size() != EXPECTED_TEMPERATURE_ROW_COUNT:
+		errors.append(
+			"temperature fixture must contain exactly 720 rows; got %d"
+				% values.size()
+		)
+	return values
 
 
 func _check_regime_panel(
@@ -1429,7 +1607,6 @@ func _check_regime_panel(
 		["drain_area_fraction", 0.75],
 		["drain_power", 1.0],
 		["obstacle_area_fraction", 0.1],
-		["source_area_fraction", 1.0],
 	]:
 		if not is_equal_approx(
 			float(active_budgets.get(String(budget_spec[0]), -1.0)),
@@ -1441,7 +1618,6 @@ func _check_regime_panel(
 		["regime_drain_weight_uniforms", 0.75],
 		["regime_drain_power_uniforms", 1.0],
 		["regime_obstacle_weight_uniforms", 0.1],
-		["regime_source_weight_uniforms", 1.0],
 	]:
 		var uniform_values := Array(active_summary.get(String(uniform_spec[0]), []))
 		if uniform_values.size() != 7:
@@ -1456,7 +1632,7 @@ func _check_regime_panel(
 	_check_edge_turbulence_contract(active_summary, 0.0, errors)
 	_expect_regime_slot_counts(
 		active_summary,
-		{"drain": 4, "obstacle": 1, "source": 1},
+		{"drain": 4, "obstacle": 1},
 		"Agriculture + Tech",
 		errors,
 	)
@@ -1495,14 +1671,6 @@ func _check_regime_panel(
 			["drain_power", 1.0],
 			["obstacle_area_fraction", 0.1],
 			["shoreline_randomness", 0.0],
-		],
-		errors,
-	)
-	_expect_undefined_regime_fallbacks(
-		active_summary,
-		"Agriculture + Tech",
-		[
-			["source_area_fraction", "source", "source_area_fraction"],
 		],
 		errors,
 	)
@@ -1545,7 +1713,6 @@ func _check_regime_panel(
 		["reservoir_area_fraction", 0.0],
 		["drain_area_fraction", 0.0],
 		["obstacle_area_fraction", 0.0],
-		["source_area_fraction", 0.1],
 		["shoreline_randomness", 1.0],
 		["salmon_activity", 1.0],
 		["leaf_activity", 1.0],
@@ -1585,7 +1752,7 @@ func _check_regime_panel(
 		errors.append("Kinship did not hide drain and obstacle diagnostic overlays")
 	_expect_regime_slot_counts(
 		kinship_summary,
-		{"drain": 0, "obstacle": 0, "source": 1},
+		{"drain": 0, "obstacle": 0},
 		"Kinship",
 		errors,
 	)
@@ -1605,7 +1772,7 @@ func _check_regime_panel(
 	_check_edge_turbulence_contract(cleared_summary, 0.0, errors)
 	_expect_regime_slot_counts(
 		cleared_summary,
-		{"drain": 1, "obstacle": 1, "source": 1},
+		{"drain": 1, "obstacle": 1},
 		"cleared regime fallback",
 		errors,
 	)
@@ -1644,15 +1811,9 @@ func _check_delta_regime_profile_contracts(
 		],
 		errors,
 	)
-	_expect_undefined_regime_fallbacks(
-		agriculture,
-		"Agriculture Delta",
-		[["source_area_fraction", "source", "source_area_fraction"]],
-		errors,
-	)
 	_expect_regime_slot_counts(
 		agriculture,
-		{"drain": 4, "obstacle": 1, "source": 1},
+		{"drain": 4, "obstacle": 1},
 		"Agriculture Delta",
 		errors,
 	)
@@ -1662,14 +1823,14 @@ func _check_delta_regime_profile_contracts(
 	var gold_rush: Dictionary = stage.call(&"runtime_summary")
 	var gold_rush_geometry := _regime_geometry_snapshot(gold_rush)
 	if String(gold_rush.get("regime_geometry_mode", "")) != (
-		"DETERMINISTIC_BOUNDED_SLOT_BANKS"
+		"GENERATION_SALTED_BOUNDED_SLOT_BANKS"
 	):
-		errors.append("regime geometry does not use a fixed deterministic slot bank")
+		errors.append("regime geometry does not use generation-salted fixed slot banks")
 	if _regime_geometry_snapshot(agriculture) == gold_rush_geometry:
 		errors.append("Gold Rush reused the Agriculture feature placement")
 	_expect_regime_slot_counts(
 		gold_rush,
-		{"drain": 2, "obstacle": 1, "source": 1},
+		{"drain": 2, "obstacle": 1},
 		"Gold Rush Delta",
 		errors,
 	)
@@ -1712,7 +1873,7 @@ func _check_delta_regime_profile_contracts(
 			break
 	_expect_regime_slot_counts(
 		hydropower,
-		{"drain": 2, "obstacle": 1, "source": 1},
+		{"drain": 2, "obstacle": 1},
 		"Hydropower Delta",
 		errors,
 	)
@@ -1774,7 +1935,7 @@ func _check_delta_regime_profile_contracts(
 	var water_projects: Dictionary = stage.call(&"runtime_summary")
 	_expect_regime_slot_counts(
 		water_projects,
-		{"drain": 3, "obstacle": 1, "source": 1},
+		{"drain": 3, "obstacle": 1},
 		"Water Projects Delta",
 		errors,
 	)
@@ -1808,6 +1969,11 @@ func _check_delta_regime_profile_contracts(
 	stage.call(&"set_active_regime_names", ["Tech"])
 	var tech: Dictionary = stage.call(&"runtime_summary")
 	var tech_geometry := _regime_geometry_snapshot(tech)
+	var tech_generation := int(tech.get("regime_layout_generation", -1))
+	var tech_update_count := int(tech.get("regime_geometry_update_count", -1))
+	var tech_fields := _managed_active_feature_layout(tech, "drain")
+	var tech_obstacles := _managed_active_feature_layout(tech, "obstacle")
+	var tech_resource_signature := _feature_resource_signature(stage)
 	if tech_geometry == hydropower_geometry:
 		errors.append("Tech reused the Hydropower feature placement")
 	_expect_feature_layouts_differ(
@@ -1819,7 +1985,7 @@ func _check_delta_regime_profile_contracts(
 	)
 	_expect_regime_slot_counts(
 		tech,
-		{"drain": 4, "obstacle": 1, "source": 1},
+		{"drain": 4, "obstacle": 1},
 		"Tech Delta",
 		errors,
 	)
@@ -1853,16 +2019,140 @@ func _check_delta_regime_profile_contracts(
 		"Tech Delta",
 		[
 			["obstacle_area_fraction", "obstacle_area", "obstacle_area_fraction"],
-			["source_area_fraction", "source", "source_area_fraction"],
 		],
 		errors,
 	)
+
+	# Every real active-set transition gets a fresh placement generation. Tech and
+	# Agriculture deliberately request the same four fields and one obstacle, so
+	# this direct transition catches the visually stale-layout regression without
+	# relying on changed keys, inactive bank slots, or controller-owned geometry.
+	stage.call(&"set_active_regime_names", ["Agriculture"])
+	var agriculture_after_tech: Dictionary = stage.call(&"runtime_summary")
+	var agriculture_generation := int(agriculture_after_tech.get(
+		"regime_layout_generation",
+		-1,
+	))
+	var agriculture_update_count := int(agriculture_after_tech.get(
+		"regime_geometry_update_count",
+		-1,
+	))
+	var agriculture_fields := _managed_active_feature_layout(
+		agriculture_after_tech,
+		"drain",
+	)
+	var agriculture_obstacles := _managed_active_feature_layout(
+		agriculture_after_tech,
+		"obstacle",
+	)
+	if agriculture_generation != tech_generation + 1:
+		errors.append("Tech -> Agriculture did not advance layout generation once")
+	if agriculture_update_count != tech_update_count + 1:
+		errors.append("Tech -> Agriculture did not upload fresh geometry exactly once")
+	if _feature_resource_signature(stage) != tech_resource_signature:
+		errors.append("Tech -> Agriculture replaced a fixed feature resource")
+	_expect_regime_slot_counts(
+		agriculture_after_tech,
+		{"drain": 4, "obstacle": 1},
+		"Agriculture after Tech",
+		errors,
+	)
+	_check_agriculture_field_contract(
+		agriculture_after_tech,
+		"Agriculture after Tech",
+		errors,
+	)
+	_expect_meaningful_layout_change(
+		tech_fields,
+		agriculture_fields,
+		"Tech",
+		"Agriculture",
+		"drain",
+		errors,
+	)
+	_expect_meaningful_layout_change(
+		tech_obstacles,
+		agriculture_obstacles,
+		"Tech",
+		"Agriculture",
+		"obstacle",
+		errors,
+	)
+
+	# Replaying the same absolute state is a strict no-op.
+	var agriculture_regime_revision := int(agriculture_after_tech.get(
+		"regime_revision",
+		-1,
+	))
+	stage.call(&"set_active_regime_names", ["Agriculture"])
+	var agriculture_idempotent: Dictionary = stage.call(&"runtime_summary")
+	if not (
+		int(agriculture_idempotent.get("regime_revision", -2))
+			== agriculture_regime_revision
+		and int(agriculture_idempotent.get("regime_layout_generation", -2))
+			== agriculture_generation
+		and int(agriculture_idempotent.get("regime_geometry_update_count", -2))
+			== agriculture_update_count
+		and _managed_active_feature_layout(agriculture_idempotent, "drain")
+			== agriculture_fields
+		and _managed_active_feature_layout(agriculture_idempotent, "obstacle")
+			== agriculture_obstacles
+	):
+		errors.append("replaying Agriculture respawned or republished its layout")
+
+	# Reloading profile data may publish a new general model revision, but an
+	# unchanged active set must not consume a visual layout generation.
+	var model_regimes := get_node_or_null("/root/ModelRegimes")
+	if model_regimes == null:
+		errors.append("ModelRegimes is unavailable for the profile-reload layout check")
+	else:
+		if not bool(model_regimes.call(&"reload_profiles", true)):
+			errors.append("profile reload failed during the layout-generation check")
+		var agriculture_reloaded: Dictionary = stage.call(&"runtime_summary")
+		if not (
+			int(agriculture_reloaded.get("regime_layout_generation", -2))
+				== agriculture_generation
+			and int(agriculture_reloaded.get("regime_geometry_update_count", -2))
+				== agriculture_update_count
+			and _managed_active_feature_layout(agriculture_reloaded, "drain")
+				== agriculture_fields
+			and _managed_active_feature_layout(agriculture_reloaded, "obstacle")
+				== agriculture_obstacles
+		):
+			errors.append("profile reload respawned an unchanged active regime set")
+
+	# Returning to Tech is another real transition, so it must not restore the
+	# first Tech pose even though the contributor IDs are identical.
+	stage.call(&"set_active_regime_names", ["Tech"])
+	var tech_return: Dictionary = stage.call(&"runtime_summary")
+	var tech_return_fields := _managed_active_feature_layout(tech_return, "drain")
+	var tech_return_obstacles := _managed_active_feature_layout(
+		tech_return,
+		"obstacle",
+	)
+	if int(tech_return.get("regime_layout_generation", -1)) != (
+		agriculture_generation + 1
+	):
+		errors.append("returning to Tech did not advance layout generation once")
+	if int(tech_return.get("regime_geometry_update_count", -1)) != (
+		agriculture_update_count + 1
+	):
+		errors.append("returning to Tech did not upload fresh geometry exactly once")
+	if tech_return_fields == tech_fields or tech_return_obstacles == tech_obstacles:
+		errors.append("returning to Tech restored its previous feature placement")
+	if (
+		tech_return_fields == agriculture_fields
+		or tech_return_obstacles == agriculture_obstacles
+	):
+		errors.append("returning to Tech retained the Agriculture feature placement")
+	if _feature_resource_signature(stage) != tech_resource_signature:
+		errors.append("returning to Tech replaced a fixed feature resource")
 
 	stage.call(&"set_active_regime_names", ["Watershed"])
 	var watershed: Dictionary = stage.call(&"runtime_summary")
 	_expect_regime_slot_counts(
 		watershed,
-		{"drain": 1, "obstacle": 1, "source": 1},
+		{"drain": 1, "obstacle": 1},
 		"undefined Watershed Delta",
 		errors,
 	)
@@ -1876,7 +2166,6 @@ func _check_delta_regime_profile_contracts(
 			["drain_power", "drain_power", "drain_power"],
 			["obstacle_area_fraction", "obstacle_area", "obstacle_area_fraction"],
 			["obstacle_power", "obstacle_power", "obstacle_power"],
-			["source_area_fraction", "source", "source_area_fraction"],
 		],
 		errors,
 	)
@@ -1917,23 +2206,6 @@ func _check_delta_regime_profile_contracts(
 	):
 		errors.append("clearing no-op Watershed redundantly uploaded geometry")
 
-	# A -> B -> A restores the exact candidate pose. Replaying the same absolute
-	# state then performs no extra geometry upload.
-	stage.call(&"set_active_regime_names", ["Gold Rush"])
-	var gold_rush_replay: Dictionary = stage.call(&"runtime_summary")
-	if _regime_geometry_snapshot(gold_rush_replay) != gold_rush_geometry:
-		errors.append("returning to Gold Rush did not restore its exact geometry")
-	var geometry_update_count := int(gold_rush_replay.get(
-		"regime_geometry_update_count",
-		-1,
-	))
-	stage.call(&"set_active_regime_names", ["Gold Rush"])
-	var gold_rush_idempotent: Dictionary = stage.call(&"runtime_summary")
-	if int(gold_rush_idempotent.get("regime_geometry_update_count", -2)) != (
-		geometry_update_count
-	):
-		errors.append("replaying Gold Rush redundantly uploaded geometry")
-
 func _check_controller_ownership_regression(
 	stage: Node,
 	errors: PackedStringArray,
@@ -1946,31 +2218,18 @@ func _check_controller_ownership_regression(
 		[3.0, 3.0],
 		[2.0, 3.0],
 	]
-	var controller_source_vertices := [
-		[12.0, 5.0],
-		[13.0, 5.0],
-		[13.0, 6.0],
-		[12.0, 6.0],
-	]
 	if not bool(stage.call(
 		&"set_runtime_parameter",
 		&"polygon.absorber_test.vertices",
 		controller_interaction_vertices,
 	)):
 		errors.append("controller could not reshape the authored interaction slot")
-	if not bool(stage.call(
-		&"set_runtime_parameter",
-		&"source.source_test.vertices",
-		controller_source_vertices,
-	)):
-		errors.append("controller could not reshape the authored source slot")
-	for regime_name: String in ["Hydropower", "Tech"]:
+	for regime_name: String in ["Tech", "Agriculture", "Tech"]:
 		stage.call(&"set_active_regime_names", [regime_name])
 		_expect_controller_geometry_vertices(
 			stage.call(&"runtime_summary"),
 			regime_name,
 			controller_interaction_vertices,
-			controller_source_vertices,
 			errors,
 		)
 	stage.call(&"set_active_regime_names", [])
@@ -1978,7 +2237,6 @@ func _check_controller_ownership_regression(
 		stage.call(&"runtime_summary"),
 		"cleared regimes",
 		controller_interaction_vertices,
-		controller_source_vertices,
 		errors,
 	)
 
@@ -1997,12 +2255,6 @@ func _check_controller_ownership_regression(
 		false,
 	)):
 		errors.append("controller could not disable an authored polygon")
-	if not bool(stage.call(
-		&"set_runtime_parameter",
-		&"source.source_test.enabled",
-		false,
-	)):
-		errors.append("controller could not disable an authored source")
 	var guard_id := &"regime_controller_guard"
 	if not bool(stage.call(
 		&"_upsert_interaction_polygon",
@@ -2043,7 +2295,6 @@ func _regime_geometry_snapshot(summary: Dictionary) -> Dictionary:
 	return {
 		"reservoir_center": summary.get("reservoir_center_pixels", Vector2.ZERO),
 		"interactions": Array(summary.get("interaction_polygons", [])).duplicate(true),
-		"sources": Array(summary.get("source_polygons", [])).duplicate(true),
 		"keys": Dictionary(summary.get("regime_geometry_keys", {})).duplicate(true),
 	}
 
@@ -2055,10 +2306,12 @@ func _expect_feature_layouts_differ(
 	after_label: String,
 	errors: PackedStringArray,
 ) -> void:
-	for feature_kind: String in ["drain", "obstacle", "source"]:
-		if _feature_layout_snapshot(before, feature_kind) == _feature_layout_snapshot(
-			after,
-			feature_kind,
+	for feature_kind: String in ["drain", "obstacle"]:
+		if _managed_active_feature_layout(before, feature_kind) == (
+			_managed_active_feature_layout(
+				after,
+				feature_kind,
+			)
 		):
 			errors.append(
 				"%s reused the %s %s layout"
@@ -2066,21 +2319,18 @@ func _expect_feature_layouts_differ(
 			)
 
 
-func _feature_layout_snapshot(summary: Dictionary, feature_kind: String) -> Array:
+func _managed_active_feature_layout(
+	summary: Dictionary,
+	feature_kind: String,
+) -> Array:
 	var result: Array = []
-	if feature_kind == "source":
-		for definition_variant: Variant in Array(summary.get("source_polygons", [])):
-			if definition_variant is Dictionary:
-				result.append([
-					String(definition_variant.get("element_id", "")),
-					Array(definition_variant.get("vertices", [])).duplicate(true),
-				])
-		return result
 	var expected_mode := "absorb" if feature_kind == "drain" else "repel"
 	for definition_variant: Variant in Array(summary.get("interaction_polygons", [])):
 		if (
 			definition_variant is Dictionary
 			and String(definition_variant.get("mode", "")) == expected_mode
+			and bool(definition_variant.get("enabled", false))
+			and bool(definition_variant.get("regime_managed", false))
 		):
 			result.append([
 				String(definition_variant.get("element_id", "")),
@@ -2089,29 +2339,190 @@ func _feature_layout_snapshot(summary: Dictionary, feature_kind: String) -> Arra
 	return result
 
 
+func _expect_meaningful_layout_change(
+	before: Array,
+	after: Array,
+	before_label: String,
+	after_label: String,
+	feature_kind: String,
+	errors: PackedStringArray,
+) -> void:
+	if before.is_empty() or before.size() != after.size():
+		errors.append(
+			"%s -> %s cannot compare the visible %s cohort"
+				% [before_label, after_label, feature_kind]
+		)
+		return
+	var before_by_id: Dictionary = {}
+	for record_variant: Variant in before:
+		if record_variant is Array and Array(record_variant).size() >= 2:
+			var record: Array = record_variant
+			before_by_id[String(record[0])] = record
+	var minimum_displacement: float = INF
+	var matching_count := 0
+	for record_variant: Variant in after:
+		if not record_variant is Array or Array(record_variant).size() < 2:
+			continue
+		var record: Array = record_variant
+		var element_id := String(record[0])
+		if not before_by_id.has(element_id):
+			continue
+		var previous: Array = before_by_id[element_id]
+		minimum_displacement = minf(
+			minimum_displacement,
+			_layout_record_centroid(previous).distance_to(
+				_layout_record_centroid(record),
+			),
+		)
+		matching_count += 1
+	if matching_count != before.size():
+		errors.append(
+			"%s -> %s replaced a fixed %s slot ID"
+				% [before_label, after_label, feature_kind]
+		)
+	elif minimum_displacement < 1.0:
+		errors.append(
+			"%s -> %s moved a visible %s by less than 120 px"
+				% [before_label, after_label, feature_kind]
+		)
+
+
+func _layout_record_centroid(record: Array) -> Vector2:
+	if record.size() < 2 or not record[1] is Array:
+		return Vector2.ZERO
+	var vertices: Array = record[1]
+	if vertices.is_empty():
+		return Vector2.ZERO
+	var centroid := Vector2.ZERO
+	for point_variant: Variant in vertices:
+		if point_variant is Array and Array(point_variant).size() >= 2:
+			var point: Array = point_variant
+			centroid += Vector2(float(point[0]), float(point[1]))
+	return centroid / float(vertices.size())
+
+
+func _check_agriculture_field_contract(
+	summary: Dictionary,
+	label: String,
+	errors: PackedStringArray,
+) -> void:
+	if not (
+		String(summary.get("field_intake_mode", ""))
+			== "BANK_CONNECTED_LATERAL_SUCTION"
+		and String(summary.get("field_absorption_edge_mode", ""))
+			== "RIVER_FACING_MOUTH"
+		and String(summary.get("field_draining_state_policy", ""))
+			== "RECORD_THROUGH_FIELD_THEN_RECYCLE_OFFSCREEN"
+		and String(summary.get("field_tail_policy", ""))
+			== "IMMUTABLE_SEGMENTS_FADE_WITHOUT_TELEPORT"
+	):
+		errors.append("%s does not expose the bank-field lifecycle contract" % label)
+	var bank_counts := Dictionary(summary.get("regime_field_bank_counts", {}))
+	if not (
+		int(bank_counts.get("enabled", -1)) == 4
+		and int(bank_counts.get("top", -1)) == 2
+		and int(bank_counts.get("bottom", -1)) == 2
+	):
+		errors.append("%s does not distribute four fields 2 TOP / 2 BOTTOM" % label)
+	var enabled_fields: Array[Dictionary] = []
+	for layout_variant: Variant in Array(summary.get("regime_field_bank_layouts", [])):
+		if layout_variant is Dictionary and bool(layout_variant.get("enabled", false)):
+			enabled_fields.append(layout_variant)
+	if enabled_fields.size() != 4:
+		errors.append("%s does not expose four enabled bank-field layouts" % label)
+	for layout: Dictionary in enabled_fields:
+		var bank_side := String(layout.get("bank_side", ""))
+		if not (
+			String(layout.get("mode", "")) == "absorb"
+			and bool(layout.get("regime_managed", false))
+			and bool(layout.get("bank_connected", false))
+			and bank_side in ["TOP", "BOTTOM"]
+		):
+			errors.append("%s exposes a non-bank-connected enabled field" % label)
+			continue
+		var native_vertices := PackedVector2Array(layout.get(
+			"vertices_pixels",
+			PackedVector2Array(),
+		))
+		var root_y := 0.0 if bank_side == "TOP" else 1080.0
+		var root_vertex_count := 0
+		for vertex: Vector2 in native_vertices:
+			if is_equal_approx(vertex.y, root_y):
+				root_vertex_count += 1
+		if root_vertex_count < 2:
+			errors.append(
+				"%s %s field does not anchor its root at native y=%.0f"
+					% [label, bank_side, root_y]
+			)
+	for uniform_spec: Array in [
+		["bank_field_suction_reach_pixels", "bank_field_suction_reach_uniforms", 180.0],
+		[
+			"bank_field_suction_crossflow_ratio",
+			"bank_field_suction_crossflow_uniforms",
+			1.25,
+		],
+		[
+			"bank_field_suction_streamwise_ratio",
+			"bank_field_suction_streamwise_uniforms",
+			0.06,
+		],
+		["bank_field_capture_depth_pixels", "bank_field_capture_depth_uniforms", 10.0],
+	]:
+		var scalar_name := String(uniform_spec[0])
+		var uniform_name := String(uniform_spec[1])
+		var expected_value := float(uniform_spec[2])
+		var uniform_values := Array(summary.get(uniform_name, []))
+		if not is_equal_approx(float(summary.get(scalar_name, NAN)), expected_value):
+			errors.append("%s has an incorrect %s" % [label, scalar_name])
+		if uniform_values.size() != 7:
+			errors.append("%s does not expose seven %s values" % [label, uniform_name])
+			continue
+		for value_variant: Variant in uniform_values:
+			if not is_equal_approx(float(value_variant), expected_value):
+				errors.append("%s has an inconsistent %s" % [label, uniform_name])
+				break
+
+
 func _expect_controller_geometry_vertices(
 	summary: Dictionary,
 	state_label: String,
 	expected_interaction_vertices: Array,
-	expected_source_vertices: Array,
 	errors: PackedStringArray,
 ) -> void:
-	if _vertices_for_element(
+	var controller_definition := _definition_for_element(
 		summary,
 		"interaction_polygons",
 		"absorber_test",
-	) != expected_interaction_vertices:
+	)
+	if Array(controller_definition.get("vertices", [])) != expected_interaction_vertices:
 		errors.append(
 			"%s regime move overwrote controller interaction vertices" % state_label
 		)
-	if _vertices_for_element(
-		summary,
-		"source_polygons",
-		"source_test",
-	) != expected_source_vertices:
+	if not (
+		String(controller_definition.get("mode", "")) == "absorb"
+		and bool(controller_definition.get("enabled", false))
+		and not bool(controller_definition.get("regime_managed", true))
+		and not bool(controller_definition.get("bank_connected", true))
+		and String(controller_definition.get("bank_side", "")) == "NONE"
+	):
 		errors.append(
-			"%s regime move overwrote controller source vertices" % state_label
+			"%s did not preserve the controller-owned interior absorber behavior"
+				% state_label
 		)
+
+
+func _definition_for_element(
+	summary: Dictionary,
+	collection_key: String,
+	element_id: String,
+) -> Dictionary:
+	for definition_variant: Variant in Array(summary.get(collection_key, [])):
+		if (
+			definition_variant is Dictionary
+			and String(definition_variant.get("element_id", "")) == element_id
+		):
+			return definition_variant
+	return {}
 
 
 func _expect_disabled_controller_records_packed(
@@ -2130,14 +2541,6 @@ func _expect_disabled_controller_records_packed(
 				absorber = definition
 			"regime_controller_guard":
 				guard = definition
-	var source: Dictionary = {}
-	for definition_variant: Variant in Array(summary.get("source_polygons", [])):
-		if (
-			definition_variant is Dictionary
-			and String(definition_variant.get("element_id", "")) == "source_test"
-		):
-			source = definition_variant
-			break
 	if (
 		absorber.is_empty()
 		or bool(absorber.get("enabled", true))
@@ -2146,8 +2549,6 @@ func _expect_disabled_controller_records_packed(
 		errors.append("%s overwrote the controller-owned polygon state" % state_label)
 	if guard.is_empty() or bool(guard.get("enabled", true)):
 		errors.append("%s lost the disabled regime_-prefixed controller polygon" % state_label)
-	if source.is_empty() or bool(source.get("enabled", true)):
-		errors.append("%s overwrote the controller-owned source state" % state_label)
 	var rendered := Dictionary(summary.get("regime_feature_slot_counts_rendered", {}))
 	var interaction_packed := int(summary.get("interaction_overlay_count", 0))
 	var managed_interaction_count := int(rendered.get("drain", 0)) + int(
@@ -2155,30 +2556,10 @@ func _expect_disabled_controller_records_packed(
 	)
 	if interaction_packed != managed_interaction_count + 2:
 		errors.append("%s compacted a disabled controller polygon" % state_label)
-	var source_packed := int(summary.get("source_overlay_count", 0))
-	if source_packed != int(rendered.get("source", 0)) + 1:
-		errors.append("%s compacted the disabled controller source" % state_label)
 	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
 		if int(count_variant) != interaction_packed:
 			errors.append("%s controller polygon packing missed a shader" % state_label)
 			break
-	for count_variant: Variant in Array(summary.get("source_count_uniforms", [])):
-		if int(count_variant) != source_packed:
-			errors.append("%s controller source packing missed a shader" % state_label)
-			break
-
-
-func _vertices_for_element(
-	summary: Dictionary,
-	collection_key: String,
-	element_id: String,
-) -> Array:
-	for definition_variant: Variant in Array(summary.get(collection_key, [])):
-		if not definition_variant is Dictionary:
-			continue
-		if String(definition_variant.get("element_id", "")) == element_id:
-			return Array(definition_variant.get("vertices", [])).duplicate(true)
-	return []
 
 
 func _expect_regime_feature_values(
@@ -2260,10 +2641,6 @@ func _expect_regime_slot_counts(
 	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
 		if int(count_variant) != expected_interactions:
 			errors.append("%s interaction slot count missed a water shader" % label)
-			break
-	for count_variant: Variant in Array(summary.get("source_count_uniforms", [])):
-		if int(count_variant) != int(expected.get("source", 0)):
-			errors.append("%s source slot count missed a water shader" % label)
 			break
 
 
@@ -2480,10 +2857,19 @@ func _check_regime_runtime_stability(
 		"gate_state_upload_count",
 		"edge_turbulence_parameter_upload_count",
 		"regime_geometry_update_count",
+		"regime_layout_generation",
 	]:
 		if after_idempotent.get(counter_name) != before_idempotent.get(counter_name):
 			errors.append(
 				"identical absolute regime state repeated %s work" % counter_name
+			)
+	for feature_kind: String in ["drain", "obstacle"]:
+		if _managed_active_feature_layout(after_idempotent, feature_kind) != (
+			_managed_active_feature_layout(before_idempotent, feature_kind)
+		):
+			errors.append(
+				"identical absolute Tech state respawned its %s layout"
+					% feature_kind
 			)
 
 	# The timeline publishes a shared state every render frame. Re-consuming an
@@ -2575,10 +2961,7 @@ func _particle_pool_signature(root: Node) -> Array:
 
 func _stage_texture_signature(stage: Node) -> Array:
 	var signature: Array = []
-	for property_name: String in [
-		"_interaction_data_texture",
-		"_source_data_texture",
-	]:
+	for property_name: String in ["_interaction_data_texture"]:
 		var texture := stage.get(property_name) as Texture2D
 		signature.append([
 			property_name,
@@ -2599,7 +2982,7 @@ func _stage_texture_signature(stage: Node) -> Array:
 
 func _feature_resource_signature(stage: Node) -> Array:
 	var signature: Array = []
-	for property_name: String in ["interaction_polygons", "source_polygons"]:
+	for property_name: String in ["interaction_polygons"]:
 		var resources := Array(stage.get(property_name))
 		var ids: Array = []
 		for resource_variant: Variant in resources:
