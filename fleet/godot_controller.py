@@ -12,6 +12,7 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 
 COMPUTERS = {
@@ -333,17 +334,30 @@ def regime_indices(regime_ids: list[str]) -> list[int]:
     return sorted(known_ids.index(regime_id) for regime_id in regime_ids)
 
 
+def cli_boolean(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise argparse.ArgumentTypeError("expected TRUE or FALSE")
+
+
 def send_fleet_regimes(
     regime_ids: list[str],
     command: str,
     target_names=None,
+    geometry_visible: Optional[bool] = None,
 ) -> list[tuple[str, int, int]]:
     indices = regime_indices(regime_ids)
     request_id = uuid.uuid4().hex
+    changes = {"regimes.active_indices": indices}
+    if geometry_visible is not None:
+        changes["debug.geometry_visible"] = geometry_visible
     payload = {
         "protocol": "ink-flow/1",
         "target": REGIME_TARGET,
-        "changes": {"regimes.active_indices": indices},
+        "changes": changes,
         "geometry_ops": [],
         "actions": [],
         "metadata": {
@@ -363,6 +377,7 @@ def send_fleet_regimes(
     pending = set(destinations)
     acknowledgements: dict[str, int] = {}
     last_seen_screens: dict[str, list[str]] = {}
+    last_seen_geometry: dict[str, dict[str, bool]] = {}
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.bind(("", 0))
         for _attempt in range(REGIME_ACK_ATTEMPTS):
@@ -405,10 +420,35 @@ def send_fleet_regimes(
                     for screen_id in acknowledgement.get("recipient_screen_ids", [])
                 )
                 last_seen_screens[sender_ip] = received_screens
+                raw_geometry = acknowledgement.get(
+                    "recipient_debug_geometry_visible", {}
+                )
+                received_geometry = (
+                    {
+                        str(screen_id): visible
+                        for screen_id, visible in raw_geometry.items()
+                        if isinstance(visible, bool)
+                    }
+                    if isinstance(raw_geometry, dict)
+                    else {}
+                )
+                last_seen_geometry[sender_ip] = received_geometry
                 recipient_count = int(acknowledgement.get("recipient_count", 0))
+                expected_geometry = (
+                    {
+                        screen_id: geometry_visible
+                        for screen_id in expected_screens_by_destination[sender_ip]
+                    }
+                    if geometry_visible is not None
+                    else None
+                )
                 if (
                     received_screens != expected_screens_by_destination[sender_ip]
                     or recipient_count != len(expected_screens_by_destination[sender_ip])
+                    or (
+                        expected_geometry is not None
+                        and received_geometry != expected_geometry
+                    )
                 ):
                     # The process may still be loading its assigned stages. Leave
                     # it pending so the absolute packet is retried until ready.
@@ -421,10 +461,16 @@ def send_fleet_regimes(
         readiness = "; ".join(
             f"{destination} expected {expected_screens_by_destination[destination]!r}, "
             f"saw {last_seen_screens.get(destination, [])!r}"
+            + (
+                f", expected geo={geometry_visible}, "
+                f"saw {last_seen_geometry.get(destination, {})!r}"
+                if geometry_visible is not None
+                else ""
+            )
             for destination in sorted(pending)
         )
         raise OSError(
-            "no ready regime acknowledgement: "
+            "no ready control acknowledgement: "
             + readiness
             + "; verify exactly one updated Godot owns UDP 5005 per fleet Mac"
         )
@@ -442,9 +488,9 @@ def format_regime_send(results: list[tuple[str, int, int]]) -> str:
     )
 
 
-def load_controller_regime_state() -> set[str]:
+def load_controller_state() -> tuple[set[str], Optional[bool]]:
     if not os.path.isfile(REGIME_STATE_PATH):
-        return set()
+        return set(), None
     try:
         with open(REGIME_STATE_PATH, "r", encoding="utf-8") as state_file:
             document = json.load(state_file)
@@ -456,14 +502,25 @@ def load_controller_regime_state() -> set[str]:
         ):
             raise ValueError("active_regime_ids must be a string list")
         regime_indices(regime_ids)
-        return set(regime_ids)
+        geometry_visible = document.get("debug_geometry_visible")
+        if geometry_visible is not None and not isinstance(geometry_visible, bool):
+            raise ValueError("debug_geometry_visible must be true or false")
+        return set(regime_ids), geometry_visible
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise ValueError(
             f"invalid controller state {REGIME_STATE_PATH}: {error}"
         ) from error
 
 
-def save_controller_regime_state(regime_ids: list[str]) -> None:
+def load_controller_regime_state() -> set[str]:
+    regime_ids, _geometry_visible = load_controller_state()
+    return regime_ids
+
+
+def save_controller_state(
+    regime_ids: list[str],
+    geometry_visible: Optional[bool],
+) -> None:
     regime_indices(regime_ids)
     requested_ids = set(regime_ids)
     ordered_ids = [
@@ -480,9 +537,12 @@ def save_controller_regime_state(regime_ids: list[str]) -> None:
         text=True,
     )
     try:
+        document = {"active_regime_ids": ordered_ids}
+        if geometry_visible is not None:
+            document["debug_geometry_visible"] = geometry_visible
         with os.fdopen(file_descriptor, "w", encoding="utf-8") as state_file:
             json.dump(
-                {"active_regime_ids": ordered_ids},
+                document,
                 state_file,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -497,6 +557,11 @@ def save_controller_regime_state(regime_ids: list[str]) -> None:
         raise
 
 
+def save_controller_regime_state(regime_ids: list[str]) -> None:
+    _active_ids, geometry_visible = load_controller_state()
+    save_controller_state(regime_ids, geometry_visible)
+
+
 def print_regime_catalog() -> None:
     for index, (regime_id, display_name) in enumerate(REGIMES, start=1):
         print(f"{index}: {regime_id:<16} {display_name}")
@@ -508,7 +573,7 @@ def run_regime_console() -> None:
     import termios
     import tty
 
-    active_ids = load_controller_regime_state()
+    active_ids, geometry_visible = load_controller_state()
     file_descriptor = sys.stdin.fileno()
     original_terminal = termios.tcgetattr(file_descriptor)
     print("Regime console: 1-7 toggle, c clears, q or Esc quits.")
@@ -516,7 +581,11 @@ def run_regime_console() -> None:
     ordered_start = [
         regime_id for regime_id, _name in REGIMES if regime_id in active_ids
     ]
-    sends = send_fleet_regimes(ordered_start, "regime-console-sync")
+    sends = send_fleet_regimes(
+        ordered_start,
+        "regime-console-sync",
+        geometry_visible=geometry_visible,
+    )
     initial_state = ", ".join(ordered_start) if ordered_start else "none"
     print(f"APPLIED to {format_regime_send(sends)}: active={initial_state}")
     try:
@@ -531,7 +600,11 @@ def run_regime_console() -> None:
                 return
             if character in {"c", "C"}:
                 active_ids.clear()
-                sends = send_fleet_regimes([], "regime-clear")
+                sends = send_fleet_regimes(
+                    [],
+                    "regime-clear",
+                    geometry_visible=geometry_visible,
+                )
             elif character and character in "1234567":
                 regime_id = REGIMES[int(character) - 1][0]
                 if regime_id in active_ids:
@@ -541,11 +614,12 @@ def run_regime_console() -> None:
                 sends = send_fleet_regimes(
                     list(active_ids),
                     "regime-console",
+                    geometry_visible=geometry_visible,
                 )
             else:
                 continue
             ordered = [regime_id for regime_id, _name in REGIMES if regime_id in active_ids]
-            save_controller_regime_state(ordered)
+            save_controller_state(ordered, geometry_visible)
             state = ", ".join(ordered) if ordered else "none"
             print(f"\rAPPLIED to {format_regime_send(sends)}: active={state}          ")
     finally:
@@ -584,6 +658,13 @@ def main() -> None:
         choices=[regime_id for regime_id, _display_name in REGIMES],
         help="regime ID for set; repeat to activate several regimes",
     )
+    parser.add_argument(
+        "--geo",
+        type=cli_boolean,
+        default=None,
+        metavar="TRUE/FALSE",
+        help="absolute obstacle/debug geometry visibility for set",
+    )
     args = parser.parse_args()
 
     regime_actions = {"list", "set", "regime-clear", "regime-console"}
@@ -593,28 +674,63 @@ def main() -> None:
         if args.action == "list":
             if args.regime:
                 parser.error("list does not accept --regime")
+            if args.geo is not None:
+                parser.error("list does not accept --geo")
             print_regime_catalog()
             return
-        if args.action == "set" and not args.regime:
-            parser.error("set requires at least one --regime")
+        if args.action == "set" and not args.regime and args.geo is None:
+            parser.error("set requires at least one --regime or --geo TRUE/FALSE")
         if args.action != "set" and args.regime:
             parser.error(f"{args.action} does not accept --regime")
+        if args.action != "set" and args.geo is not None:
+            parser.error(f"{args.action} does not accept --geo")
         try:
             if args.action == "regime-console":
                 run_regime_console()
                 return
-            regime_ids = args.regime if args.action == "set" else []
-            command = "set" if regime_ids else "regime-clear"
-            sends = send_fleet_regimes(regime_ids, command)
-            save_controller_regime_state(regime_ids)
+            saved_regime_ids, saved_geometry_visible = load_controller_state()
+            if args.action == "set":
+                regime_ids = (
+                    args.regime
+                    if args.regime
+                    else [
+                        regime_id
+                        for regime_id, _name in REGIMES
+                        if regime_id in saved_regime_ids
+                    ]
+                )
+                geometry_visible = (
+                    args.geo if args.geo is not None else saved_geometry_visible
+                )
+                command = "set"
+            else:
+                regime_ids = []
+                geometry_visible = saved_geometry_visible
+                command = "regime-clear"
+            sends = send_fleet_regimes(
+                regime_ids,
+                command,
+                geometry_visible=geometry_visible,
+            )
+            save_controller_state(regime_ids, geometry_visible)
             active = ", ".join(regime_ids) if regime_ids else "none"
-            print(f"APPLIED  {format_regime_send(sends)}; active={active}")
+            geometry_state = (
+                str(geometry_visible).lower()
+                if geometry_visible is not None
+                else "unchanged"
+            )
+            print(
+                f"APPLIED  {format_regime_send(sends)}; "
+                f"active={active}; geo={geometry_state}"
+            )
             return
         except (OSError, ValueError) as error:
             parser.error(str(error))
 
     if args.regime:
         parser.error(f"{args.action} does not accept --regime")
+    if args.geo is not None:
+        parser.error(f"{args.action} does not accept --geo")
 
     selected_targets = args.targets or list(COMPUTERS)
     invalid_targets = [name for name in selected_targets if name not in COMPUTERS]
@@ -650,7 +766,7 @@ def main() -> None:
         ]
         if successful_targets:
             try:
-                active_ids = load_controller_regime_state()
+                active_ids, geometry_visible = load_controller_state()
                 ordered_active = [
                     regime_id
                     for regime_id, _name in REGIMES
@@ -660,11 +776,17 @@ def main() -> None:
                     ordered_active,
                     "startup-sync",
                     successful_targets,
+                    geometry_visible=geometry_visible,
                 )
                 active = ", ".join(ordered_active) if ordered_active else "none"
+                geometry_state = (
+                    str(geometry_visible).lower()
+                    if geometry_visible is not None
+                    else "unchanged"
+                )
                 print(
                     f"APPLIED  {format_regime_send(sends)}; "
-                    f"startup active={active}"
+                    f"startup active={active}; geo={geometry_state}"
                 )
             except (OSError, ValueError) as error:
                 print(f"ERROR startup regime verification: {error}")

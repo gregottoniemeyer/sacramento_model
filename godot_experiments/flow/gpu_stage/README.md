@@ -102,7 +102,9 @@ Every instance exposes:
 - `stage_title: String`: the human-readable river title shown on that screen.
 - `stage_title_visible: bool`: title visibility without changing screen identity.
 - `regime_panel_visible: bool`: visibility of the process-wide regime state on
-  this screen. Production enables it only for the Sacramento-San Joaquin Delta.
+  this screen. Production enables it only for Delta.
+- `regime_heading_visible: bool`: per-stage visibility of the optional
+  `Regime` heading. Delta hides it while retaining the seven regime names.
 - `stage_grid_visible: bool`: visibility of the screen-fixed model grid.
 - `stage_grid_spacing_pixels`, `stage_grid_line_width_pixels`, and
   `stage_grid_color`: native-pixel grid presentation controls.
@@ -187,6 +189,18 @@ GPU renderer also still has one physical `reservoir_main`; a profile value such
 as `reservoir_count=2` is retained desired-state data for a future two-slot
 renderer and does not create a second reservoir today.
 
+The current production stage has one authored geometry slot each for its
+reservoir, drain, obstacle, and source. Regimes move those existing slots rather
+than creating or resizing geometry. A defined feature's center is a stable hash
+of `screen_id`, feature kind, slot index, and its sorted contributor IDs. Each
+contributor yields one candidate center, and mixed contributors use the equal
+blend of those centers. Polygon shapes are translated from immutable captured
+authored vertices, not from their last live position, so `A -> B -> A` restores
+the exact A coordinates without accumulating drift. With no defined contributor,
+the authored center/vertices return. Explicit zero is different from undefined:
+it remains a defined regime placement internally while the feature constraint
+and its debug guide remain absent.
+
 Reservoir schedules are blended separately from the equal feature mean. Active
 profiles with positive reservoir area and a complete gate schedule contribute
 that area to an area-weighted open fraction; the stage multiplies the effective
@@ -230,10 +244,10 @@ The main-canvas presentation stack is fixed around the animated content:
   Barlow Condensed Medium in opaque `#4AB0E1`. The date alone enables the
   OpenType `tnum` feature (tabular figures), so its digits keep fixed widths;
   the river title, regime heading, and regime names retain proportional glyph
-  spacing. Only the Delta wrapper enables the regime panel. Its text shares a
-  bottom anchor at Y `1050`: the 48-pixel
-  `Regime` heading is centered on X `1360`, and seven 60-pixel names begin on
-  X `1420` with 72-pixel centerline spacing.
+  spacing. Only the Delta wrapper enables the regime panel. It hides the
+  optional 48-pixel `Regime` heading and leaves the seven 60-pixel names at
+  their existing positions beginning on X `1420` with 72-pixel centerline
+  spacing.
   Active names are opaque and inactive names are shown at `0.25` alpha.
   The panel follows the shared `ModelRegimes` state, so matching active names
   highlight immediately even when that state arrived before Delta was loaded.
@@ -323,7 +337,7 @@ identity and may change without changing the stable `screen_id` or `model_id`.
 | `scene_4.tscn` | `mill_creek` | Mill Creek | `mill_creek_720.txt` |
 | `scene_5.tscn` | `feather_river` | Feather River | `feather_720.txt` |
 | `scene_6.tscn` | `american_river` | American River | `american_720.txt` |
-| `scene_7.tscn` | `delta` | Sacramento-San Joaquin Delta | `delta_720.txt` |
+| `scene_7.tscn` | `delta` | Delta | `delta_720.txt` |
 
 All seven files are project resources under
 `res://flow/data/water_pipeline/`. The combined McCloud-Pit screen currently
@@ -337,6 +351,7 @@ The production presentation, regime, calendar, and watershed paths are:
 
 | Runtime path | Compatibility alias | Effect |
 |---|---|---|
+| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir, drain/obstacle, shoreline, and source debug geometry without changing physics |
 | `stage.title` | `stage_title` | River display text |
 | `stage.title_visible` | `stage_title_visible` | Title visibility |
 | `stage.regime_panel_visible` | `regime_panel_visible` | Active-regime panel visibility for this screen |
@@ -364,6 +379,18 @@ The production presentation, regime, calendar, and watershed paths are:
 | `regimes.watershed` | none | Set Watershed active/inactive |
 | `shoreline.randomness` | `shoreline_randomness`, `shorelines.randomness` | Directly set this stage's shoreline force `0…1`; the next shared regime change reapplies the normalized profile value |
 
+The fleet controller exposes the same absolute visibility state from the
+repository root:
+
+```sh
+python3 fleet/godot_controller.py set --geo FALSE
+python3 fleet/godot_controller.py set --geo TRUE
+```
+
+It applies to all configured screens, persists across `start`/`restart`, and
+may be combined with `--regime` in one `set` command. `FALSE` hides only the
+guides and outlines; feature physics is unchanged.
+
 Presentation paths do not change `screen_id`, `model_id`, debug visibility, or
 water occupancy. Calendar paths mutate the shared `ModelTimeline` and are
 reflected by every active stage; they still do not rebuild particles or retune
@@ -387,6 +414,15 @@ gate-schedule work. Ecology and regime-driven gate schedules are reevaluated onl
 when the model day or active regime set changes. Kinship's defined zero drain and
 obstacle budgets disable both generic polygon-interaction shader passes while
 leaving its full shoreline field active.
+
+Every real regime revision advances `reservoir_geometry_revision` before
+applying the new center. Retained reservoir heads are released in place into
+downstream flow before new-center reservoir physics begins; their old orbit
+trails remain immutable and fade normally. Placement runs only on initial stage
+hydration or a real regime transition, and unchanged geometry keys skip texture
+uploads. It performs no per-frame placement work and creates no nodes, resources,
+particle pools, or extra reservoir slots. The renderer therefore still draws at
+most one physical reservoir even when desired `reservoir_count=2`.
 
 Shoreline steering and swept-crossing checks derive the local 16th-grid X span
 touched by the head or motion segment and inspect that span plus one neighbor on
@@ -428,8 +464,14 @@ Profile fields are `regime_profile_path`, `regime_profiles_loaded`,
 `regime_profile_physics_enabled`, `regime_applied_feature_budgets`,
 `regime_applied_feature_overrides`, `regime_feature_presence`,
 `regime_gate_open_fraction`,
-`regime_reservoir_count_desired_raw`, `regime_reservoir_count_rendered`, and
-`regime_reservoir_renderer_capacity`. Shoreline fields are
+`regime_reservoir_count_desired_raw`, `regime_reservoir_count_rendered`,
+`regime_reservoir_renderer_capacity`, `regime_geometry_mode`,
+`regime_geometry_keys`, `regime_geometry_update_count`,
+`regime_geometry_undefined_fallback`, `regime_geometry_mixed_contributors`, and
+`regime_geometry_preserves_particle_pools`. Reservoir placement fields are
+`reservoir_center_pixels`, `reservoir_center_pixels_authored`,
+`reservoir_geometry_revision`, and `reservoir_geometry_revision_uniforms`.
+Shoreline fields are
 `shoreline_randomness`, `shoreline_count`, `shoreline_vertex_count`,
 `shoreline_ids`, `shoreline_obstacles`, `shoreline_data_texture_bound`,
 `shoreline_data_texture_size`, `shoreline_count_uniforms`,

@@ -42,6 +42,7 @@ uniform float regime_obstacle_power = 1.0;
 uniform float regime_source_weight = 1.0;
 
 uniform vec2 reservoir_center = vec2(1388.57, 771.43);
+uniform float reservoir_geometry_revision = 0.0;
 uniform float reservoir_radius = 223.71;
 uniform float reservoir_influence = 86.0;
 uniform float reservoir_swirl_speed = 145.0;
@@ -540,6 +541,9 @@ void start() {
 			lifecycle_generation
 		);
 		TRANSFORM = mat4(1.0);
+		// This invisible basis component owns the reservoir layout generation.
+		// It survives normal 2D transform updates and is refreshed on admission.
+		TRANSFORM[1].z = reservoir_geometry_revision;
 		vec2 initial_direction = vec2(1.0, 0.0);
 		if (source_result.x > -1.0e10) {
 			TRANSFORM[3].xy = source_result.xy;
@@ -690,6 +694,41 @@ void process() {
 	bool head_bypassing = CUSTOM.w > 4.5 && CUSTOM.w < 5.5;
 	bool head_gate_staging = CUSTOM.w > 5.5 && CUSTOM.w < 6.5;
 	bool head_gate_flushing = CUSTOM.w > 6.5 && CUSTOM.w < 7.5;
+	bool reservoir_geometry_changed = (
+		abs(TRANSFORM[1].z - reservoir_geometry_revision) > 0.25
+	);
+	// Regime changes invalidate every live reservoir owner before the new center
+	// is evaluated. Release in place: no transform or trail anchor is teleported,
+	// and immutable orbit history fades while the head resumes downstream flow.
+	if (
+		reservoir_geometry_changed
+		&& (
+			head_entering
+			|| head_retained
+			|| head_exiting
+			|| head_gate_staging
+			|| head_gate_flushing
+		)
+	) {
+		CUSTOM.y = 0.0;
+		CUSTOM.w = STATE_RELEASED;
+		TRANSFORM[1].z = reservoir_geometry_revision;
+		head_entering = false;
+		head_retained = false;
+		head_exiting = false;
+		head_gate_staging = false;
+		head_gate_flushing = false;
+		head_released = true;
+	}
+	if (reservoir_geometry_changed && head_bypassing) {
+		CUSTOM.w = STATE_FLOWING;
+		TRANSFORM[1].z = reservoir_geometry_revision;
+		head_bypassing = false;
+		head_flowing = true;
+	}
+	if (reservoir_geometry_changed && head_released) {
+		TRANSFORM[1].z = reservoir_geometry_revision;
+	}
 	// A regime may explicitly remove both generic polygon categories while their
 	// authored geometry remains packed for later regimes. Skip both polygon passes
 	// in that state. Requiring both presence overrides preserves authored fallback
@@ -1133,6 +1172,7 @@ void process() {
 	) {
 		CUSTOM.y = 0.0;
 		CUSTOM.w = STATE_BYPASSING;
+		TRANSFORM[1].z = reservoir_geometry_revision;
 		head_flowing = false;
 		head_bypassing = true;
 	}
@@ -1181,6 +1221,7 @@ void process() {
 	}
 	if (reached_entry_decision) {
 		CUSTOM.y = 0.0;
+		TRANSFORM[1].z = reservoir_geometry_revision;
 		head_flowing = false;
 		if (head_on_upstream_entry) {
 			CUSTOM.w = STATE_ENTERING;

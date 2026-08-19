@@ -8,7 +8,7 @@ const SCENES: Array[Dictionary] = [
 	{"title": "Mill Creek", "comment": "east-side mountain tributary", "path": "res://scene_4.tscn"},
 	{"title": "Feather River", "comment": "largest Sacramento tributary", "path": "res://scene_5.tscn"},
 	{"title": "American River", "comment": "final major tributary at Sacramento", "path": "res://scene_6.tscn"},
-	{"title": "Sacramento-San Joaquin Delta", "comment": "tidal action", "path": "res://scene_7.tscn"},
+	{"title": "Delta", "comment": "tidal action", "path": "res://scene_7.tscn"},
 ]
 
 var _stage_a_picker: OptionButton

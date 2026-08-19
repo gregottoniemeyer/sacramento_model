@@ -455,6 +455,9 @@ func _send_protocol_ack(
 		"request_id": request_id,
 		"recipient_count": recipient_count,
 		"recipient_screen_ids": _recipient_screen_ids(message.get("target", "*")),
+		"recipient_debug_geometry_visible": _recipient_debug_geometry_visibility(
+			message.get("target", "*")
+		),
 		"regime_active_indices": active_indices,
 		"regime_revision": regime_revision,
 	}
@@ -498,6 +501,32 @@ func _recipient_screen_ids(target: Variant) -> Array[String]:
 			screen_ids.append(screen_id)
 	screen_ids.sort()
 	return screen_ids
+
+
+func _recipient_debug_geometry_visibility(target: Variant) -> Dictionary:
+	## Report the applied absolute debug state per addressed production stage.
+	## Control messages are queued to stage frame boundaries, so a sender may see
+	## the previous value in its first ACK and retry until this field converges.
+	var visibility_by_screen: Dictionary = {}
+	for candidate in get_tree().get_nodes_in_group(FLOW_MODELS_GROUP):
+		var model := candidate as Node
+		if (
+			model == null
+			or not is_instance_valid(model)
+			or not _target_matches_model(target, model)
+		):
+			continue
+		var screen_id := ""
+		if model.has_method(&"get_screen_id"):
+			screen_id = String(model.call(&"get_screen_id"))
+		else:
+			var screen_variant: Variant = _property_value(model, "screen_id")
+			if screen_variant != null:
+				screen_id = String(screen_variant)
+		var visibility_variant: Variant = _property_value(model, "debug_visible")
+		if not screen_id.is_empty() and visibility_variant != null:
+			visibility_by_screen[screen_id] = bool(visibility_variant)
+	return visibility_by_screen
 
 
 func _handle_legacy_packet(

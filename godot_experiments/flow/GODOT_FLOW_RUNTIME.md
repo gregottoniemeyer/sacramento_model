@@ -195,6 +195,20 @@ the ordinary trail lifetime. The GPU stage has only one physical
 `reservoir_main`; `reservoir_count=2` is retained desired-state data awaiting a
 two-slot renderer and does not produce a second reservoir.
 
+The current production geometry remains a fixed, bounded set: one authored
+slot each for the reservoir, drain, obstacle, and source. A regime change
+translates those existing shapes without resizing them or allocating another
+node, resource, particle pool, or reservoir. For each defined feature, its
+center is derived deterministically from the stable `screen_id`, feature kind,
+slot index, and sorted contributor IDs. Each contributor produces its own
+stable candidate center; multiple active contributors use the equal blend of
+those centers. Geometry is always translated from the captured authored shape,
+never from its previous translated position, so `A -> B -> A` returns to the
+exact same A placement without drift. An undefined feature restores its
+authored center and vertices. An explicit zero remains a defined override: its
+stable placement can be retained internally, but its physics and debug guide
+remain absent rather than falling back to the authored feature.
+
 Gate scheduling is an area-weighted layer over the feature mean. Each active
 profile with positive reservoir area and a complete schedule contributes its
 area to the denominator and its currently open area to the numerator. That open
@@ -227,6 +241,15 @@ absolute active set as a successful no-op, so controller retries can be
 acknowledged without repeating stage feature, panel, ecology, or gate-schedule
 application. Ecology and regime-driven gate schedules run when the model day or
 active regime state changes, not once per render frame.
+
+Every real `ModelRegimes` revision also increments the reservoir geometry
+revision before the new regime center is applied. The shader releases any
+reservoir-owned heads in place into downstream flow before they can respond to
+the new-center reservoir physics. Already-recorded orbit trails stay at their
+old positions and fade over the ordinary trail lifetime. Placement is evaluated
+only during initial stage hydration or a real regime transition; it is not
+recomputed or uploaded every frame. The single physical reservoir capacity is
+unchanged even when the profile's desired `reservoir_count` is `2`.
 
 Both shoreline force and swept-crossing lookups map the relevant X interval to
 the local 16th-grid span and one neighboring span on either side. The shader
@@ -289,7 +312,7 @@ and should remain stable even if scene files or display labels are renamed.
 | `scene_4.tscn` | Mill Creek | `mill_creek` |
 | `scene_5.tscn` | Feather River | `feather_river` |
 | `scene_6.tscn` | American River | `american_river` |
-| `scene_7.tscn` | Sacramento-San Joaquin Delta | `delta` |
+| `scene_7.tscn` | Delta | `delta` |
 
 Every production wrapper sets its title explicitly on `GPUFlowStage2D`. The
 stage renders that text bottom-to-top at `-90` degrees, centered on native
@@ -302,12 +325,12 @@ proportional spacing. These are the physical top and bottom centerlines after
 the displays are mounted vertically. The font is part of the project rather
 than resolved from the host operating system.
 
-Only `scene_7.tscn`, the Sacramento-San Joaquin Delta screen, enables the
+Only `scene_7.tscn`, the Delta screen, enables the
 active-regime panel. It is a child of `StageTitleLayer`, reads at `-90`
 degrees, and uses the same Barlow Condensed Medium font and `#4AB0E1` color.
-All entries share a bottom anchor at Y `1050`: the opaque 48-pixel `Regime`
-heading is centered on X `1360`, and the seven 60-pixel names begin on X `1420`
-with 72-pixel centerline spacing. They follow the historical order—Kinship,
+The Delta wrapper hides the optional `Regime` heading, leaving only the seven
+60-pixel names at their existing positions beginning on X `1420` with 72-pixel
+centerline spacing. They follow the historical order—Kinship,
 Agriculture, Gold Rush, Water Projects, Hydropower, Tech, Watershed—with a
 72-pixel column interval. Active names are opaque; inactive names remain
 visible at `0.25` alpha.
@@ -392,7 +415,7 @@ The production scene-to-data assignments are:
 | `scene_4.tscn` | Mill Creek | `mill_creek_720.txt` |
 | `scene_5.tscn` | Feather River | `feather_720.txt` |
 | `scene_6.tscn` | American River | `american_720.txt` |
-| `scene_7.tscn` | Sacramento-San Joaquin Delta | `delta_720.txt` |
+| `scene_7.tscn` | Delta | `delta_720.txt` |
 
 The combined McCloud-Pit display currently uses the McCloud series. The current
 Delta source is a short November 6, 2025–January 17, 2026 gauge-height window in
@@ -721,6 +744,7 @@ Production GPU presentation, regime, calendar, and watershed paths are:
 
 | Runtime path | Compatibility alias | Value/effect |
 |---|---|---|
+| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir, drain/obstacle, shoreline, and source debug geometry without changing physics |
 | `stage.title` | `stage_title` | River display text |
 | `stage.title_visible` | `stage_title_visible` | Title visibility |
 | `stage.regime_panel_visible` | `regime_panel_visible` | Active-regime panel visibility on this screen |
@@ -747,6 +771,18 @@ Production GPU presentation, regime, calendar, and watershed paths are:
 | `regimes.tech` | none | Set Tech active/inactive |
 | `regimes.watershed` | none | Set Watershed active/inactive |
 | `shoreline.randomness` | `shoreline_randomness`, `shorelines.randomness` | Direct per-stage shoreline-force override `0…1`; a later regime change reapplies the normalized shared value |
+
+From the repository root, the fleet controller sends that visibility as an
+absolute state to every configured screen and persists it across fleet starts:
+
+```sh
+python3 fleet/godot_controller.py set --geo FALSE
+python3 fleet/godot_controller.py set --geo TRUE
+```
+
+`FALSE` hides guides/outlines only; reservoirs, drains, obstacles, shorelines,
+and sources keep their current physics. `--geo` can be combined with one or
+more `--regime` arguments in the same `set` command.
 
 The public `set_model_date_time(model_date_time)` method provides the same
 validated external-time handoff as `calendar.date` and `stage.date`;
@@ -777,7 +813,13 @@ these and publishes its resolved `regime_effective_feature_state`,
 `regime_applied_feature_budgets`, `regime_applied_feature_overrides`,
 `regime_feature_presence`, `regime_gate_open_fraction`,
 `regime_reservoir_count_desired_raw`,
-`regime_reservoir_count_rendered`, and `regime_reservoir_renderer_capacity`.
+`regime_reservoir_count_rendered`, `regime_reservoir_renderer_capacity`,
+`regime_geometry_mode`, `regime_geometry_keys`,
+`regime_geometry_update_count`, `regime_geometry_undefined_fallback`,
+`regime_geometry_mixed_contributors`, and
+`regime_geometry_preserves_particle_pools`. Reservoir diagnostics also expose
+`reservoir_center_pixels`, `reservoir_center_pixels_authored`,
+`reservoir_geometry_revision`, and `reservoir_geometry_revision_uniforms`.
 These fields distinguish an undefined feature that preserves authored behavior
 from an explicit-zero override. Shoreline diagnostics are
 `shoreline_randomness`, `shoreline_count`, `shoreline_vertex_count`,

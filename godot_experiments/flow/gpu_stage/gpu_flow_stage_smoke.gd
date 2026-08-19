@@ -777,6 +777,7 @@ func _ready() -> void:
 
 	stage.call(&"queue_control_message", {
 		"changes": {
+			"debug.geometry_visible": true,
 			"flow_rate": 0.75,
 			"velocity_response": 14.0,
 			"reservoir.reservoir_main.gate_open": true,
@@ -839,6 +840,8 @@ func _ready() -> void:
 	summary = stage.call(&"runtime_summary")
 	if not is_equal_approx(float(summary.get("flow_rate", 0.0)), 0.75):
 		errors.append("queued controller flow_rate did not update")
+	if not bool(summary.get("debug_visible", false)):
+		errors.append("absolute controller debug geometry visibility did not update")
 	if not is_equal_approx(float(summary.get("amount_ratio", 0.0)), 0.75):
 		errors.append("controller flow_rate did not update active population")
 	if int(summary.get("active_heads_approx", 0)) != 225:
@@ -1238,6 +1241,10 @@ func _ready() -> void:
 	# Width appears before radius on purpose. The raw request must survive its
 	# temporary clamp against the old radius, then become a true full aperture
 	# after an arbitrary runtime radius larger than the editor's 600 px hint.
+	var native_radius_revision_before := int(summary.get(
+		"reservoir_geometry_revision",
+		-1,
+	))
 	stage.call(&"queue_control_message", {
 		"changes": {
 			"reservoir.reservoir_main.outlet_width": 12.0,
@@ -1257,6 +1264,33 @@ func _ready() -> void:
 		errors.append("large runtime reservoir could not send a full-width gate")
 	if not bool(summary.get("gate_fully_open", false)):
 		errors.append("large runtime reservoir could not reach hard-drain state")
+	var native_radius_revision_after := int(summary.get(
+		"reservoir_geometry_revision",
+		-1,
+	))
+	if native_radius_revision_after != (native_radius_revision_before + 1) % 1000000:
+		errors.append("native reservoir_radius_pixels did not invalidate ownership once")
+	for revision_uniform: Variant in Array(summary.get(
+		"reservoir_geometry_revision_uniforms",
+		[],
+	)):
+		if not is_equal_approx(
+			float(revision_uniform),
+			float(native_radius_revision_after),
+		):
+			errors.append("native reservoir resize revision missed a water shader")
+			break
+	if not bool(stage.call(
+		&"set_runtime_parameter",
+		&"reservoir_radius_pixels",
+		700.0,
+	)):
+		errors.append("idempotent native reservoir radius was rejected")
+	var unchanged_radius_summary: Dictionary = stage.call(&"runtime_summary")
+	if int(unchanged_radius_summary.get("reservoir_geometry_revision", -2)) != (
+		native_radius_revision_after
+	):
+		errors.append("idempotent native reservoir radius flushed ownership")
 	_check_kinship_ecology_schedule(stage, errors)
 	await _check_regime_runtime_stability(stage, errors)
 	await _check_stage_title_reset_independence(stage, errors)
@@ -1546,6 +1580,11 @@ func _check_delta_regime_profile_contracts(
 ) -> void:
 	stage.call(&"set_active_regime_names", ["Gold Rush"])
 	var gold_rush: Dictionary = stage.call(&"runtime_summary")
+	var gold_rush_geometry := _regime_geometry_snapshot(gold_rush)
+	if String(gold_rush.get("regime_geometry_mode", "")) != (
+		"DETERMINISTIC_STABLE_SINGLE_SLOT"
+	):
+		errors.append("regime geometry does not use fixed deterministic slots")
 	var gold_rush_presence: Dictionary = gold_rush.get(
 		"regime_feature_presence",
 		{},
@@ -1558,6 +1597,23 @@ func _check_delta_regime_profile_contracts(
 
 	stage.call(&"set_active_regime_names", ["Hydropower"])
 	var hydropower: Dictionary = stage.call(&"runtime_summary")
+	var hydropower_geometry := _regime_geometry_snapshot(hydropower)
+	if hydropower_geometry == gold_rush_geometry:
+		errors.append("Hydropower reused the Gold Rush feature placement")
+	if int(hydropower.get("reservoir_geometry_revision", 0)) == int(
+		gold_rush.get("reservoir_geometry_revision", 0)
+	):
+		errors.append("regime switch did not flush live reservoir ownership")
+	for revision_uniform: Variant in Array(hydropower.get(
+		"reservoir_geometry_revision_uniforms",
+		[],
+	)):
+		if not is_equal_approx(
+			float(revision_uniform),
+			float(hydropower.get("reservoir_geometry_revision", -1)),
+		):
+			errors.append("reservoir geometry revision missed a water shader")
+			break
 	_expect_regime_feature_values(
 		hydropower,
 		"Hydropower Delta",
@@ -1641,6 +1697,9 @@ func _check_delta_regime_profile_contracts(
 
 	stage.call(&"set_active_regime_names", ["Tech"])
 	var tech: Dictionary = stage.call(&"runtime_summary")
+	var tech_geometry := _regime_geometry_snapshot(tech)
+	if tech_geometry == hydropower_geometry:
+		errors.append("Tech reused the Hydropower feature placement")
 	_expect_regime_feature_values(
 		tech,
 		"Tech Delta",
@@ -1713,7 +1772,114 @@ func _check_delta_regime_profile_contracts(
 		or not bool(watershed_presence.get("obstacle", false))
 	):
 		errors.append("undefined Watershed features did not restore authored presence")
+
+	# A -> B -> A restores the exact candidate pose. Replaying the same absolute
+	# state then performs no extra geometry upload.
+	stage.call(&"set_active_regime_names", ["Gold Rush"])
+	var gold_rush_replay: Dictionary = stage.call(&"runtime_summary")
+	if _regime_geometry_snapshot(gold_rush_replay) != gold_rush_geometry:
+		errors.append("returning to Gold Rush did not restore its exact geometry")
+	var geometry_update_count := int(gold_rush_replay.get(
+		"regime_geometry_update_count",
+		-1,
+	))
+	stage.call(&"set_active_regime_names", ["Gold Rush"])
+	var gold_rush_idempotent: Dictionary = stage.call(&"runtime_summary")
+	if int(gold_rush_idempotent.get("regime_geometry_update_count", -2)) != (
+		geometry_update_count
+	):
+		errors.append("replaying Gold Rush redundantly uploaded geometry")
+
+	# Once the controller reshapes an authored object, that exact resource becomes
+	# controller-owned. Later regime placement must leave the edited vertices alone.
+	var controller_interaction_vertices := [
+		[2.0, 2.0],
+		[3.0, 2.0],
+		[3.0, 3.0],
+		[2.0, 3.0],
+	]
+	var controller_source_vertices := [
+		[12.0, 5.0],
+		[13.0, 5.0],
+		[13.0, 6.0],
+		[12.0, 6.0],
+	]
+	if not bool(stage.call(
+		&"set_runtime_parameter",
+		&"polygon.absorber_test.vertices",
+		controller_interaction_vertices,
+	)):
+		errors.append("controller could not reshape the authored interaction slot")
+	if not bool(stage.call(
+		&"set_runtime_parameter",
+		&"source.source_test.vertices",
+		controller_source_vertices,
+	)):
+		errors.append("controller could not reshape the authored source slot")
+	for regime_name: String in ["Hydropower", "Tech"]:
+		stage.call(&"set_active_regime_names", [regime_name])
+		_expect_controller_geometry_vertices(
+			stage.call(&"runtime_summary"),
+			regime_name,
+			controller_interaction_vertices,
+			controller_source_vertices,
+			errors,
+		)
 	stage.call(&"set_active_regime_names", [])
+	_expect_controller_geometry_vertices(
+		stage.call(&"runtime_summary"),
+		"cleared regimes",
+		controller_interaction_vertices,
+		controller_source_vertices,
+		errors,
+	)
+
+
+func _regime_geometry_snapshot(summary: Dictionary) -> Dictionary:
+	return {
+		"reservoir_center": summary.get("reservoir_center_pixels", Vector2.ZERO),
+		"interactions": Array(summary.get("interaction_polygons", [])).duplicate(true),
+		"sources": Array(summary.get("source_polygons", [])).duplicate(true),
+		"keys": Dictionary(summary.get("regime_geometry_keys", {})).duplicate(true),
+	}
+
+
+func _expect_controller_geometry_vertices(
+	summary: Dictionary,
+	state_label: String,
+	expected_interaction_vertices: Array,
+	expected_source_vertices: Array,
+	errors: PackedStringArray,
+) -> void:
+	if _vertices_for_element(
+		summary,
+		"interaction_polygons",
+		"absorber_test",
+	) != expected_interaction_vertices:
+		errors.append(
+			"%s regime move overwrote controller interaction vertices" % state_label
+		)
+	if _vertices_for_element(
+		summary,
+		"source_polygons",
+		"source_test",
+	) != expected_source_vertices:
+		errors.append(
+			"%s regime move overwrote controller source vertices" % state_label
+		)
+
+
+func _vertices_for_element(
+	summary: Dictionary,
+	collection_key: String,
+	element_id: String,
+) -> Array:
+	for definition_variant: Variant in Array(summary.get(collection_key, [])):
+		if not definition_variant is Dictionary:
+			continue
+		if String(definition_variant.get("element_id", "")) == element_id:
+			return Array(definition_variant.get("vertices", [])).duplicate(true)
+	return []
 
 
 func _expect_regime_feature_values(
@@ -1921,6 +2087,7 @@ func _check_regime_runtime_stability(
 		"regime_ecology_evaluation_count",
 		"gate_state_upload_count",
 		"shoreline_geometry_upload_count",
+		"regime_geometry_update_count",
 	]:
 		if after_idempotent.get(counter_name) != before_idempotent.get(counter_name):
 			errors.append(

@@ -65,7 +65,7 @@ const SCENES: Array[Dictionary] = [
 	{
 		"path": "res://scene_7.tscn",
 		"id": &"delta",
-		"title": "Sacramento-San Joaquin Delta",
+		"title": "Delta",
 	},
 ]
 
@@ -73,6 +73,7 @@ var _failures := PackedStringArray()
 var _seen_ids: Dictionary = {}
 var _expected_timeline_snapshot: Dictionary = {}
 var _shoreline_signature_by_screen: Dictionary = {}
+var _regime_geometry_signature_by_screen: Dictionary = {}
 
 
 func _ready() -> void:
@@ -95,6 +96,13 @@ func _run() -> void:
 	_expect(
 		unique_shoreline_signatures.size() == SCENES.size(),
 		"The seven stages must generate seven distinct shoreline shapes."
+	)
+	var unique_regime_geometry_signatures: Dictionary = {}
+	for geometry_signature: Variant in _regime_geometry_signature_by_screen.values():
+		unique_regime_geometry_signatures[String(geometry_signature)] = true
+	_expect(
+		unique_regime_geometry_signatures.size() == SCENES.size(),
+		"The seven stages must generate distinct regime feature placements."
 	)
 	await _check_two_stage_texture_isolation()
 	_finish()
@@ -940,6 +948,18 @@ func _check_regime_panel(
 		and int(summary.get("regime_name_font_size", 0)) == 60,
 		"%s regime typography does not match the rotated reference." % scene_path
 	)
+	var heading := stage.get_node_or_null(
+		"StageTitleLayer/ActiveRegimes/Heading"
+	) as Label
+	_expect(heading != null, "%s regime heading node is missing." % scene_path)
+	if heading != null:
+		var expected_heading_visible := not expected_visible
+		_expect(
+			heading.visible == expected_heading_visible
+			and bool(summary.get("regime_heading_visible", false))
+				== expected_heading_visible,
+			"%s must hide the Regime heading on Delta only." % scene_path
+		)
 	_expect(
 		water_viewport == null or not water_viewport.is_ancestor_of(panel),
 		"%s regime panel must remain outside water occupancy." % scene_path
@@ -1383,6 +1403,9 @@ func _check_shoreline(
 	_shoreline_signature_by_screen[String(expected_id)] = (
 		_shoreline_geometry_signature(summary)
 	)
+	_regime_geometry_signature_by_screen[String(expected_id)] = (
+		_regime_geometry_signature(summary)
+	)
 
 
 func _shoreline_geometry_signature(summary: Dictionary) -> String:
@@ -1401,6 +1424,31 @@ func _shoreline_geometry_signature(summary: Dictionary) -> String:
 			continue
 		for point: Vector2 in PackedVector2Array(vertices_variant):
 			parts.append("%.6f,%.6f" % [point.x, point.y])
+	return "|".join(parts)
+
+
+func _regime_geometry_signature(summary: Dictionary) -> String:
+	var parts := PackedStringArray()
+	var center := Vector2(summary.get("reservoir_center_pixels", Vector2.ZERO))
+	parts.append("reservoir=%.6f,%.6f" % [center.x, center.y])
+	for collection_name: String in ["interaction_polygons", "source_polygons"]:
+		for definition_variant: Variant in Array(summary.get(collection_name, [])):
+			if not definition_variant is Dictionary:
+				continue
+			var definition: Dictionary = definition_variant
+			parts.append(String(definition.get("element_id", "")))
+			var vertices_variant: Variant = definition.get(
+				"vertices",
+				PackedVector2Array(),
+			)
+			if not vertices_variant is Array:
+				continue
+			for point_variant: Variant in Array(vertices_variant):
+				if point_variant is Array and Array(point_variant).size() >= 2:
+					parts.append("%.6f,%.6f" % [
+						float(Array(point_variant)[0]),
+						float(Array(point_variant)[1]),
+					])
 	return "|".join(parts)
 
 

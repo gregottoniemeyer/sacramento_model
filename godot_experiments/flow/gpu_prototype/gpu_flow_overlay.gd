@@ -12,6 +12,7 @@ var reservoir_radius: float = RESERVOIR_RADIUS
 var reservoir_visible: bool = true
 var drain_visible: bool = true
 var obstacle_visible: bool = true
+var source_visible: bool = true
 var show_status_label: bool = true
 var interaction_polygons: Array[Dictionary] = []
 var shoreline_obstacles: Array[Dictionary] = []
@@ -42,21 +43,32 @@ func set_feature_visibility(
 	show_reservoir: bool,
 	show_drains: bool,
 	show_obstacles: bool,
+	show_sources: bool,
 ) -> void:
 	if (
 		reservoir_visible == show_reservoir
 		and drain_visible == show_drains
 		and obstacle_visible == show_obstacles
+		and source_visible == show_sources
 	):
 		return
 	reservoir_visible = show_reservoir
 	drain_visible = show_drains
 	obstacle_visible = show_obstacles
+	source_visible = show_sources
 	queue_redraw()
 
 
 func is_reservoir_visible() -> bool:
 	return reservoir_visible
+
+
+func is_source_visible() -> bool:
+	return source_visible
+
+
+func get_visible_source_polygon_count() -> int:
+	return source_polygons.size() if source_visible else 0
 
 
 func get_visible_interaction_polygon_count() -> int:
@@ -104,7 +116,8 @@ func _draw() -> void:
 		_draw_reservoir()
 	_draw_interaction_polygons()
 	_draw_shoreline_obstacles()
-	_draw_source_polygons()
+	if source_visible:
+		_draw_source_polygons()
 	draw_rect(Rect2(Vector2.ZERO, STAGE_SIZE), Color("1f3642"), false, 2.0)
 	if not show_status_label:
 		return

@@ -48,8 +48,18 @@ python3 fleet/godot_controller.py list
 python3 fleet/godot_controller.py regime-clear
 python3 fleet/godot_controller.py set --regime kinship
 python3 fleet/godot_controller.py set --regime kinship --regime tech
+python3 fleet/godot_controller.py set --geo FALSE
+python3 fleet/godot_controller.py set --regime kinship --geo TRUE
 python3 fleet/godot_controller.py regime-console
 ```
+
+`set --geo TRUE/FALSE` sets obstacle/debug geometry to an absolute state on all
+seven screens. `FALSE` hides the reservoir guide, obstacle/drain outlines, and
+source outlines without changing their physics; `TRUE` shows them. A
+geometry-only `set` preserves the saved regime set, while a combined command
+replaces the regime set and changes geometry visibility together. The geometry
+value is persisted and reapplied by `start` and `restart`. Values are
+case-insensitive, but must be `TRUE` or `FALSE`.
 
 Inside `regime-console`, keys `1` through `7` toggle Kinship, Agriculture,
 Gold Rush, Water Projects, Hydropower, Tech, and Watershed. Press `c` to clear
@@ -74,6 +84,10 @@ until every process reports the exact screen IDs and count configured for that
 Mac, and prints `APPLIED` only after every process also acknowledges the exact
 regime state. A missing or mismatched acknowledgement is an error rather than a
 successful send.
+
+For `--geo`, the acknowledgement also reports applied visibility by screen ID.
+Stages apply routed control at a frame boundary, so the controller retries the
+same absolute packet until every configured screen reports the requested value.
 
 All seven production wrappers consume their own screen row for the first six
 regimes. The master

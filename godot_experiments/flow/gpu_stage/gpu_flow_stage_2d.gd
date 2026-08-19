@@ -133,6 +133,10 @@ const SHORELINE_MIN_CHANNEL_HEIGHT_WORLD := 5.25
 const SHORELINE_INFLUENCE_WORLD := 0.75
 const SHORELINE_INLET_BASE_MARGIN_PIXELS := 28.0
 const SHORELINE_CLOSURE_MARGIN_WORLD := 2.0
+const REGIME_GEOMETRY_BASELINE_KEY := "authored"
+const REGIME_GEOMETRY_WORLD_EDGE_MARGIN := 0.25
+const REGIME_RESERVOIR_X_FRACTION_RANGE := Vector2(0.32, 0.82)
+const REGIME_RESERVOIR_Y_FRACTION_RANGE := Vector2(0.24, 0.76)
 const TYPE_ROTATION_RADIANS := -PI * 0.5
 const TYPE_ROTATION_DEGREES := -90.0
 const STAGE_TITLE_POSITION := Vector2(60.0, 540.0)
@@ -184,6 +188,10 @@ const DEFAULT_GRID_COLOR := Color(
 @export var regime_panel_visible: bool = false:
 	set(value):
 		regime_panel_visible = value
+		_apply_regime_panel()
+@export var regime_heading_visible: bool = true:
+	set(value):
+		regime_heading_visible = value
 		_apply_regime_panel()
 
 @export_group("Regime Modulation")
@@ -374,6 +382,7 @@ var _regime_source_override_enabled: bool = false
 var _regime_reservoir_present: bool = true
 var _regime_drain_present: bool = true
 var _regime_obstacle_present: bool = true
+var _regime_source_present: bool = true
 var _regime_reservoir_weight: float = 1.0
 var _regime_drain_weight: float = 1.0
 var _regime_drain_power: float = 1.0
@@ -389,6 +398,21 @@ var _regime_salmon_activity: float = 0.0
 var _regime_leaf_activity: float = 0.0
 var _last_regime_salmon_release_day: int = -1
 var _last_regime_leaf_release_day: int = -1
+var _regime_geometry_initialized: bool = false
+var _authored_reservoir_center_pixels := Vector2.ZERO
+var _authored_interaction_vertices: Dictionary = {}
+var _authored_interaction_instance_ids: Dictionary = {}
+var _authored_source_vertices: Dictionary = {}
+var _authored_source_instance_ids: Dictionary = {}
+var _applied_regime_geometry_keys: Dictionary = {
+	"reservoir": "",
+	"drain": "",
+	"obstacle": "",
+	"source": "",
+}
+var _reservoir_geometry_revision: int = 0
+var _applied_regime_state_revision: int = -1
+var _regime_geometry_update_count: int = 0
 var _source_texture_packer: GPUFlowSourceTexturePacker
 var _source_data_texture: ImageTexture
 var _source_geometry_batch_depth: int = 0
@@ -429,6 +453,8 @@ func _ready() -> void:
 	_apply_regime_features_from_state(_regime_snapshot)
 	_install_default_interaction_polygons_if_needed()
 	_install_default_source_polygons_if_needed()
+	_capture_authored_regime_geometry()
+	_apply_regime_geometry_from_state()
 	_source_texture_packer = SOURCE_TEXTURE_PACKER_SCRIPT.new(
 		STAGE_SIZE,
 		WORLD_SIZE
@@ -816,6 +842,16 @@ func _bind_model_regimes() -> void:
 
 
 func _on_model_regimes_changed(state: Dictionary) -> void:
+	var next_regime_revision := int(state.get("revision", 0))
+	if (
+		_regime_geometry_initialized
+		and next_regime_revision != _applied_regime_state_revision
+	):
+		# A real regime transition releases every reservoir-owned head in place.
+		# The shader observes this revision before reading the next reservoir center;
+		# immutable orbit trails then fade while the water resumes downstream flow.
+		_advance_reservoir_geometry_revision()
+	_applied_regime_state_revision = next_regime_revision
 	_regime_snapshot = state.duplicate(true)
 	_apply_regime_features_from_state(_regime_snapshot)
 	_apply_regime_panel()
@@ -845,6 +881,7 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 		_regime_reservoir_present = true
 		_regime_drain_present = true
 		_regime_obstacle_present = true
+		_regime_source_present = true
 		_regime_reservoir_weight = 1.0
 		_regime_drain_weight = 1.0
 		_regime_drain_power = 1.0
@@ -853,6 +890,7 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 		_regime_source_weight = 1.0
 		_regime_reservoir_count = 0.0
 		set_shoreline_randomness(0.0)
+		_apply_regime_geometry_from_state()
 		_apply_regime_shader_parameters()
 		return
 	_regime_reservoir_override_enabled = _regime_feature_is_defined(
@@ -938,6 +976,10 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 		not _regime_obstacle_override_enabled
 		or _regime_obstacle_weight > 0.000001
 	)
+	_regime_source_present = (
+		not _regime_source_override_enabled
+		or _regime_source_weight > 0.000001
+	)
 	_regime_gate_aperture_override_enabled = _regime_feature_is_defined(
 		_regime_feature_state_for_screen,
 		"reservoir_gate_aperture_fraction",
@@ -952,6 +994,7 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 		"shoreline_randomness",
 		0.0,
 	))
+	_apply_regime_geometry_from_state()
 	_apply_regime_shader_parameters()
 
 
@@ -1009,6 +1052,343 @@ func _regime_fraction(features: Dictionary, feature_name: String) -> float:
 	if not is_finite(numeric_value):
 		return 0.0
 	return clampf(numeric_value, 0.0, 1.0)
+
+
+func _capture_authored_regime_geometry() -> void:
+	## Keep immutable fallbacks for a cleared/undefined regime. Runtime switching
+	## only translates these existing slots; it never appends resources or nodes.
+	if _regime_geometry_initialized:
+		return
+	_authored_reservoir_center_pixels = reservoir_center_pixels
+	_authored_interaction_vertices.clear()
+	_authored_interaction_instance_ids.clear()
+	for polygon: GPUFlowInteractionPolygon in _gpu_interaction_polygons():
+		_authored_interaction_vertices[String(polygon.element_id)] = (
+			polygon.vertices.duplicate()
+		)
+		_authored_interaction_instance_ids[String(polygon.element_id)] = (
+			polygon.get_instance_id()
+		)
+	_authored_source_vertices.clear()
+	_authored_source_instance_ids.clear()
+	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
+		_authored_source_vertices[String(source.element_id)] = (
+			source.vertices.duplicate()
+		)
+		_authored_source_instance_ids[String(source.element_id)] = (
+			source.get_instance_id()
+		)
+	_regime_geometry_initialized = true
+	_applied_regime_state_revision = int(_regime_snapshot.get("revision", 0))
+
+
+func _regime_feature_contributor_ids(feature_name: String) -> Array[String]:
+	var result: Array[String] = []
+	var state_variant: Variant = _regime_feature_state_for_screen.get(
+		feature_name,
+		{},
+	)
+	if not state_variant is Dictionary:
+		return result
+	var state: Dictionary = state_variant
+	if not bool(state.get("defined", false)):
+		return result
+	var contributor_variant: Variant = state.get("contributor_ids", [])
+	if not contributor_variant is Array:
+		return result
+	for contributor_id_variant: Variant in contributor_variant:
+		var contributor_id := String(contributor_id_variant)
+		if not contributor_id.is_empty() and not result.has(contributor_id):
+			result.append(contributor_id)
+	result.sort()
+	return result
+
+
+func _regime_geometry_key(feature_name: String) -> String:
+	if (
+		not regime_profile_physics_enabled
+		or not _regime_feature_is_defined(
+			_regime_feature_state_for_screen,
+			feature_name,
+		)
+	):
+		return REGIME_GEOMETRY_BASELINE_KEY
+	var contributors := _regime_feature_contributor_ids(feature_name)
+	return "defined:%s" % "|".join(PackedStringArray(contributors))
+
+
+func _regime_seeded_center_world(
+	feature_kind: String,
+	contributors: Array[String],
+	slot_index: int,
+	half_extent: Vector2,
+) -> Vector2:
+	var region := Rect2(
+		Vector2(REGIME_GEOMETRY_WORLD_EDGE_MARGIN, 1.0),
+		Vector2(
+			WORLD_SIZE.x - REGIME_GEOMETRY_WORLD_EDGE_MARGIN * 2.0,
+			WORLD_SIZE.y - 2.0,
+		),
+	)
+	match feature_kind:
+		"drain":
+			region = Rect2(Vector2(2.0, 1.0), Vector2(11.5, 3.1))
+		"obstacle":
+			region = Rect2(Vector2(3.0, 4.7), Vector2(11.0, 3.2))
+		"source":
+			region = Rect2(Vector2(0.8, 1.4), Vector2(4.8, 6.2))
+	var minimum_center := region.position + half_extent
+	var maximum_center := region.end - half_extent
+	if maximum_center.x < minimum_center.x:
+		minimum_center.x = region.get_center().x
+		maximum_center.x = minimum_center.x
+	if maximum_center.y < minimum_center.y:
+		minimum_center.y = region.get_center().y
+		maximum_center.y = minimum_center.y
+	if contributors.is_empty():
+		return region.get_center()
+	var blended_center := Vector2.ZERO
+	for contributor_id: String in contributors:
+		var seed_prefix := "%s:%s:%s:%d" % [
+			String(screen_id),
+			contributor_id,
+			feature_kind,
+			slot_index,
+		]
+		blended_center += Vector2(
+			lerpf(
+				minimum_center.x,
+				maximum_center.x,
+				_stable_interaction_seed(StringName(seed_prefix + ":x")),
+			),
+			lerpf(
+				minimum_center.y,
+				maximum_center.y,
+				_stable_interaction_seed(StringName(seed_prefix + ":y")),
+			),
+		)
+	return blended_center / float(contributors.size())
+
+
+func _regime_seeded_reservoir_center_pixels(
+	contributors: Array[String],
+) -> Vector2:
+	if contributors.is_empty():
+		return _authored_reservoir_center_pixels
+	var minimum_center := Vector2(
+		maxf(
+			STAGE_SIZE.x * REGIME_RESERVOIR_X_FRACTION_RANGE.x,
+			reservoir_radius_pixels + reservoir_influence_pixels + 32.0,
+		),
+		maxf(
+			STAGE_SIZE.y * REGIME_RESERVOIR_Y_FRACTION_RANGE.x,
+			reservoir_radius_pixels + 32.0,
+		),
+	)
+	var maximum_center := Vector2(
+		minf(
+			STAGE_SIZE.x * REGIME_RESERVOIR_X_FRACTION_RANGE.y,
+			STAGE_SIZE.x - reservoir_radius_pixels - 64.0,
+		),
+		minf(
+			STAGE_SIZE.y * REGIME_RESERVOIR_Y_FRACTION_RANGE.y,
+			STAGE_SIZE.y - reservoir_radius_pixels - 32.0,
+		),
+	)
+	maximum_center = maximum_center.max(minimum_center)
+	var blended_center := Vector2.ZERO
+	for contributor_id: String in contributors:
+		var seed_prefix := "%s:%s:reservoir:0" % [
+			String(screen_id),
+			contributor_id,
+		]
+		blended_center += Vector2(
+			lerpf(
+				minimum_center.x,
+				maximum_center.x,
+				_stable_interaction_seed(StringName(seed_prefix + ":x")),
+			),
+			lerpf(
+				minimum_center.y,
+				maximum_center.y,
+				_stable_interaction_seed(StringName(seed_prefix + ":y")),
+			),
+		)
+	return blended_center / float(contributors.size())
+
+
+func _world_polygon_bounds(vertices: PackedVector2Array) -> Rect2:
+	if vertices.is_empty():
+		return Rect2()
+	var minimum := vertices[0]
+	var maximum := vertices[0]
+	for vertex: Vector2 in vertices:
+		minimum = minimum.min(vertex)
+		maximum = maximum.max(vertex)
+	return Rect2(minimum, maximum - minimum)
+
+
+func _translated_polygon_vertices(
+	vertices: PackedVector2Array,
+	target_center: Vector2,
+) -> PackedVector2Array:
+	var translated := PackedVector2Array()
+	if vertices.is_empty():
+		return translated
+	var centroid := Vector2.ZERO
+	for vertex: Vector2 in vertices:
+		centroid += vertex
+	centroid /= float(vertices.size())
+	var offset := target_center - centroid
+	for vertex: Vector2 in vertices:
+		translated.append(vertex + offset)
+	return translated
+
+
+func _packed_vector2_arrays_equal(
+	first: PackedVector2Array,
+	second: PackedVector2Array,
+) -> bool:
+	if first.size() != second.size():
+		return false
+	for index in range(first.size()):
+		if not first[index].is_equal_approx(second[index]):
+			return false
+	return true
+
+
+func _advance_reservoir_geometry_revision() -> void:
+	_reservoir_geometry_revision = (_reservoir_geometry_revision + 1) % 1000000
+	for process_material in _process_material_layers:
+		process_material.set_shader_parameter(
+			&"reservoir_geometry_revision",
+			float(_reservoir_geometry_revision),
+		)
+
+
+func _apply_regime_geometry_from_state() -> void:
+	if not _regime_geometry_initialized:
+		return
+	var reservoir_key := _regime_geometry_key("reservoir_area_fraction")
+	var drain_key := _regime_geometry_key("drain_area_fraction")
+	var obstacle_key := _regime_geometry_key("obstacle_area_fraction")
+	var source_key := _regime_geometry_key("source_area_fraction")
+	var any_geometry_changed := false
+
+	if String(_applied_regime_geometry_keys.get("reservoir", "")) != reservoir_key:
+		var next_reservoir_center := _authored_reservoir_center_pixels
+		if reservoir_key != REGIME_GEOMETRY_BASELINE_KEY:
+			next_reservoir_center = _regime_seeded_reservoir_center_pixels(
+				_regime_feature_contributor_ids("reservoir_area_fraction"),
+			)
+		if not reservoir_center_pixels.is_equal_approx(next_reservoir_center):
+			reservoir_center_pixels = next_reservoir_center
+			for process_material in _process_material_layers:
+				process_material.set_shader_parameter(
+					&"reservoir_center",
+					reservoir_center_pixels,
+				)
+			if _overlay != null:
+				_overlay.call(
+					&"set_reservoir_geometry",
+					reservoir_center_pixels,
+					reservoir_radius_pixels,
+				)
+			any_geometry_changed = true
+		_applied_regime_geometry_keys["reservoir"] = reservoir_key
+
+	var interaction_geometry_changed := false
+	var drain_slot := 0
+	var obstacle_slot := 0
+	for polygon: GPUFlowInteractionPolygon in _gpu_interaction_polygons():
+		var element_id := String(polygon.element_id)
+		# Geometry added or vertex-edited by the controller remains controller-owned.
+		# Only the exact startup resources captured above participate in regime moves.
+		if (
+			not _authored_interaction_vertices.has(element_id)
+			or int(_authored_interaction_instance_ids.get(element_id, -1))
+				!= polygon.get_instance_id()
+		):
+			continue
+		var baseline_variant: Variant = _authored_interaction_vertices[element_id]
+		var baseline_vertices: PackedVector2Array = baseline_variant
+		var feature_kind := (
+			"drain"
+			if polygon.mode == GPUFlowInteractionPolygon.Mode.ABSORB
+			else "obstacle"
+		)
+		var feature_name := (
+			"drain_area_fraction"
+			if feature_kind == "drain"
+			else "obstacle_area_fraction"
+		)
+		var feature_key := drain_key if feature_kind == "drain" else obstacle_key
+		var slot_index := drain_slot if feature_kind == "drain" else obstacle_slot
+		if feature_kind == "drain":
+			drain_slot += 1
+		else:
+			obstacle_slot += 1
+		var target_vertices := baseline_vertices.duplicate()
+		if feature_key != REGIME_GEOMETRY_BASELINE_KEY:
+			var bounds := _world_polygon_bounds(baseline_vertices)
+			target_vertices = _translated_polygon_vertices(
+				baseline_vertices,
+				_regime_seeded_center_world(
+					feature_kind,
+					_regime_feature_contributor_ids(feature_name),
+					slot_index,
+					bounds.size * 0.5,
+				),
+			)
+		if not _packed_vector2_arrays_equal(polygon.vertices, target_vertices):
+			polygon.vertices = target_vertices
+			interaction_geometry_changed = true
+	_applied_regime_geometry_keys["drain"] = drain_key
+	_applied_regime_geometry_keys["obstacle"] = obstacle_key
+	if interaction_geometry_changed:
+		if not _process_material_layers.is_empty():
+			_apply_interaction_geometry()
+		any_geometry_changed = true
+
+	var source_geometry_changed := false
+	var source_contributors := _regime_feature_contributor_ids(
+		"source_area_fraction",
+	)
+	var source_slot := 0
+	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
+		var element_id := String(source.element_id)
+		if (
+			not _authored_source_vertices.has(element_id)
+			or int(_authored_source_instance_ids.get(element_id, -1))
+				!= source.get_instance_id()
+		):
+			continue
+		var baseline_variant: Variant = _authored_source_vertices[element_id]
+		var baseline_vertices: PackedVector2Array = baseline_variant
+		var target_vertices := baseline_vertices.duplicate()
+		if source_key != REGIME_GEOMETRY_BASELINE_KEY:
+			var bounds := _world_polygon_bounds(baseline_vertices)
+			target_vertices = _translated_polygon_vertices(
+				baseline_vertices,
+				_regime_seeded_center_world(
+					"source",
+					source_contributors,
+					source_slot,
+					bounds.size * 0.5,
+				),
+			)
+		if not _packed_vector2_arrays_equal(source.vertices, target_vertices):
+			source.vertices = target_vertices
+			source_geometry_changed = true
+		source_slot += 1
+	_applied_regime_geometry_keys["source"] = source_key
+	if source_geometry_changed:
+		if not _process_material_layers.is_empty():
+			_apply_source_geometry()
+		any_geometry_changed = true
+
+	if any_geometry_changed:
+		_regime_geometry_update_count += 1
 
 
 func _apply_regime_shader_parameters() -> void:
@@ -1069,12 +1449,17 @@ func _apply_regime_shader_parameters() -> void:
 			&"regime_source_weight",
 			_regime_source_weight
 		)
+		process_material.set_shader_parameter(
+			&"reservoir_geometry_revision",
+			float(_reservoir_geometry_revision)
+		)
 	if _overlay != null:
 		_overlay.call(
 			&"set_feature_visibility",
 			_regime_reservoir_present,
 			_regime_drain_present,
 			_regime_obstacle_present,
+			_regime_source_present,
 		)
 
 
@@ -1483,6 +1868,9 @@ func set_runtime_parameter(
 	# Presentation-only changes must never rebuild particle materials or ecology
 	# pools. The setters update the screen-fixed label directly.
 	match path_string:
+		"debug.geometry_visible", "debug_visible":
+			set_debug_visible(bool(value))
+			return true
 		"stage.title", "stage_title":
 			stage_title = String(value)
 			return true
@@ -1491,6 +1879,9 @@ func set_runtime_parameter(
 			return true
 		"stage.regime_panel_visible", "regime_panel_visible":
 			regime_panel_visible = bool(value)
+			return true
+		"stage.regime_heading_visible", "regime_heading_visible":
+			regime_heading_visible = bool(value)
 			return true
 		"stage.grid_visible", "stage_grid_visible":
 			stage_grid_visible = bool(value)
@@ -1749,21 +2140,43 @@ func set_runtime_parameter(
 			gate_width = float(value)
 		"reservoir_center_pixels":
 			var parsed_center := _variant_to_vector2(value, reservoir_center_pixels)
-			reservoir_center_pixels = parsed_center
+			if not reservoir_center_pixels.is_equal_approx(parsed_center):
+				reservoir_center_pixels = parsed_center
+				if _regime_geometry_initialized:
+					_authored_reservoir_center_pixels = reservoir_center_pixels
+					_advance_reservoir_geometry_revision()
 		"reservoir.reservoir_main.x":
-			reservoir_center_pixels.x = float(value) * PIXELS_PER_WORLD_UNIT
+			var next_x := float(value) * PIXELS_PER_WORLD_UNIT
+			if not is_equal_approx(reservoir_center_pixels.x, next_x):
+				reservoir_center_pixels.x = next_x
+				if _regime_geometry_initialized:
+					_authored_reservoir_center_pixels.x = next_x
+					_advance_reservoir_geometry_revision()
 		"reservoir.reservoir_main.y":
-			reservoir_center_pixels.y = (
+			var next_y := (
 				WORLD_SIZE.y - float(value)
 			) * PIXELS_PER_WORLD_UNIT
+			if not is_equal_approx(reservoir_center_pixels.y, next_y):
+				reservoir_center_pixels.y = next_y
+				if _regime_geometry_initialized:
+					_authored_reservoir_center_pixels.y = next_y
+					_advance_reservoir_geometry_revision()
 		"reservoir.reservoir_main.radius":
-			reservoir_radius_pixels = maxf(float(value) * PIXELS_PER_WORLD_UNIT, 1.0)
-			_refresh_gate_width_for_reservoir()
+			var next_radius := maxf(float(value) * PIXELS_PER_WORLD_UNIT, 1.0)
+			if not is_equal_approx(reservoir_radius_pixels, next_radius):
+				reservoir_radius_pixels = next_radius
+				if _regime_geometry_initialized:
+					_advance_reservoir_geometry_revision()
+				_refresh_gate_width_for_reservoir()
 		"reservoir.reservoir_main.wall_influence":
-			reservoir_influence_pixels = maxf(
+			var next_influence := maxf(
 				float(value) * PIXELS_PER_WORLD_UNIT,
 				0.0
 			)
+			if not is_equal_approx(reservoir_influence_pixels, next_influence):
+				reservoir_influence_pixels = next_influence
+				if _regime_geometry_initialized:
+					_advance_reservoir_geometry_revision()
 		"reservoir.reservoir_main.circulation":
 			reservoir_swirl_speed = maxf(float(value) * 72.5, 0.0)
 		"reservoir.reservoir_main.swirl_strength":
@@ -1793,10 +2206,18 @@ func set_runtime_parameter(
 		"reservoir.reservoir_main.gate_staging_radius_ratio":
 			reservoir_gate_staging_radius_ratio = clampf(float(value), 0.50, 0.95)
 		"reservoir_radius_pixels":
-			reservoir_radius_pixels = maxf(float(value), 8.0)
-			_refresh_gate_width_for_reservoir()
+			var next_radius := maxf(float(value), 8.0)
+			if not is_equal_approx(reservoir_radius_pixels, next_radius):
+				reservoir_radius_pixels = next_radius
+				if _regime_geometry_initialized:
+					_advance_reservoir_geometry_revision()
+				_refresh_gate_width_for_reservoir()
 		"reservoir_influence_pixels":
-			reservoir_influence_pixels = maxf(float(value), 0.0)
+			var next_influence := maxf(float(value), 0.0)
+			if not is_equal_approx(reservoir_influence_pixels, next_influence):
+				reservoir_influence_pixels = next_influence
+				if _regime_geometry_initialized:
+					_advance_reservoir_geometry_revision()
 		"reservoir_swirl_speed":
 			reservoir_swirl_speed = maxf(float(value), 0.0)
 		"reservoir_orbit_radius_min_ratio":
@@ -1833,12 +2254,16 @@ func set_runtime_parameter(
 
 func _is_direct_apply_parameter_path(path: String) -> bool:
 	return path in [
+		"debug.geometry_visible",
+		"debug_visible",
 		"stage.title",
 		"stage_title",
 		"stage.title_visible",
 		"stage_title_visible",
 		"stage.regime_panel_visible",
 		"regime_panel_visible",
+		"stage.regime_heading_visible",
+		"regime_heading_visible",
 		"stage.grid_visible",
 		"stage_grid_visible",
 		"stage.grid_spacing_pixels",
@@ -1907,6 +2332,7 @@ func runtime_summary() -> Dictionary:
 	var gate_open_uniforms: Array[bool] = []
 	var gate_half_width_uniforms: Array[float] = []
 	var reservoir_center_uniforms: Array[Vector2] = []
+	var reservoir_geometry_revision_uniforms: Array[float] = []
 	var reservoir_radius_uniforms: Array[float] = []
 	var reservoir_admission_enabled_uniforms: Array[bool] = []
 	var regime_profile_physics_enabled_uniforms: Array[bool] = []
@@ -1981,6 +2407,9 @@ func runtime_summary() -> Dictionary:
 		))
 		reservoir_center_uniforms.append(Vector2(
 			process_material.get_shader_parameter(&"reservoir_center")
+		))
+		reservoir_geometry_revision_uniforms.append(float(
+			process_material.get_shader_parameter(&"reservoir_geometry_revision")
 		))
 		reservoir_radius_uniforms.append(float(
 			process_material.get_shader_parameter(&"reservoir_radius")
@@ -2179,11 +2608,18 @@ func runtime_summary() -> Dictionary:
 			"reservoir": _regime_reservoir_present,
 			"drain": _regime_drain_present,
 			"obstacle": _regime_obstacle_present,
+			"source": _regime_source_present,
 		},
 		"regime_gate_open_fraction": _regime_gate_open_fraction,
 		"regime_reservoir_count_desired_raw": _regime_reservoir_count,
 		"regime_reservoir_count_rendered": 1 if _regime_reservoir_present else 0,
 		"regime_reservoir_renderer_capacity": 1,
+		"regime_geometry_mode": "DETERMINISTIC_STABLE_SINGLE_SLOT",
+		"regime_geometry_keys": _applied_regime_geometry_keys.duplicate(true),
+		"regime_geometry_update_count": _regime_geometry_update_count,
+		"regime_geometry_undefined_fallback": "AUTHORED_GEOMETRY",
+		"regime_geometry_mixed_contributors": "EQUAL_CENTER_BLEND",
+		"regime_geometry_preserves_particle_pools": true,
 		"regime_salmon_activity": _regime_salmon_activity,
 		"regime_leaf_activity": _regime_leaf_activity,
 		"regime_last_salmon_release_day_index": _last_regime_salmon_release_day,
@@ -2196,6 +2632,11 @@ func runtime_summary() -> Dictionary:
 		),
 		"regime_panel_position": REGIME_PANEL_POSITION,
 		"regime_panel_rotation_degrees": TYPE_ROTATION_DEGREES,
+		"regime_heading_visible": (
+			_regime_heading_label.visible
+			if _regime_heading_label != null
+			else false
+		),
 		"regime_heading_text": REGIME_HEADING_TEXT,
 		"regime_heading_font_size": REGIME_HEADING_FONT_SIZE,
 		"regime_name_font_size": REGIME_NAME_FONT_SIZE,
@@ -2390,6 +2831,16 @@ func runtime_summary() -> Dictionary:
 			if _overlay != null
 			else 0
 		),
+		"source_overlay_visible": (
+			bool(_overlay.call(&"is_source_visible"))
+			if _overlay != null
+			else false
+		),
+		"source_overlay_visible_count": (
+			int(_overlay.call(&"get_visible_source_polygon_count"))
+			if _overlay != null
+			else 0
+		),
 		"salmon_enabled": salmon_enabled,
 		"salmon_per_release": salmon_per_release,
 		"salmon_min_speed_pixels": salmon_min_speed_pixels,
@@ -2524,6 +2975,11 @@ func runtime_summary() -> Dictionary:
 		"reservoir_entry_min_inward_speed_ratio": reservoir_entry_min_inward_speed_ratio,
 		"reservoir_gate_staging_radius_ratio": reservoir_gate_staging_radius_ratio,
 		"reservoir_center_pixels": reservoir_center_pixels,
+		"reservoir_center_pixels_authored": _authored_reservoir_center_pixels,
+		"reservoir_geometry_revision": _reservoir_geometry_revision,
+		"reservoir_geometry_revision_uniforms": (
+			reservoir_geometry_revision_uniforms
+		),
 		"reservoir_radius_pixels": reservoir_radius_pixels,
 		"reservoir_center_uniform": _process_material.get_shader_parameter(
 			&"reservoir_center"
@@ -2848,7 +3304,10 @@ func _set_source_parameter_by_path(path: String, value: Variant) -> bool:
 			field = "flow_direction"
 		"id", "element_id":
 			return false
-	return source.apply_dictionary({field: value})
+	var updated := source.apply_dictionary({field: value})
+	if updated and field == "vertices":
+		_release_source_from_regime_geometry(source.element_id)
+	return updated
 
 
 func _set_interaction_parameter_by_path(path: String, value: Variant) -> bool:
@@ -2869,7 +3328,22 @@ func _set_interaction_parameter_by_path(path: String, value: Variant) -> bool:
 		"id", "element_id":
 			# Stable controller IDs are immutable. Remove and upsert to rename one.
 			return false
-	return polygon.apply_dictionary({field: value})
+	var updated := polygon.apply_dictionary({field: value})
+	if updated and field == "vertices":
+		_release_interaction_from_regime_geometry(polygon.element_id)
+	return updated
+
+
+func _release_interaction_from_regime_geometry(element_id: StringName) -> void:
+	var key := String(element_id)
+	_authored_interaction_vertices.erase(key)
+	_authored_interaction_instance_ids.erase(key)
+
+
+func _release_source_from_regime_geometry(element_id: StringName) -> void:
+	var key := String(element_id)
+	_authored_source_vertices.erase(key)
+	_authored_source_instance_ids.erase(key)
 
 
 func _upsert_interaction_polygon(operation: Dictionary, kind: String) -> bool:
@@ -2897,6 +3371,8 @@ func _upsert_interaction_polygon(operation: Dictionary, kind: String) -> bool:
 	var existing := _find_interaction_polygon(element_id)
 	if existing != null:
 		var updated := existing.apply_dictionary(definition)
+		if updated and definition.has("vertices"):
+			_release_interaction_from_regime_geometry(element_id)
 		if updated:
 			_apply_interaction_geometry()
 		return updated
@@ -2918,6 +3394,7 @@ func _remove_interaction_polygon(element_id: StringName) -> bool:
 	var polygon := interaction_polygons[polygon_index]
 	_disconnect_interaction_polygon(polygon)
 	interaction_polygons.remove_at(polygon_index)
+	_release_interaction_from_regime_geometry(element_id)
 	_apply_interaction_geometry()
 	return true
 
@@ -2947,6 +3424,8 @@ func _replace_interaction_polygons(values: Array) -> bool:
 	for old_polygon: GPUFlowInteractionPolygon in interaction_polygons:
 		_disconnect_interaction_polygon(old_polygon)
 	interaction_polygons = replacements
+	_authored_interaction_vertices.clear()
+	_authored_interaction_instance_ids.clear()
 	_bind_interaction_polygon_signals()
 	_apply_interaction_geometry()
 	return true
@@ -2968,7 +3447,10 @@ func _upsert_source_polygon(operation: Dictionary) -> bool:
 	definition["element_id"] = String(element_id)
 	var existing := _find_source_polygon(element_id)
 	if existing != null:
-		return existing.apply_dictionary(definition)
+		var updated := existing.apply_dictionary(definition)
+		if updated and definition.has("vertices"):
+			_release_source_from_regime_geometry(element_id)
+		return updated
 	if source_polygons.size() >= MAX_SOURCE_POLYGONS:
 		return false
 	var created := GPUFlowSourcePolygon.new()
@@ -2987,6 +3469,7 @@ func _remove_source_polygon(element_id: StringName) -> bool:
 	var source := source_polygons[source_index]
 	_disconnect_source_polygon(source)
 	source_polygons.remove_at(source_index)
+	_release_source_from_regime_geometry(element_id)
 	_request_source_geometry_apply()
 	return true
 
@@ -3016,6 +3499,8 @@ func _replace_source_polygons(values: Array) -> bool:
 	for old_source: GPUFlowSourcePolygon in source_polygons:
 		_disconnect_source_polygon(old_source)
 	source_polygons = replacements
+	_authored_source_vertices.clear()
+	_authored_source_instance_ids.clear()
 	_bind_source_polygon_signals()
 	_request_source_geometry_apply()
 	return true
@@ -4454,6 +4939,8 @@ func _apply_regime_panel() -> void:
 	if _regime_panel == null:
 		return
 	_regime_panel.visible = regime_panel_visible
+	if _regime_heading_label != null:
+		_regime_heading_label.visible = regime_heading_visible
 	var names := Array(_regime_snapshot.get("regime_names", []))
 	var active_states := Array(_regime_snapshot.get("active_states", []))
 	for index in range(_regime_name_labels.size()):
