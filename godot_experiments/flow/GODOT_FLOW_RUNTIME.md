@@ -219,6 +219,33 @@ rewritten. While the field is active, ordinary left-edge head lifecycles spawn
 only inside the generated inlet opening, with clearance from both banks;
 explicit interior source polygons are unchanged.
 
+### Regime-transition work and bounded state
+
+Regime changes mutate each resident stage in place; they do not instantiate a
+new stage or resize its particle pools. `ModelRegimes` treats an identical
+absolute active set as a successful no-op, so controller retries can be
+acknowledged without repeating stage feature, panel, ecology, or gate-schedule
+application. Ecology and regime-driven gate schedules run when the model day or
+active regime state changes, not once per render frame.
+
+Both shoreline force and swept-crossing lookups map the relevant X interval to
+the local 16th-grid span and one neighboring span on either side. The shader
+therefore preserves endpoint coverage without scanning all 16 segments of each
+bank for every lookup. Kinship's explicit zero drain and obstacle budgets also
+skip both generic interaction-polygon passes while its full shoreline field
+remains active.
+
+The salmon and leaf release systems each retain a fixed 300-slot circular control
+pool. Releases overwrite old commands; they do not append particles, nodes,
+materials, or textures. Salmon retains its fixed immutable-segment pool and
+leaves retain one head pool with no segment pool. The focused smokes stress 2,000
+salmon releases and 500 two-bank leaf releases while checking circular indices,
+control dimensions, particle amounts, resident resource identities/RIDs, and
+node/resource counts. These allocation invariants do not guarantee a specific
+frame rate. Before deployment, soak a full 12-minute model year with regime and
+ecology changes on the oldest target Mac, monitor frame pacing and memory, and
+verify exactly one Godot PID on each dedicated renderer Mac.
+
 ### Production GPU interaction path
 
 The deployed `GPUFlowStage2D` does not send its interaction geometry through a
@@ -1617,8 +1644,10 @@ The five deployed GPU suites verify the water-only viewport, the two
 bounded 128 x 1 `RGBAF` configuration textures, propagation to all seven water
 particle-process materials, source weighted-edge Y plus independent
 bounding-box X sampling, source and interaction controller operations, salmon
-and leaf release/control without CPU readback, targeted screen isolation, and
-the shared Barlow Condensed Medium resource. The grid, date-time, and watershed
+and leaf release/control without CPU readback, fixed circular ecology pools and
+stable resident allocations during their high-volume release stress passes,
+targeted screen isolation, and the shared Barlow Condensed Medium resource. The
+grid, date-time, and watershed
 timeline described above are runtime contracts; the current smoke scenes do not
 assert their complete behavior.
 The standalone leaf smoke is:
@@ -1639,6 +1668,9 @@ nearby-water search and 0.35 steering blend, 256-pixel inward search bound,
 frozen 0.5-second disk fade, zero segment capacity, one-way attachment state,
 8…56-pixel center/flank support over a 35-degree fan at a 0.12-second cadence,
 water-texture assignment, pause/reset/immediate re-release behavior, and
-absence of CPU readback. All GPU
+absence of CPU readback. Its 500-call stress pass also checks circular wrapping,
+bounded last-release state, fixed particle amount and control dimensions, and
+unchanged resident node/resource identities and RIDs; the salmon smoke performs
+the corresponding checks across 2,000 release calls. All GPU
 smoke commands and their expected scope are listed in
 `res://flow/gpu_stage/README.md`.

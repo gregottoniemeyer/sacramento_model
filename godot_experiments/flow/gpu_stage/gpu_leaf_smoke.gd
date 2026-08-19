@@ -21,6 +21,9 @@ const EXPECTED_DEFAULT_TOP_LANE_ORDER := [
 const EXPECTED_DEFAULT_BOTTOM_LANE_ORDER := [
 	7, 0, 11, 2, 9, 12, 5, 8, 10, 6, 1, 4, 3, 13, 14,
 ]
+const STRESS_RELEASE_CALLS := 500
+const STRESS_RELEASE_COUNT_PER_SIDE := 7
+const RENDER_FENCED_RELEASE_CALLS := 60
 
 
 func _ready() -> void:
@@ -479,6 +482,85 @@ func _ready() -> void:
 		"custom release did not retain doubled deterministic cadence"
 	)
 
+	# Let the GPU consume many successive generations, not merely the final state
+	# of a synchronous CPU loop. Resident allocations must remain identical while
+	# live generations fall, latch or fade, and recycle.
+	var rendered_allocation_before := _allocation_snapshot(leaves)
+	leaves.set_paused(false)
+	for _release_index in range(RENDER_FENCED_RELEASE_CALLS):
+		leaves.release_leaves(STRESS_RELEASE_COUNT_PER_SIDE)
+		await get_tree().process_frame
+	leaves.set_paused(true)
+	var rendered_difference := _first_snapshot_difference(
+		rendered_allocation_before,
+		_allocation_snapshot(leaves),
+	)
+	_assert_or_quit(
+		rendered_difference.is_empty(),
+		"render-fenced releases changed a resident allocation: %s"
+			% rendered_difference,
+	)
+	summary = leaves.runtime_summary()
+
+	# Repeated seasonal releases must only overwrite the resident 300-slot
+	# command texture. In particular, the per-release lane orders must replace
+	# prior arrays rather than accumulating across calls.
+	var allocation_before := _allocation_snapshot(leaves)
+	var serial_before := int(summary.get("release_serial", 0))
+	var total_top_before := int(summary.get("total_scheduled_top", 0))
+	var total_bottom_before := int(summary.get("total_scheduled_bottom", 0))
+	var write_slot_before := int(summary.get("next_write_slot", 0))
+	var stress_scheduled := 0
+	for release_index in range(STRESS_RELEASE_CALLS):
+		stress_scheduled += leaves.release_leaves(STRESS_RELEASE_COUNT_PER_SIDE)
+
+	summary = leaves.runtime_summary()
+	var allocation_after := _allocation_snapshot(leaves)
+	var snapshot_difference := _first_snapshot_difference(
+		allocation_before,
+		allocation_after
+	)
+	var generations: PackedInt32Array = leaves.get("_slot_generations")
+	var expected_per_bank := (
+		STRESS_RELEASE_CALLS * STRESS_RELEASE_COUNT_PER_SIDE
+	)
+	var expected_stress_total := expected_per_bank * 2
+	var expected_write_slot := posmod(
+		write_slot_before + expected_stress_total,
+		int(summary.get("capacity", 0))
+	)
+	_assert_or_quit(
+		stress_scheduled == expected_stress_total,
+		"high-volume release loop rejected one or more leaves"
+	)
+	_assert_or_quit(
+		int(summary.get("release_serial", 0))
+			== serial_before + STRESS_RELEASE_CALLS
+		and int(summary.get("total_scheduled_top", 0))
+			== total_top_before + expected_per_bank
+		and int(summary.get("total_scheduled_bottom", 0))
+			== total_bottom_before + expected_per_bank
+		and int(summary.get("last_scheduled_per_side", 0))
+			== STRESS_RELEASE_COUNT_PER_SIDE
+		and int(summary.get("last_scheduled_total", 0))
+			== STRESS_RELEASE_COUNT_PER_SIDE * 2
+		and int(summary.get("next_write_slot", -1)) == expected_write_slot,
+		"high-volume releases did not wrap the fixed circular command pool"
+	)
+	_assert_or_quit(
+		generations.size() == int(summary.get("capacity", 0))
+		and _generations_are_bounded(generations)
+		and (summary.get("last_top_lane_order", []) as Array).size()
+			== STRESS_RELEASE_COUNT_PER_SIDE
+		and (summary.get("last_bottom_lane_order", []) as Array).size()
+			== STRESS_RELEASE_COUNT_PER_SIDE,
+		"leaf CPU control state grew beyond the fixed pool or last release"
+	)
+	_assert_or_quit(
+		snapshot_difference.is_empty(),
+		"high-volume releases changed a resident allocation: %s"
+			% snapshot_difference
+	)
 	print("GPU_LEAF_SMOKE_PASS ", JSON.stringify(summary))
 	get_tree().quit(0)
 
@@ -494,6 +576,58 @@ func _make_test_water_texture() -> ImageTexture:
 		image.fill_rect(Rect2i(x, first_y - 1, 1, 3), Color.WHITE)
 		image.fill_rect(Rect2i(x, second_y - 1, 1, 3), Color.WHITE)
 	return ImageTexture.create_from_image(image)
+
+
+func _allocation_snapshot(leaves: GPULeaf2D) -> Dictionary:
+	var heads := leaves.get_node_or_null("GPULeafHeads") as GPUParticles2D
+	var control_image := leaves.get("_control_image") as Image
+	var control_texture := leaves.get("_control_texture") as Texture2D
+	var empty_water_texture := leaves.get("_empty_water_texture") as Texture2D
+	var supplied_water_texture := leaves.get("_supplied_water_texture") as Texture2D
+	var head_material := heads.process_material as Material
+	var head_draw_material := heads.material as Material
+	var head_texture := heads.texture as Texture2D
+	var generations: PackedInt32Array = leaves.get("_slot_generations")
+	return {
+		"child_count": leaves.get_child_count(),
+		"head_node_id": heads.get_instance_id(),
+		"head_amount": heads.amount,
+		"control_image_id": control_image.get_instance_id(),
+		"control_image_size": control_image.get_size(),
+		"control_image_format": control_image.get_format(),
+		"control_texture_id": control_texture.get_instance_id(),
+		"control_texture_rid": control_texture.get_rid(),
+		"control_texture_size": control_texture.get_size(),
+		"empty_water_texture_id": empty_water_texture.get_instance_id(),
+		"empty_water_texture_rid": empty_water_texture.get_rid(),
+		"supplied_water_texture_id": supplied_water_texture.get_instance_id(),
+		"supplied_water_texture_rid": supplied_water_texture.get_rid(),
+		"head_material_id": head_material.get_instance_id(),
+		"head_material_rid": head_material.get_rid(),
+		"head_draw_material_id": head_draw_material.get_instance_id(),
+		"head_draw_material_rid": head_draw_material.get_rid(),
+		"head_texture_id": head_texture.get_instance_id(),
+		"head_texture_rid": head_texture.get_rid(),
+		"generation_count": generations.size(),
+	}
+
+
+func _first_snapshot_difference(before: Dictionary, after: Dictionary) -> String:
+	if before.size() != after.size():
+		return "snapshot field count"
+	for key: Variant in before:
+		if not after.has(key):
+			return "missing %s" % String(key)
+		if before[key] != after[key]:
+			return "%s (%s -> %s)" % [key, before[key], after[key]]
+	return ""
+
+
+func _generations_are_bounded(generations: PackedInt32Array) -> bool:
+	for generation in generations:
+		if generation < 1 or generation > 1000000:
+			return false
+	return true
 
 
 func _release_lane_ranks(

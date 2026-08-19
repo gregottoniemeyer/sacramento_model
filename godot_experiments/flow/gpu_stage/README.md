@@ -377,6 +377,32 @@ date-only value when the day changes. Each data-row transition emits
 `watershed_data_row_changed` with row index/count, `raw_value`, `normalized_flow`,
 `scaled_flow`, `high_variation`, and canonical `model_date_time`.
 
+### Regime-switch runtime cost
+
+A regime switch mutates the resident stage in place; it does not instantiate a
+new stage or resize the water, salmon, or leaf pools. An identical replacement
+active set is idempotent and does not publish another `ModelRegimes` change, so a
+replayed absolute controller state does not repeat feature, panel, ecology, or
+gate-schedule work. Ecology and regime-driven gate schedules are reevaluated only
+when the model day or active regime set changes. Kinship's defined zero drain and
+obstacle budgets disable both generic polygon-interaction shader passes while
+leaving its full shoreline field active.
+
+Shoreline steering and swept-crossing checks derive the local 16th-grid X span
+touched by the head or motion segment and inspect that span plus one neighbor on
+each side; they do not scan all 16 bank segments for every lookup. The authored
+two-bank geometry and control texture remain fixed.
+
+Salmon and leaves each use a 300-slot circular release-control pool. New release
+commands overwrite old slots without creating particles or textures; salmon's
+trail pool is also preallocated, and leaves have no trail pool. The standalone
+smokes include 2,000 salmon releases and 500 two-bank leaf releases and assert
+stable particle amounts, node/resource counts, control dimensions, and material
+and texture RIDs. These bounds do not predict frame rate on a particular GPU.
+For deployment, soak the full 12-minute model year with regime/ecology changes on
+the oldest target Mac, monitor frame pacing and memory, and run only one Godot PID
+on each dedicated renderer Mac.
+
 `runtime_summary()` exposes the complete presentation contract. Grid fields are
 `stage_grid_visible`, `stage_grid_spacing_pixels`,
 `stage_grid_line_width_pixels`, `stage_grid_color`, `stage_grid_z_index`, and
@@ -1090,8 +1116,10 @@ texture, and that controller upsert, field update, reshape, and removal reach al
 seven particle materials.
 The source, salmon, and leaf smoke scenes additionally validate source packing,
 weighted-edge Y plus independent bounding-box X sampling, release scheduling,
-their occupancy contracts, bounded water/salmon immutable trails, and the
-absence of CPU readback. Visual testing confirms the salmon's damped rolling
+their occupancy contracts, bounded water/salmon immutable trails, fixed circular
+release pools, stable resident particle/material/texture allocations under 2,000
+salmon and 500 leaf release calls, and the absence of CPU readback. Visual testing
+confirms the salmon's damped rolling
 loss fade and full 2D contact-field steering, continuous UV-interpolated segment alpha, and
 the leaves' nearby-water search, stopped-fade miss state, one-way water latch,
 periodically cached local path following, and head-only disk rendering.
@@ -1121,7 +1149,11 @@ search bound, frozen 0.5-second disk fade, zero segment capacity, one-way
 attachment state,
 8…56-pixel center/flank support over a 35-degree fan at a 0.12-second cadence,
 assigned water texture, pause/reset/immediate re-release behavior, and no CPU
-readback.
+readback. Its 500-call stress pass additionally verifies circular-slot wrapping,
+bounded last-release lane state, unchanged control-texture dimensions, fixed
+particle amounts, and unchanged resident node/resource identities and RIDs. The
+salmon smoke applies the corresponding allocation checks across 2,000 release
+calls.
 
 The production integration smoke is:
 

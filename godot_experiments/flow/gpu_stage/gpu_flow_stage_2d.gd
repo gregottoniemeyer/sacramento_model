@@ -394,6 +394,15 @@ var _source_data_texture: ImageTexture
 var _source_geometry_batch_depth: int = 0
 var _source_geometry_dirty: bool = false
 var _paused: bool = false
+var _pause_state_applied_to_runtime: bool = false
+var _gate_state_applied_to_runtime: bool = false
+var _applied_gate_open: bool = true
+var _applied_authored_gate_open: bool = true
+var _applied_gate_half_width_pixels: float = 0.0
+var _applied_gate_width_world_units: float = 0.0
+var _regime_ecology_evaluation_count: int = 0
+var _gate_state_upload_count: int = 0
+var _shoreline_geometry_upload_count: int = 0
 var _pending_messages: Array[Dictionary] = []
 var _trail_recording_warmup_frames: int = 0
 var _model_year_elapsed_seconds: float = 0.0
@@ -657,6 +666,8 @@ func set_paused(value: bool) -> void:
 
 func _apply_local_paused(value: bool) -> void:
 	var pause_state_changed := _paused != value
+	if not pause_state_changed and _pause_state_applied_to_runtime:
+		return
 	_paused = value
 	for head_layer in _head_layers:
 		head_layer.speed_scale = 0.0 if _paused else 1.0
@@ -666,6 +677,12 @@ func _apply_local_paused(value: bool) -> void:
 		_salmon_school.set_paused(_paused)
 	if _leaf_field != null:
 		_leaf_field.set_paused(_paused)
+	_pause_state_applied_to_runtime = (
+		not _head_layers.is_empty()
+		or not _trail_segment_layers.is_empty()
+		or _salmon_school != null
+		or _leaf_field != null
+	)
 	if pause_state_changed and is_node_ready():
 		pause_changed.emit(screen_id, _paused)
 
@@ -742,12 +759,18 @@ func set_shoreline_randomness(value: float) -> void:
 	var next_value := clampf(value, 0.0, 1.0)
 	if not is_finite(next_value):
 		return
+	if is_equal_approx(_shoreline_randomness, next_value):
+		return
 	_shoreline_randomness = next_value
 	for shoreline_index in range(_shoreline_obstacles.size()):
 		var definition := _shoreline_obstacles[shoreline_index]
 		definition["weight"] = _shoreline_randomness
 		_shoreline_obstacles[shoreline_index] = definition
-	_apply_shoreline_geometry()
+	# During _ready(), the immutable bank definitions are built before the GPU
+	# materials and overlay. The explicit post-build upload handles that first
+	# application; runtime changes upload exactly once here.
+	if is_node_ready():
+		_apply_shoreline_geometry()
 
 
 func get_shoreline_randomness() -> float:
@@ -930,7 +953,6 @@ func _apply_regime_features_from_state(state: Dictionary) -> void:
 		0.0,
 	))
 	_apply_regime_shader_parameters()
-	_apply_regime_reservoir_gate_schedule()
 
 
 func _regime_screen_feature_state(state: Dictionary) -> Dictionary:
@@ -1163,6 +1185,7 @@ func _resolved_active_profile_for_screen(profile: Dictionary) -> Dictionary:
 
 
 func _apply_regime_ecology_schedule() -> void:
+	_regime_ecology_evaluation_count += 1
 	_apply_regime_reservoir_gate_schedule()
 	_regime_salmon_activity = 0.0
 	_regime_leaf_activity = 0.0
@@ -1323,17 +1346,28 @@ func _bind_model_timeline() -> void:
 	_sync_from_model_timeline(false)
 
 
-func _on_model_timeline_changed(_state: Dictionary) -> void:
-	_sync_from_model_timeline(true)
+func _on_model_timeline_changed(state: Dictionary) -> void:
+	# ModelTimeline already built the authoritative snapshot for this signal.
+	# Reuse it across every stage instead of allocating a second Dictionary per
+	# stage, per rendered frame.
+	_sync_from_model_timeline(true, state)
 
 
-func _sync_from_model_timeline(emit_date_signal: bool = true) -> void:
+func _sync_from_model_timeline(
+	emit_date_signal: bool = true,
+	timeline_state: Dictionary = {},
+) -> void:
 	if _model_timeline == null:
 		return
-	var snapshot: Dictionary = _model_timeline.call(&"snapshot")
+	var snapshot: Dictionary = (
+		timeline_state
+		if not timeline_state.is_empty()
+		else Dictionary(_model_timeline.call(&"snapshot"))
+	)
 	if snapshot.is_empty():
 		return
 	var previous_day_index := _model_day_index
+	var previous_minute_of_day := _model_minute_of_day
 	_model_year_elapsed_seconds = float(snapshot.get(
 		"elapsed_seconds", _model_year_elapsed_seconds
 	))
@@ -1357,11 +1391,16 @@ func _sync_from_model_timeline(emit_date_signal: bool = true) -> void:
 		"revision", _model_timeline_revision
 	))
 	_apply_local_paused(bool(snapshot.get("paused", _paused)))
-	_apply_model_date(
-		emit_date_signal and previous_day_index != _model_day_index
-	)
+	var day_changed := previous_day_index != _model_day_index
+	var minute_changed := previous_minute_of_day != _model_minute_of_day
+	if day_changed or minute_changed:
+		_apply_model_date(emit_date_signal and day_changed)
 	_update_watershed_timeline()
-	_apply_regime_ecology_schedule()
+	# Ecology schedules and reservoir gate seasons have day precision. Regime
+	# changes apply them immediately through _on_model_regimes_changed(); timeline
+	# frames only need a reevaluation when the synthetic calendar day changes.
+	if day_changed:
+		_apply_regime_ecology_schedule()
 
 
 func set_model_date_mm_dd(model_date_time: String) -> bool:
@@ -2149,6 +2188,9 @@ func runtime_summary() -> Dictionary:
 		"regime_leaf_activity": _regime_leaf_activity,
 		"regime_last_salmon_release_day_index": _last_regime_salmon_release_day,
 		"regime_last_leaf_release_day_index": _last_regime_leaf_release_day,
+		"regime_ecology_evaluation_count": _regime_ecology_evaluation_count,
+		"gate_state_upload_count": _gate_state_upload_count,
+		"shoreline_geometry_upload_count": _shoreline_geometry_upload_count,
 		"regime_panel_visible": (
 			_regime_panel.visible if _regime_panel != null else false
 		),
@@ -3460,6 +3502,26 @@ func _active_layer_slot_count(layer_index: int) -> int:
 func _apply_gate() -> void:
 	var gate_half_width_pixels: float = _effective_gate_half_width_pixels()
 	var effective_gate_open := _effective_gate_open()
+	var runtime_targets_ready := (
+		not _process_material_layers.is_empty() or _overlay != null
+	)
+	if not runtime_targets_ready:
+		_gate_state_applied_to_runtime = false
+		return
+	if (
+		_gate_state_applied_to_runtime
+		and _applied_gate_open == effective_gate_open
+		and _applied_authored_gate_open == gate_open
+		and is_equal_approx(
+			_applied_gate_half_width_pixels,
+			gate_half_width_pixels,
+		)
+		and is_equal_approx(
+			_applied_gate_width_world_units,
+			gate_width,
+		)
+	):
+		return
 	for process_material in _process_material_layers:
 		process_material.set_shader_parameter(&"gate_open", effective_gate_open)
 		process_material.set_shader_parameter(
@@ -3468,6 +3530,14 @@ func _apply_gate() -> void:
 	if _overlay != null:
 		_overlay.call(&"set_gate_open", effective_gate_open)
 		_overlay.call(&"set_gate_half_width", gate_half_width_pixels)
+	_applied_gate_open = effective_gate_open
+	_applied_authored_gate_open = gate_open
+	_applied_gate_half_width_pixels = gate_half_width_pixels
+	_applied_gate_width_world_units = gate_width
+	_gate_state_applied_to_runtime = (
+		not _process_material_layers.is_empty() and _overlay != null
+	)
+	_gate_state_upload_count += 1
 	if is_node_ready():
 		gate_changed.emit(screen_id, RESERVOIR_ID, effective_gate_open, gate_width)
 
@@ -3620,6 +3690,7 @@ func _shoreline_inlet_y_range_pixels() -> Vector2:
 
 
 func _apply_shoreline_geometry() -> void:
+	_shoreline_geometry_upload_count += 1
 	var data_image := Image.create(
 		SHORELINE_TEXTURE_WIDTH,
 		1,
@@ -4550,7 +4621,8 @@ func _advance_model_calendar(delta: float) -> void:
 	if time_changed:
 		_apply_model_date(day_changed)
 	_update_watershed_timeline()
-	_apply_regime_ecology_schedule()
+	if day_changed:
+		_apply_regime_ecology_schedule()
 
 
 func _reset_model_calendar() -> void:

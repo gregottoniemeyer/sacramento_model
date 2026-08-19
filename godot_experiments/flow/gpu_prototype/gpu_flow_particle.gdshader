@@ -99,6 +99,8 @@ const int INTERACTION_TEXELS_PER_POLYGON = 16;
 const int INTERACTION_TEXTURE_WIDTH = 128;
 const int MAX_SHORELINE_OBSTACLES = 2;
 const int MAX_SHORELINE_EDGE_VERTICES = 17;
+const int SHORELINE_EDGE_SPAN_COUNT = MAX_SHORELINE_EDGE_VERTICES - 1;
+const int SHORELINE_LOCAL_SPAN_PADDING = 1;
 const int SHORELINE_TEXELS_PER_OBSTACLE = 20;
 const int SHORELINE_TEXTURE_WIDTH = 40;
 const int MAX_SOURCE_POLYGONS = 8;
@@ -132,6 +134,48 @@ vec4 shoreline_record(int shoreline_index, int record_offset) {
 
 vec2 shoreline_vertex(int shoreline_index, int vertex_index) {
 	return shoreline_record(shoreline_index, 2 + vertex_index).xy;
+}
+
+// Shoreline samples have fixed, ordered X positions: seventeen vertices across
+// the model's sixteen grid spans. Restrict lookups to the spans touched by an X
+// interval plus one neighbor on either side. The padding preserves vertex and
+// endpoint behavior while avoiding a full-chain texture scan for local motion.
+ivec2 shoreline_span_neighborhood(
+	float interval_min_x,
+	float interval_max_x,
+	vec4 shoreline_bounds,
+	int shoreline_vertex_count
+) {
+	int span_count = min(
+		max(shoreline_vertex_count - 1, 1),
+		SHORELINE_EDGE_SPAN_COUNT
+	);
+	float shoreline_width = max(
+		shoreline_bounds.z - shoreline_bounds.x,
+		0.000001
+	);
+	float first_fraction = clamp(
+		(interval_min_x - shoreline_bounds.x) / shoreline_width,
+		0.0,
+		1.0
+	);
+	float last_fraction = clamp(
+		(interval_max_x - shoreline_bounds.x) / shoreline_width,
+		0.0,
+		1.0
+	);
+	int first_span = min(
+		int(floor(first_fraction * float(span_count))),
+		span_count - 1
+	);
+	int last_span = min(
+		int(floor(last_fraction * float(span_count))),
+		span_count - 1
+	);
+	return ivec2(
+		max(first_span - SHORELINE_LOCAL_SPAN_PADDING, 0),
+		min(last_span + SHORELINE_LOCAL_SPAN_PADDING, span_count - 1)
+	);
 }
 
 vec2 shoreline_channel_normal(vec2 edge, float channel_y_sign) {
@@ -646,6 +690,22 @@ void process() {
 	bool head_bypassing = CUSTOM.w > 4.5 && CUSTOM.w < 5.5;
 	bool head_gate_staging = CUSTOM.w > 5.5 && CUSTOM.w < 6.5;
 	bool head_gate_flushing = CUSTOM.w > 6.5 && CUSTOM.w < 7.5;
+	// A regime may explicitly remove both generic polygon categories while their
+	// authored geometry remains packed for later regimes. Skip both polygon passes
+	// in that state. Requiring both presence overrides preserves authored fallback
+	// and still evaluates the shared records whenever either category is active.
+	bool regime_removes_all_interactions = (
+		regime_profile_physics_enabled
+		&& regime_drain_override_enabled
+		&& regime_obstacle_override_enabled
+		&& clamp(regime_drain_weight, 0.0, 1.0) <= 0.0
+		&& clamp(regime_obstacle_weight, 0.0, 1.0) <= 0.0
+	);
+	bool generic_interaction_pass_enabled = (
+		interaction_admission_enabled
+		&& interaction_count > 0
+		&& !regime_removes_all_interactions
+	);
 	bool reservoir_live_admission = (
 		reservoir_admission_enabled && regime_reservoir_present
 	);
@@ -672,12 +732,20 @@ void process() {
 		head_gate_flushing = false;
 		head_released = true;
 	}
+	// BYPASSING only latches the one-time decision for a live reservoir. Once the
+	// reservoir is removed there is no admission region left to clear, so resume
+	// ordinary flow immediately without changing the head position or trail anchor.
+	if (!regime_reservoir_present && head_bypassing) {
+		CUSTOM.w = STATE_FLOWING;
+		head_bypassing = false;
+		head_flowing = true;
+	}
 
 	// Repellers are a soft head-only velocity field. Immutable tail segments have
 	// no simulation pass, so they simply preserve the path the head actually took.
 	// Reservoir-owned states have explicit precedence and are never displaced by
 	// an overlapping runtime polygon.
-	if (interaction_admission_enabled && head_flowing) {
+	if (generic_interaction_pass_enabled && head_flowing) {
 		for (
 			int polygon_index = 0;
 			polygon_index < MAX_INTERACTION_POLYGONS;
@@ -831,14 +899,17 @@ void process() {
 			vec2 closest_channel_normal = vec2(0.0, channel_y_sign);
 			vec2 closest_downstream_tangent = vec2(1.0, 0.0);
 			vec2 closest_edge_point = point;
+			ivec2 local_span_range = shoreline_span_neighborhood(
+				point.x,
+				point.x,
+				shoreline_bounds,
+				shoreline_vertex_count
+			);
 			for (
-				int vertex_index = 0;
-				vertex_index < MAX_SHORELINE_EDGE_VERTICES - 1;
+				int vertex_index = local_span_range.x;
+				vertex_index <= local_span_range.y;
 				vertex_index++
 			) {
-				if (vertex_index + 1 >= shoreline_vertex_count) {
-					break;
-				}
 				vec2 edge_start = shoreline_vertex(shoreline_index, vertex_index);
 				vec2 edge_end = shoreline_vertex(shoreline_index, vertex_index + 1);
 				vec2 edge = edge_end - edge_start;
@@ -890,6 +961,32 @@ void process() {
 	}
 
 	vec2 from_reservoir = point - reservoir_center;
+	// A released head is no longer eligible for reservoir capture. Keep it in
+	// this bypass state for a full trail lifetime so every stored orbit sample
+	// is replaced by downstream history before ordinary flow can resume. This
+	// lightweight release path also runs while the reservoir itself is absent.
+	if (head_released) {
+		float release_clear_x = reservoir_radius + reservoir_influence;
+		float outlet_weight = 1.0 - smoothstep(
+			reservoir_radius * 0.75,
+			release_clear_x,
+			from_reservoir.x
+		);
+		vec2 released_velocity = vec2(speed * 1.45, -from_reservoir.y * 4.0);
+		target_velocity = mix(target_velocity, released_velocity, outlet_weight);
+		if (
+			CUSTOM.y >= max(trail_lifetime_seconds, 0.01)
+			&& from_reservoir.x > release_clear_x
+		) {
+			CUSTOM.w = STATE_FLOWING;
+		}
+	}
+	vec2 resolved_velocity = approach_velocity(VELOCITY.xy, target_velocity, DELTA);
+	vec2 next_point = point + resolved_velocity * DELTA;
+	// Regime removal keeps authored reservoir resources available for later use,
+	// but ordinary and released heads need none of the orbit/admission state math.
+	// The uniform branch is coherent across the complete particle dispatch.
+	if (regime_reservoir_present) {
 	float raw_distance_to_center = length(from_reservoir);
 	float distance_to_center = max(raw_distance_to_center, 0.001);
 	float center_fallback_angle = orbit_seed * 6.2831853;
@@ -1263,27 +1360,7 @@ void process() {
 		}
 	}
 
-	// A released head is no longer eligible for reservoir capture. Keep it in
-	// this bypass state for a full trail lifetime so every stored orbit sample
-	// is replaced by downstream history before ordinary flow can resume.
-	if (head_released) {
-		float release_clear_x = reservoir_radius + reservoir_influence;
-		float outlet_weight = 1.0 - smoothstep(
-			reservoir_radius * 0.75,
-			release_clear_x,
-			from_reservoir.x
-		);
-		vec2 released_velocity = vec2(speed * 1.45, -from_reservoir.y * 4.0);
-		target_velocity = mix(target_velocity, released_velocity, outlet_weight);
-		if (
-			CUSTOM.y >= max(trail_lifetime_seconds, 0.01)
-			&& from_reservoir.x > release_clear_x
-		) {
-			CUSTOM.w = STATE_FLOWING;
-		}
-	}
-
-	vec2 resolved_velocity = approach_velocity(VELOCITY.xy, target_velocity, DELTA);
+	resolved_velocity = approach_velocity(VELOCITY.xy, target_velocity, DELTA);
 	bool entering_after_update = CUSTOM.w > 0.5 && CUSTOM.w < 1.5;
 	bool retained_after_update = CUSTOM.w > 1.5 && CUSTOM.w < 2.5;
 	bool exiting_after_update = CUSTOM.w > 2.5 && CUSTOM.w < 3.5;
@@ -1312,7 +1389,7 @@ void process() {
 			);
 		}
 	}
-	vec2 next_point = point + resolved_velocity * DELTA;
+	next_point = point + resolved_velocity * DELTA;
 	bool entering_inside_envelope = (
 		entering_after_update
 		&& distance_to_center <= reservoir_radius + reservoir_influence
@@ -1423,6 +1500,7 @@ void process() {
 			}
 		}
 	}
+	}
 
 	// Resolve only real crossings of the water-facing bank chains. The correction
 	// is local to the earliest crossing and never moves a head to an object center.
@@ -1457,14 +1535,17 @@ void process() {
 			float earliest_crossing = 2.0;
 			vec2 crossing_channel_normal = vec2(0.0, channel_y_sign);
 			vec2 crossing_downstream_tangent = vec2(1.0, 0.0);
+			ivec2 swept_span_range = shoreline_span_neighborhood(
+				segment_min_x,
+				segment_max_x,
+				shoreline_bounds,
+				shoreline_vertex_count
+			);
 			for (
-				int vertex_index = 0;
-				vertex_index < MAX_SHORELINE_EDGE_VERTICES - 1;
+				int vertex_index = swept_span_range.x;
+				vertex_index <= swept_span_range.y;
 				vertex_index++
 			) {
-				if (vertex_index + 1 >= shoreline_vertex_count) {
-					break;
-				}
 				vec2 edge_start = shoreline_vertex(shoreline_index, vertex_index);
 				vec2 edge_end = shoreline_vertex(shoreline_index, vertex_index + 1);
 				vec2 edge = edge_end - edge_start;
@@ -1510,7 +1591,7 @@ void process() {
 	// geometries overlap. Absorption is a single deterministic decision based on
 	// stable particle/object identity; rejected heads get one small wave impulse.
 	bool absorbed_after_update = false;
-	if (interaction_admission_enabled && CUSTOM.w < 0.5) {
+	if (generic_interaction_pass_enabled && CUSTOM.w < 0.5) {
 		for (
 			int polygon_index = 0;
 			polygon_index < MAX_INTERACTION_POLYGONS;

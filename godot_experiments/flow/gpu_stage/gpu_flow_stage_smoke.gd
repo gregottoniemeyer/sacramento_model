@@ -1258,6 +1258,7 @@ func _ready() -> void:
 	if not bool(summary.get("gate_fully_open", false)):
 		errors.append("large runtime reservoir could not reach hard-drain state")
 	_check_kinship_ecology_schedule(stage, errors)
+	await _check_regime_runtime_stability(stage, errors)
 	await _check_stage_title_reset_independence(stage, errors)
 
 	if errors.is_empty():
@@ -1893,6 +1894,142 @@ func _check_kinship_ecology_schedule(
 	)) + 25:
 		errors.append("Kinship salmon schedule did not re-arm for the next model year")
 	stage.call(&"set_active_regime_names", [])
+
+
+func _check_regime_runtime_stability(
+	stage: Node,
+	errors: PackedStringArray
+) -> void:
+	# Regime changes must mutate fixed materials/textures in place. They must not
+	# leave behind stage nodes or grow any water/salmon/leaf particle pool.
+	stage.call(&"set_model_date_mm_dd", "02/01-00:00")
+	stage.call(&"set_active_regime_names", [])
+	var baseline_node_count := _recursive_node_count(stage)
+	var baseline_pool_signature := _particle_pool_signature(stage)
+	var baseline_texture_signature := _stage_texture_signature(stage)
+	var baseline_flow_model_count := get_tree().get_nodes_in_group(
+		&"flow_models"
+	).size()
+
+	# Replaying the same absolute controller state is intentionally idempotent.
+	stage.call(&"set_active_regime_names", ["Tech"])
+	var before_idempotent: Dictionary = stage.call(&"runtime_summary")
+	for _index in range(100):
+		stage.call(&"set_active_regime_names", ["Tech"])
+	var after_idempotent: Dictionary = stage.call(&"runtime_summary")
+	for counter_name: String in [
+		"regime_ecology_evaluation_count",
+		"gate_state_upload_count",
+		"shoreline_geometry_upload_count",
+	]:
+		if after_idempotent.get(counter_name) != before_idempotent.get(counter_name):
+			errors.append(
+				"identical absolute regime state repeated %s work" % counter_name
+			)
+
+	# The timeline publishes a shared state every render frame. Re-consuming an
+	# unchanged day may update smooth watershed flow, but must not reparse regime
+	# schedules, upload gate uniforms, or redraw gate geometry.
+	var timeline := get_node_or_null("/root/ModelTimeline")
+	if timeline == null:
+		errors.append("shared ModelTimeline is unavailable for stability coverage")
+	else:
+		var frozen_timeline: Dictionary = timeline.call(&"snapshot")
+		var before_timeline: Dictionary = stage.call(&"runtime_summary")
+		for _index in range(100):
+			stage.call(&"_on_model_timeline_changed", frozen_timeline)
+		var after_timeline: Dictionary = stage.call(&"runtime_summary")
+		if after_timeline.get("regime_ecology_evaluation_count") != before_timeline.get(
+			"regime_ecology_evaluation_count"
+		):
+			errors.append("same-day timeline frames reevaluated regime ecology")
+		if after_timeline.get("gate_state_upload_count") != before_timeline.get(
+			"gate_state_upload_count"
+		):
+			errors.append("same-day timeline frames re-uploaded unchanged gate state")
+
+	# Exercise true state changes, including Kinship's full shoreline and its
+	# complete reservoir/drain/obstacle removal, while allowing render frames to
+	# consume several transitions.
+	for _switch_cycle in range(60):
+		stage.call(&"set_active_regime_names", ["Kinship"])
+		await get_tree().process_frame
+		stage.call(&"set_active_regime_names", ["Tech"])
+		await get_tree().process_frame
+	stage.call(&"set_active_regime_names", [])
+	await get_tree().process_frame
+
+	if _recursive_node_count(stage) != baseline_node_count:
+		errors.append("rapid regime switching changed the stage node count")
+	if _particle_pool_signature(stage) != baseline_pool_signature:
+		errors.append("rapid regime switching replaced or resized a particle pool")
+	if _stage_texture_signature(stage) != baseline_texture_signature:
+		errors.append("rapid regime switching replaced a resident stage texture")
+	if get_tree().get_nodes_in_group(&"flow_models").size() != baseline_flow_model_count:
+		errors.append("rapid regime switching changed the live flow-model count")
+
+
+func _recursive_node_count(root: Node) -> int:
+	var total := 1
+	for child: Node in root.get_children():
+		total += _recursive_node_count(child)
+	return total
+
+
+func _particle_pool_signature(root: Node) -> Array:
+	var signature: Array = []
+	for child_variant: Variant in root.find_children(
+		"*",
+		"GPUParticles2D",
+		true,
+		false,
+	):
+		var particles := child_variant as GPUParticles2D
+		if particles == null:
+			continue
+		var process_material_id := 0
+		if particles.process_material != null:
+			process_material_id = particles.process_material.get_instance_id()
+		var draw_material_id := 0
+		if particles.material != null:
+			draw_material_id = particles.material.get_instance_id()
+		var texture_id := 0
+		if particles.texture != null:
+			texture_id = particles.texture.get_instance_id()
+		signature.append([
+			String(root.get_path_to(particles)),
+			particles.get_instance_id(),
+			particles.amount,
+			process_material_id,
+			draw_material_id,
+			texture_id,
+		])
+	return signature
+
+
+func _stage_texture_signature(stage: Node) -> Array:
+	var signature: Array = []
+	for property_name: String in [
+		"_interaction_data_texture",
+		"_shoreline_data_texture",
+		"_source_data_texture",
+	]:
+		var texture := stage.get(property_name) as Texture2D
+		signature.append([
+			property_name,
+			texture.get_instance_id() if texture != null else 0,
+			texture.get_rid() if texture != null else RID(),
+		])
+	var water_viewport := stage.get_node_or_null("WaterOnlyViewport") as SubViewport
+	var water_texture := (
+		water_viewport.get_texture() if water_viewport != null else null
+	)
+	signature.append([
+		"water_viewport_texture",
+		water_texture.get_instance_id() if water_texture != null else 0,
+		water_texture.get_rid() if water_texture != null else RID(),
+	])
+	return signature
 
 
 func _check_stage_title_runtime_independence(

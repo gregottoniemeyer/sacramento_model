@@ -137,6 +137,23 @@ intended for the visible stages. Once `start` or `restart` sees the exact
 configured screens, it reapplies the saved
 regime set and treats any failed acknowledgement as startup failure.
 
+Regime changes update the already-running stages and their fixed particle pools;
+they do not create replacement scenes or additional Godot processes. Re-sending
+the same absolute active set is idempotent: it can be acknowledged without
+reapplying stage features or schedules. Ecology and scheduled reservoir gates
+are evaluated on an actual regime change or model-day boundary, rather than on
+every rendered frame. Kinship's explicit zero drain and obstacle budgets also
+skip the generic polygon-interaction passes; its shoreline remains active and
+uses only the local X spans touched by each head or movement segment.
+
+Before installation, run a representative 12-minute/full-model-year soak on the
+oldest fleet Mac while exercising regime changes and seasonal salmon/leaves.
+Confirm steady frame pacing and memory in Activity Monitor, and confirm exactly
+one Godot PID on each dedicated renderer Mac (for example, `pgrep -lf Godot`).
+The controller's clean start enforces that process layout, and the fixed-pool
+smokes cover retained node/resource growth, but neither is a guarantee of a
+particular older Mac's sustained rendering performance.
+
 The current addresses, login names, project paths, and stage assignments live in
 the `COMPUTERS` dictionary near the top of `godot_controller.py`. Keep them in
 sync with the actual fleet before deployment. Remote Macs require Remote Login,

@@ -4,6 +4,9 @@ extends Node
 ## It deliberately performs no particle-state readback.
 
 const SALMON_SCRIPT := preload("res://flow/gpu_stage/gpu_salmon_2d.gd")
+const STRESS_RELEASE_CALLS := 2000
+const STRESS_RELEASE_COUNT := 7
+const RENDER_FENCED_RELEASE_CALLS := 60
 
 
 func _ready() -> void:
@@ -178,6 +181,72 @@ func _ready() -> void:
 		"nontransparent-water alpha threshold is not 0.001"
 	)
 
+	# Let the GPU consume many successive generations, not merely the final state
+	# of a synchronous CPU loop. Resident allocations must remain identical while
+	# live generations enter, swim, fade, and recycle.
+	var rendered_allocation_before := _allocation_snapshot(salmon)
+	salmon.set_paused(false)
+	for _release_index in range(RENDER_FENCED_RELEASE_CALLS):
+		salmon.release_salmon(STRESS_RELEASE_COUNT)
+		await get_tree().process_frame
+	salmon.set_paused(true)
+	var rendered_difference := _first_snapshot_difference(
+		rendered_allocation_before,
+		_allocation_snapshot(salmon),
+	)
+	_assert_or_quit(
+		rendered_difference.is_empty(),
+		"render-fenced releases changed a resident allocation: %s"
+			% rendered_difference,
+	)
+	summary = salmon.runtime_summary()
+
+	# Exercise many years' worth of release commands synchronously. Releases must
+	# only overwrite the existing 300 command slots; they must not append nodes,
+	# materials, textures, particle capacity, or retained CPU-side state.
+	var allocation_before := _allocation_snapshot(salmon)
+	var serial_before := int(summary.get("release_serial", 0))
+	var total_before := int(summary.get("total_scheduled", 0))
+	var write_slot_before := int(summary.get("next_write_slot", 0))
+	var stress_scheduled := 0
+	for release_index in range(STRESS_RELEASE_CALLS):
+		stress_scheduled += salmon.release_salmon(STRESS_RELEASE_COUNT)
+
+	summary = salmon.runtime_summary()
+	var allocation_after := _allocation_snapshot(salmon)
+	var snapshot_difference := _first_snapshot_difference(
+		allocation_before,
+		allocation_after
+	)
+	var generations: PackedInt32Array = salmon.get("_slot_generations")
+	var expected_stress_total := STRESS_RELEASE_CALLS * STRESS_RELEASE_COUNT
+	var expected_write_slot := posmod(
+		write_slot_before + expected_stress_total,
+		int(summary.get("capacity", 0))
+	)
+	_assert_or_quit(
+		stress_scheduled == expected_stress_total,
+		"high-volume release loop rejected one or more salmon"
+	)
+	_assert_or_quit(
+		int(summary.get("release_serial", 0))
+			== serial_before + STRESS_RELEASE_CALLS
+		and int(summary.get("total_scheduled", 0))
+			== total_before + expected_stress_total
+		and int(summary.get("last_scheduled", 0)) == STRESS_RELEASE_COUNT
+		and int(summary.get("next_write_slot", -1)) == expected_write_slot,
+		"high-volume releases did not wrap the fixed circular command pool"
+	)
+	_assert_or_quit(
+		generations.size() == int(summary.get("capacity", 0))
+		and _generations_are_bounded(generations),
+		"salmon generation state grew beyond the fixed pool or escaped its bounds"
+	)
+	_assert_or_quit(
+		snapshot_difference.is_empty(),
+		"high-volume releases changed a resident allocation: %s"
+			% snapshot_difference
+	)
 	print("GPU_SALMON_SMOKE_PASS ", JSON.stringify(summary))
 	get_tree().quit(0)
 
@@ -191,6 +260,69 @@ func _make_test_water_texture() -> ImageTexture:
 	for lane_y in [13, 31, 52, 77, 96]:
 		image.fill_rect(Rect2i(0, lane_y - 1, 192, 3), Color.WHITE)
 	return ImageTexture.create_from_image(image)
+
+
+func _allocation_snapshot(salmon: GPUSalmon2D) -> Dictionary:
+	var heads := salmon.get_node_or_null("GPUSalmonHeads") as GPUParticles2D
+	var segments := (
+		salmon.get_node_or_null("GPUSalmonTrailSegments") as GPUParticles2D
+	)
+	var control_image := salmon.get("_control_image") as Image
+	var control_texture := salmon.get("_control_texture") as Texture2D
+	var empty_water_texture := salmon.get("_empty_water_texture") as Texture2D
+	var supplied_water_texture := salmon.get("_supplied_water_texture") as Texture2D
+	var head_material := heads.process_material as Material
+	var head_texture := heads.texture as Texture2D
+	var segment_process_material := segments.process_material as Material
+	var segment_draw_material := segments.material as Material
+	var segment_texture := segments.texture as Texture2D
+	var generations: PackedInt32Array = salmon.get("_slot_generations")
+	return {
+		"child_count": salmon.get_child_count(),
+		"head_node_id": heads.get_instance_id(),
+		"segment_node_id": segments.get_instance_id(),
+		"head_amount": heads.amount,
+		"segment_amount": segments.amount,
+		"control_image_id": control_image.get_instance_id(),
+		"control_image_size": control_image.get_size(),
+		"control_image_format": control_image.get_format(),
+		"control_texture_id": control_texture.get_instance_id(),
+		"control_texture_rid": control_texture.get_rid(),
+		"control_texture_size": control_texture.get_size(),
+		"empty_water_texture_id": empty_water_texture.get_instance_id(),
+		"empty_water_texture_rid": empty_water_texture.get_rid(),
+		"supplied_water_texture_id": supplied_water_texture.get_instance_id(),
+		"supplied_water_texture_rid": supplied_water_texture.get_rid(),
+		"head_material_id": head_material.get_instance_id(),
+		"head_material_rid": head_material.get_rid(),
+		"head_texture_id": head_texture.get_instance_id(),
+		"head_texture_rid": head_texture.get_rid(),
+		"segment_process_material_id": segment_process_material.get_instance_id(),
+		"segment_process_material_rid": segment_process_material.get_rid(),
+		"segment_draw_material_id": segment_draw_material.get_instance_id(),
+		"segment_draw_material_rid": segment_draw_material.get_rid(),
+		"segment_texture_id": segment_texture.get_instance_id(),
+		"segment_texture_rid": segment_texture.get_rid(),
+		"generation_count": generations.size(),
+	}
+
+
+func _first_snapshot_difference(before: Dictionary, after: Dictionary) -> String:
+	if before.size() != after.size():
+		return "snapshot field count"
+	for key: Variant in before:
+		if not after.has(key):
+			return "missing %s" % String(key)
+		if before[key] != after[key]:
+			return "%s (%s -> %s)" % [key, before[key], after[key]]
+	return ""
+
+
+func _generations_are_bounded(generations: PackedInt32Array) -> bool:
+	for generation in generations:
+		if generation < 1 or generation > 1000000:
+			return false
+	return true
 
 
 func _assert_or_quit(condition: bool, message: String) -> void:

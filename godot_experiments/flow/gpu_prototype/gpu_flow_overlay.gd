@@ -19,11 +19,15 @@ var source_polygons: Array[Dictionary] = []
 
 
 func set_gate_open(value: bool) -> void:
+	if gate_open == value:
+		return
 	gate_open = value
 	queue_redraw()
 
 
 func set_gate_half_width(value: float) -> void:
+	if is_equal_approx(gate_half_width, value):
+		return
 	gate_half_width = value
 	queue_redraw()
 
@@ -39,6 +43,12 @@ func set_feature_visibility(
 	show_drains: bool,
 	show_obstacles: bool,
 ) -> void:
+	if (
+		reservoir_visible == show_reservoir
+		and drain_visible == show_drains
+		and obstacle_visible == show_obstacles
+	):
+		return
 	reservoir_visible = show_reservoir
 	drain_visible = show_drains
 	obstacle_visible = show_obstacles
