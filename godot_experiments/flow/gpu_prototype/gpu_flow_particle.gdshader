@@ -71,11 +71,16 @@ uniform bool trail_recording_enabled = true;
 uniform sampler2D interaction_data_texture : filter_nearest, repeat_disable;
 uniform int interaction_count = 0;
 uniform bool interaction_admission_enabled = true;
-// The two generated riverbanks have their own compact texture and therefore do
-// not consume any of the eight runtime interaction-polygon records.
-uniform sampler2D shoreline_data_texture : filter_nearest, repeat_disable;
 uniform int shoreline_count = 0;
 uniform vec2 shoreline_inlet_y_range = vec2(28.0, 1052.0);
+// The legacy shoreline_randomness profile value now drives a cheap vector field
+// near the physical top/bottom edges. It bends flow without narrowing the river.
+uniform float edge_turbulence_amount = 0.0;
+uniform float edge_turbulence_band_pixels = 180.0;
+uniform float edge_turbulence_wall_band_pixels = 40.0;
+uniform float edge_turbulence_crossflow_ratio = 0.65;
+uniform float edge_turbulence_streamwise_ratio = 0.08;
+uniform float edge_turbulence_inward_ratio = 0.75;
 // Source geometry uses an independent 128 x 1 RGBAF texture with the same
 // fixed 8 x 16 layout size as interactions. It affects logical head creation
 // only; immutable trail rendering remains completely geometry-agnostic.
@@ -98,12 +103,6 @@ const int MAX_INTERACTION_POLYGONS = 8;
 const int MAX_INTERACTION_VERTICES = 12;
 const int INTERACTION_TEXELS_PER_POLYGON = 16;
 const int INTERACTION_TEXTURE_WIDTH = 128;
-const int MAX_SHORELINE_OBSTACLES = 2;
-const int MAX_SHORELINE_EDGE_VERTICES = 17;
-const int SHORELINE_EDGE_SPAN_COUNT = MAX_SHORELINE_EDGE_VERTICES - 1;
-const int SHORELINE_LOCAL_SPAN_PADDING = 1;
-const int SHORELINE_TEXELS_PER_OBSTACLE = 20;
-const int SHORELINE_TEXTURE_WIDTH = 40;
 const int MAX_SOURCE_POLYGONS = 8;
 const int MAX_SOURCE_VERTICES = 12;
 const int SOURCE_TEXELS_PER_POLYGON = 16;
@@ -123,79 +122,6 @@ vec4 interaction_record(int polygon_index, int record_offset) {
 
 vec2 interaction_vertex(int polygon_index, int vertex_index) {
 	return interaction_record(polygon_index, 4 + vertex_index).xy;
-}
-
-vec4 shoreline_record(int shoreline_index, int record_offset) {
-	float texture_x = (
-		float(shoreline_index * SHORELINE_TEXELS_PER_OBSTACLE + record_offset)
-		+ 0.5
-	) / float(SHORELINE_TEXTURE_WIDTH);
-	return textureLod(shoreline_data_texture, vec2(texture_x, 0.5), 0.0);
-}
-
-vec2 shoreline_vertex(int shoreline_index, int vertex_index) {
-	return shoreline_record(shoreline_index, 2 + vertex_index).xy;
-}
-
-// Shoreline samples have fixed, ordered X positions: seventeen vertices across
-// the model's sixteen grid spans. Restrict lookups to the spans touched by an X
-// interval plus one neighbor on either side. The padding preserves vertex and
-// endpoint behavior while avoiding a full-chain texture scan for local motion.
-ivec2 shoreline_span_neighborhood(
-	float interval_min_x,
-	float interval_max_x,
-	vec4 shoreline_bounds,
-	int shoreline_vertex_count
-) {
-	int span_count = min(
-		max(shoreline_vertex_count - 1, 1),
-		SHORELINE_EDGE_SPAN_COUNT
-	);
-	float shoreline_width = max(
-		shoreline_bounds.z - shoreline_bounds.x,
-		0.000001
-	);
-	float first_fraction = clamp(
-		(interval_min_x - shoreline_bounds.x) / shoreline_width,
-		0.0,
-		1.0
-	);
-	float last_fraction = clamp(
-		(interval_max_x - shoreline_bounds.x) / shoreline_width,
-		0.0,
-		1.0
-	);
-	int first_span = min(
-		int(floor(first_fraction * float(span_count))),
-		span_count - 1
-	);
-	int last_span = min(
-		int(floor(last_fraction * float(span_count))),
-		span_count - 1
-	);
-	return ivec2(
-		max(first_span - SHORELINE_LOCAL_SPAN_PADDING, 0),
-		min(last_span + SHORELINE_LOCAL_SPAN_PADDING, span_count - 1)
-	);
-}
-
-vec2 shoreline_channel_normal(vec2 edge, float channel_y_sign) {
-	vec2 normal = normalize(vec2(edge.y, -edge.x) + vec2(0.000001, 0.0));
-	if (normal.y * channel_y_sign < 0.0) {
-		normal = -normal;
-	}
-	return normal;
-}
-
-vec2 shoreline_downstream_tangent(vec2 edge) {
-	vec2 tangent = normalize(edge + vec2(0.000001, 0.0));
-	if (tangent.x < 0.0) {
-		tangent = -tangent;
-	}
-	if (tangent.x < 0.08) {
-		tangent = normalize(vec2(0.08, tangent.y));
-	}
-	return tangent;
 }
 
 vec4 source_record(int source_index, int record_offset) {
@@ -802,7 +728,6 @@ void process() {
 				float obstacle_selector = hash11(
 					particle_index * 43.731
 					+ TRANSFORM[2].w * 71.117
-					+ interaction_metadata.z * 313.0
 					+ stage_phase * 11.0
 				);
 				if (obstacle_selector >= clamp(regime_obstacle_weight, 0.0, 1.0)) {
@@ -908,95 +833,64 @@ void process() {
 		}
 	}
 
-	// Shoreline obstacles are open water-facing chains, not closed generic
-	// polygons. Only their sixteen ordered segments can steer a head, so there
-	// are no artificial vertical seams or offscreen closure edges to hook flow.
-	if (head_flowing && shoreline_count > 0) {
-		for (
-			int shoreline_index = 0;
-			shoreline_index < MAX_SHORELINE_OBSTACLES;
-			shoreline_index++
-		) {
-			if (shoreline_index >= shoreline_count) {
-				break;
-			}
-			vec4 shoreline_policy = shoreline_record(shoreline_index, 0);
-			float shoreline_weight = clamp(shoreline_policy.x, 0.0, 1.0);
-			float channel_y_sign = shoreline_policy.y;
-			float shoreline_influence = max(shoreline_policy.z, 0.0);
-			int shoreline_vertex_count = int(shoreline_policy.w + 0.5);
-			if (shoreline_weight <= 0.0 || shoreline_vertex_count < 2) {
-				continue;
-			}
-			vec4 shoreline_bounds = shoreline_record(shoreline_index, 1);
-			// Do not let an offscreen inlet head feel a bank endpoint before it
-			// reaches the visible model. This preserves clean left-edge starts.
-			if (point.x < shoreline_bounds.x || point.x > shoreline_bounds.z) {
-				continue;
-			}
-			float closest_distance_squared = 1.0e20;
-			vec2 closest_channel_normal = vec2(0.0, channel_y_sign);
-			vec2 closest_downstream_tangent = vec2(1.0, 0.0);
-			vec2 closest_edge_point = point;
-			ivec2 local_span_range = shoreline_span_neighborhood(
-				point.x,
-				point.x,
-				shoreline_bounds,
-				shoreline_vertex_count
-			);
-			for (
-				int vertex_index = local_span_range.x;
-				vertex_index <= local_span_range.y;
-				vertex_index++
-			) {
-				vec2 edge_start = shoreline_vertex(shoreline_index, vertex_index);
-				vec2 edge_end = shoreline_vertex(shoreline_index, vertex_index + 1);
-				vec2 edge = edge_end - edge_start;
-				float edge_length_squared = max(dot(edge, edge), 0.000001);
-				float edge_fraction = clamp(
-					dot(point - edge_start, edge) / edge_length_squared,
-					0.0,
-					1.0
-				);
-				vec2 edge_point = edge_start + edge * edge_fraction;
-				vec2 edge_offset = point - edge_point;
-				float distance_squared = dot(edge_offset, edge_offset);
-				if (distance_squared < closest_distance_squared) {
-					closest_distance_squared = distance_squared;
-					closest_edge_point = edge_point;
-					closest_channel_normal = shoreline_channel_normal(
-						edge,
-						channel_y_sign
-					);
-					closest_downstream_tangent = shoreline_downstream_tangent(edge);
-				}
-			}
-			float closest_distance = sqrt(max(closest_distance_squared, 0.0));
-			float signed_channel_distance = dot(
-				point - closest_edge_point,
-				closest_channel_normal
-			);
-			bool point_on_land_side = signed_channel_distance < 0.0;
-			if (!point_on_land_side && closest_distance > shoreline_influence) {
-				continue;
-			}
-			float shoreline_proximity = (
-				point_on_land_side
-				? 1.0
-				: 1.0 - smoothstep(
-					0.0,
-					max(shoreline_influence, 0.001),
-					closest_distance
-				)
-			);
-			float active_shoreline_weight = shoreline_weight * shoreline_proximity;
-			target_velocity += (
-				closest_channel_normal * speed * 1.15
-				+ closest_downstream_tangent * speed * 0.20
-			) * active_shoreline_weight;
-			// A bank may slow or bend the river, but can never reverse it upstream.
-			target_velocity.x = max(target_velocity.x, speed * 0.08);
+	// Edge turbulence occupies the full-width river rather than displacing its
+	// banks inward. The broad band is zero-mean; only the last thin wall band has
+	// a gentle inward bias, preventing escape without herding flow to the center.
+	float edge_amount = clamp(edge_turbulence_amount, 0.0, 1.0);
+	float edge_inward_sign = point.y < stage_size.y * 0.5 ? 1.0 : -1.0;
+	float edge_resolved_inward_floor = 0.0;
+	if (head_flowing && edge_amount > 0.000001) {
+		float edge_distance = max(
+			min(point.y, stage_size.y - point.y),
+			0.0
+		);
+		float edge_envelope = 1.0 - smoothstep(
+			0.0,
+			max(edge_turbulence_band_pixels, 0.001),
+			edge_distance
+		);
+		float wall_envelope = 1.0 - smoothstep(
+			0.0,
+			max(edge_turbulence_wall_band_pixels, 0.001),
+			edge_distance
+		);
+		float inlet_envelope = smoothstep(0.0, 32.0, point.x);
+		float temporal_phase = CUSTOM.y * noise_speed * 1.65;
+		float wave_a = sin(
+			point.x * 0.021
+			+ point.y * 0.006
+			+ temporal_phase
+			+ CUSTOM.z * 6.2831853
+			+ stage_phase
+		);
+		float wave_b = sin(
+			point.x * 0.013
+			- point.y * 0.009
+			- temporal_phase * 0.73
+			+ CUSTOM.z * 11.173
+			+ stage_phase * 1.37
+		);
+		vec2 eddy = vec2(
+			(wave_a - wave_b) * 0.5,
+			wave_a * 0.65 + wave_b * 0.35
+		);
+		target_velocity += inlet_envelope * edge_amount * speed * vec2(
+			edge_envelope * edge_turbulence_streamwise_ratio * eddy.x,
+			edge_envelope * edge_turbulence_crossflow_ratio * eddy.y
+				+ wall_envelope * edge_turbulence_inward_ratio * edge_inward_sign
+		);
+		// Fixed noise can exceed low-flow speed. In the last wall band, enforce
+		// a small inward component so active edge turbulence never ejects a head.
+		edge_resolved_inward_floor = edge_amount * wall_envelope * max(
+			speed * 0.10,
+			max(noise_strength, 0.0) * 0.25
+		);
+		if (edge_inward_sign > 0.0) {
+			target_velocity.y = max(target_velocity.y, edge_resolved_inward_floor);
+		} else {
+			target_velocity.y = min(target_velocity.y, -edge_resolved_inward_floor);
 		}
+		target_velocity.x = max(target_velocity.x, speed * 0.08);
 	}
 
 	vec2 from_reservoir = point - reservoir_center;
@@ -1021,6 +915,19 @@ void process() {
 		}
 	}
 	vec2 resolved_velocity = approach_velocity(VELOCITY.xy, target_velocity, DELTA);
+	if (head_flowing && edge_resolved_inward_floor > 0.0) {
+		if (edge_inward_sign > 0.0) {
+			resolved_velocity.y = max(
+				resolved_velocity.y,
+				edge_resolved_inward_floor
+			);
+		} else {
+			resolved_velocity.y = min(
+				resolved_velocity.y,
+				-edge_resolved_inward_floor
+			);
+		}
+	}
 	vec2 next_point = point + resolved_velocity * DELTA;
 	// Regime removal keeps authored reservoir resources available for later use,
 	// but ordinary and released heads need none of the orbit/admission state math.
@@ -1543,90 +1450,6 @@ void process() {
 	}
 	}
 
-	// Resolve only real crossings of the water-facing bank chains. The correction
-	// is local to the earliest crossing and never moves a head to an object center.
-	// A partial weight deliberately blends the correction, while weight zero skips
-	// the complete path.
-	if (CUSTOM.w < 0.5 && shoreline_count > 0) {
-		for (
-			int shoreline_index = 0;
-			shoreline_index < MAX_SHORELINE_OBSTACLES;
-			shoreline_index++
-		) {
-			if (shoreline_index >= shoreline_count) {
-				break;
-			}
-			vec4 shoreline_policy = shoreline_record(shoreline_index, 0);
-			float shoreline_weight = clamp(shoreline_policy.x, 0.0, 1.0);
-			float channel_y_sign = shoreline_policy.y;
-			int shoreline_vertex_count = int(shoreline_policy.w + 0.5);
-			if (shoreline_weight <= 0.0 || shoreline_vertex_count < 2) {
-				continue;
-			}
-			vec4 shoreline_bounds = shoreline_record(shoreline_index, 1);
-			float segment_min_x = min(point.x, next_point.x);
-			float segment_max_x = max(point.x, next_point.x);
-			if (
-				segment_max_x < shoreline_bounds.x
-				|| segment_min_x > shoreline_bounds.z
-			) {
-				continue;
-			}
-			vec2 motion_step = next_point - point;
-			float earliest_crossing = 2.0;
-			vec2 crossing_channel_normal = vec2(0.0, channel_y_sign);
-			vec2 crossing_downstream_tangent = vec2(1.0, 0.0);
-			ivec2 swept_span_range = shoreline_span_neighborhood(
-				segment_min_x,
-				segment_max_x,
-				shoreline_bounds,
-				shoreline_vertex_count
-			);
-			for (
-				int vertex_index = swept_span_range.x;
-				vertex_index <= swept_span_range.y;
-				vertex_index++
-			) {
-				vec2 edge_start = shoreline_vertex(shoreline_index, vertex_index);
-				vec2 edge_end = shoreline_vertex(shoreline_index, vertex_index + 1);
-				vec2 edge = edge_end - edge_start;
-				vec2 channel_normal = shoreline_channel_normal(
-					edge,
-					channel_y_sign
-				);
-				if (dot(motion_step, channel_normal) >= 0.0) {
-					continue;
-				}
-				float crossing = segment_intersection_fraction(
-					point,
-					next_point,
-					edge_start,
-					edge_end
-				);
-				if (crossing >= 0.0 && crossing < earliest_crossing) {
-					earliest_crossing = crossing;
-					crossing_channel_normal = channel_normal;
-					crossing_downstream_tangent = shoreline_downstream_tangent(edge);
-				}
-			}
-			if (earliest_crossing > 1.0) {
-				continue;
-			}
-			vec2 crossing_point = mix(point, next_point, earliest_crossing);
-			float remaining_step = length(next_point - crossing_point);
-			vec2 redirected_endpoint = (
-				crossing_point
-				+ crossing_channel_normal * 1.5
-				+ crossing_downstream_tangent * remaining_step
-			);
-			next_point = mix(
-				next_point,
-				redirected_endpoint,
-				shoreline_weight
-			);
-		}
-	}
-
 	// Swept polygon entry is resolved only for ordinary flowing heads. This both
 	// prevents high-speed tunneling and keeps reservoir ownership decisive when
 	// geometries overlap. Absorption is a single deterministic decision based on
@@ -1672,7 +1495,6 @@ void process() {
 				float drain_selector = hash11(
 					particle_index * 29.731
 					+ TRANSFORM[2].w * 53.117
-					+ interaction_metadata.z * 419.0
 					+ stage_phase * 17.0
 				);
 				if (drain_selector >= clamp(regime_drain_weight, 0.0, 1.0)) {
@@ -1683,7 +1505,6 @@ void process() {
 				float obstacle_selector = hash11(
 					particle_index * 43.731
 					+ TRANSFORM[2].w * 71.117
-					+ interaction_metadata.z * 313.0
 					+ stage_phase * 11.0
 				);
 				if (obstacle_selector >= clamp(regime_obstacle_weight, 0.0, 1.0)) {

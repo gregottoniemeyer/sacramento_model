@@ -170,7 +170,7 @@ desired reservoir count and `p` is interaction power.
 | Regime | Current seven-screen definition |
 |---|---|
 | Kinship | All seven: `R 0/c0`, `Dr 0/p0`, `Ob 0/p0`, `So .10`, `Sh 1`; salmon `11/01–01/31` daily and leaves `10/01–10/31` every 2 days. |
-| Agriculture (`ranch`) | `R .20/c1` on S/Mi/F/A, `.20/c2` on Mc/D, and `0/c0` on C; `Dr .75` on all seven; `Sh .30` on S/Mc/C and `0` elsewhere. Positive-area reservoir gates are scheduled open `06/01–08/31`; aperture is otherwise undefined. |
+| Agriculture (`ranch`) | `R .20/c1` on S/Mi/F/A, `.20/c2` on Mc/D, and `0/c0` on C; `Dr .75` and `Ob .10` on all seven; `Sh .30` on S/Mc/C and `0` elsewhere. Positive-area reservoir gates are scheduled open `06/01–08/31`; aperture is otherwise undefined. |
 | Gold Rush | Only F/A/D define physics: `R .10` (count blank), `Dr .30/p1`, `Ob .30/p1`, `Sh 1`, plus the Kinship salmon/leaf seasons. S/Mc/C/Mi remain blank. |
 | Water Projects | S/Mc/F/A/D: `R .33/c1`, `Dr .50`; C/Mi: explicit `R 0/c0`, `Dr 0`. Five of seven whole-river stages is the nearest discrete allocation to 75%. All seven define `Sh 0` and leaves `0`; other fields and gate schedules are blank. |
 | Hydropower | S/Mc/Mi/F/A/D: `R .50/c2`, aperture `.33`, gate open `01/01–12/31`; C: `R 0/c0` with no gate. All seven inherit `Dr .25`; `Sh .20` on Mc/C and `0` elsewhere. |
@@ -180,26 +180,46 @@ desired reservoir count and `p` is interaction power.
 The four `*_area_fraction` physics values are deterministic admission or
 encounter budgets over particle lifecycles. They do not resize geometry or
 promise literal screen-area coverage. Drain and obstacle `power` are separate
-from those budgets and control response strength for admitted encounters. A
-defined zero reservoir area or count removes the reservoir constraint and debug
-guide; a defined zero drain or obstacle area removes its constraint and guide.
-If a regime removes a live reservoir, retained heads resume downstream flow and
-their existing orbit trails fade over the normal trail lifetime. The
-GPU renderer also still has one physical `reservoir_main`; a profile value such
-as `reservoir_count=2` is retained desired-state data for a future two-slot
-renderer and does not create a second reservoir today.
+from those budgets and control response strength for admitted encounters. For
+drains, obstacles, and sources, a positive weight also selects how many members
+of a bounded resident bank are active: `ceil(weight * capacity)`. The capacities
+are five drains, two obstacles, and four sources. Thus Agriculture's `.75` drain
+weight renders four field/drain polygons and its `.10` obstacle weight renders
+one obstacle. The admission selector is feature-wide, so `.75` admits one 75%
+cohort across all four drains rather than independently giving every drain a 75%
+chance. A defined zero activates no slots; an undefined feature preserves one
+authored fallback slot and its authored budget.
 
-The current production stage has one authored geometry slot each for its
-reservoir, drain, obstacle, and source. Regimes move those existing slots rather
-than creating or resizing geometry. A defined feature's center is a stable hash
-of `screen_id`, feature kind, slot index, and its sorted contributor IDs. Each
-contributor yields one candidate center, and mixed contributors use the equal
-blend of those centers. Polygon shapes are translated from immutable captured
-authored vertices, not from their last live position, so `A -> B -> A` restores
-the exact A coordinates without accumulating drift. With no defined contributor,
-the authored center/vertices return. Explicit zero is different from undefined:
-it remains a defined regime placement internally while the feature constraint
-and its debug guide remain absent.
+The seven resident interaction resources—five drains and two obstacles—fit in
+the eight-record interaction texture and leave one slot available for controller
+geometry. Four source resources occupy their independent eight-record source
+capacity. These banks are allocated once during stage startup. Regime changes
+only enable, disable, and translate the resident resources; they never create or
+resize a node, resource, particle pool, or texture.
+
+A feature center is a stable hash of `screen_id`, feature kind, slot index, and
+the sorted IDs of every active regime that defines a physical feature for that
+screen. Slot centers are stratified across their placement region to avoid
+stacking multiple fields or sources on top of each other. This complete layout
+key means each distinct combination of contributing active regimes gets its own
+deterministic per-screen reservoir, field, obstacle, and source arrangement,
+including an authored-strength fallback feature whose own value is undefined.
+A truly unaffected/no-op regime keeps the authored layout. Polygon shapes are
+translated
+from immutable captured authored vertices, not from their last live position,
+so `A -> B -> A` restores the exact A coordinates without accumulating drift.
+Explicit zero is different from undefined: it keeps the regime in the layout
+key while activating no constraint or debug guide for that feature.
+
+A defined zero reservoir area or count removes the reservoir constraint and
+debug guide. If a regime removes or relocates a live reservoir, retained heads
+resume downstream flow and their existing orbit trails fade over the normal
+trail lifetime. Obstacles affect moving heads on their next simulation step;
+new source layouts apply to future or recycled heads; heads already absorbed by
+a removed field recycle after their immutable trail lifetime. None of these
+transitions restarts the water particles. The GPU renderer still has one
+physical `reservoir_main`; a profile value such as `reservoir_count=2` remains
+desired-state data and does not create a second reservoir today.
 
 Reservoir schedules are blended separately from the equal feature mean. Active
 profiles with positive reservoir area and a complete gate schedule contribute
@@ -211,20 +231,19 @@ August. Thus, when both are active on a non-Cottonwood screen, the aperture is
 The authored/manual gate state remains an outer enable. Agriculture alone uses
 the authored aperture in season and closes it outside the season.
 
-Every stage generates a visibly different but deterministic top and bottom bank
-once from its stable `screen_id` and stage identity. Each bank has one
-water-edge point at every model-grid X coordinate from `0` through `16`, for 17
-ordered samples. All 17 samples—including the inlet and outlet—belong to the
-generated shape; they are not forced to the screen boundaries. Bank intrusion
-may reach `2.6` world units, while a per-column guard preserves at least `5.25`
-world units of open channel. Regime changes never regenerate those samples:
-`shoreline_randomness` changes only their repellent strength. A value of zero
-skips shoreline physics; it does not rebuild the bank as a straight geometric
-line. Existing immutable water history stays in place, providing the visible
-transition. When shoreline physics is active, ordinary left-edge water releases
-are limited to that stage's actual open inlet gap, with enough clearance to
-begin beyond both banks' complete influence field. Interior source polygons
-retain their own explicit spawning behavior.
+`shoreline_randomness` is retained as the profile/data name for compatibility,
+but it now drives a lightweight edge-turbulence field instead of shoreline
+polygons. The normalized `0…1` value scales a 180-pixel band along both the top
+and bottom edges. Most of that band adds deterministic, zero-mean cross-stream
+turbulence with a smaller streamwise component; the outermost 40 pixels add an
+inward confinement force so heads stay on screen. Zero disables the complete
+effect and `1.0` applies full turbulence. There is no shoreline collision
+geometry, debug polygon, data texture, or narrowed channel, and the ordinary
+left-edge inlet remains the full `y = 28…1052` range at every setting. Existing
+immutable water history stays in place while the live heads respond, so a
+regime transition remains visibly continuous without restarting particles.
+The uniform edge field is also cheaper than the former polygon force and
+swept-crossing searches.
 
 ### Stage presentation layers and model calendar
 
@@ -351,7 +370,7 @@ The production presentation, regime, calendar, and watershed paths are:
 
 | Runtime path | Compatibility alias | Effect |
 |---|---|---|
-| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir, drain/obstacle, shoreline, and source debug geometry without changing physics |
+| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir, drain/obstacle, and source debug geometry without changing physics |
 | `stage.title` | `stage_title` | River display text |
 | `stage.title_visible` | `stage_title_visible` | Title visibility |
 | `stage.regime_panel_visible` | `regime_panel_visible` | Active-regime panel visibility for this screen |
@@ -377,7 +396,7 @@ The production presentation, regime, calendar, and watershed paths are:
 | `regimes.hydropower` | none | Set Hydropower active/inactive |
 | `regimes.tech` | none | Set Tech active/inactive |
 | `regimes.watershed` | none | Set Watershed active/inactive |
-| `shoreline.randomness` | `shoreline_randomness`, `shorelines.randomness` | Directly set this stage's shoreline force `0…1`; the next shared regime change reapplies the normalized profile value |
+| `shoreline.randomness` | `shoreline_randomness`, `shorelines.randomness` | Directly set this stage's top/bottom edge-turbulence amount `0…1`; the next shared regime change reapplies the normalized profile value |
 
 The fleet controller exposes the same absolute visibility state from the
 repository root:
@@ -413,21 +432,22 @@ replayed absolute controller state does not repeat feature, panel, ecology, or
 gate-schedule work. Ecology and regime-driven gate schedules are reevaluated only
 when the model day or active regime set changes. Kinship's defined zero drain and
 obstacle budgets disable both generic polygon-interaction shader passes while
-leaving its full shoreline field active.
+leaving its full edge-turbulence field active.
 
 Every real regime revision advances `reservoir_geometry_revision` before
 applying the new center. Retained reservoir heads are released in place into
 downstream flow before new-center reservoir physics begins; their old orbit
-trails remain immutable and fade normally. Placement runs only on initial stage
-hydration or a real regime transition, and unchanged geometry keys skip texture
-uploads. It performs no per-frame placement work and creates no nodes, resources,
-particle pools, or extra reservoir slots. The renderer therefore still draws at
-most one physical reservoir even when desired `reservoir_count=2`.
+trails remain immutable and fade normally. Placement of the reservoir and
+bounded feature banks runs only on initial stage hydration or a real regime
+transition, and unchanged layout keys skip geometry uploads. It performs no
+per-frame placement work and creates no nodes, resources, particle pools, or
+extra reservoir slots. The renderer therefore still draws at most one physical
+reservoir even when desired `reservoir_count=2`.
 
-Shoreline steering and swept-crossing checks derive the local 16th-grid X span
-touched by the head or motion segment and inspect that span plus one neighbor on
-each side; they do not scan all 16 bank segments for every lookup. The authored
-two-bank geometry and control texture remain fixed.
+The edge-turbulence path is a bounded uniform calculation in the water-head
+shader. It uses no bank texture and performs no shoreline segment scan or
+swept-polygon collision. Regime changes upload the new amount to the seven
+resident water materials; they do not rebuild geometry or narrow the inlet.
 
 Salmon and leaves each use a 300-slot circular release-control pool. New release
 commands overwrite old slots without creating particles or textures; salmon's
@@ -468,16 +488,31 @@ Profile fields are `regime_profile_path`, `regime_profiles_loaded`,
 `regime_reservoir_renderer_capacity`, `regime_geometry_mode`,
 `regime_geometry_keys`, `regime_geometry_update_count`,
 `regime_geometry_undefined_fallback`, `regime_geometry_mixed_contributors`, and
-`regime_geometry_preserves_particle_pools`. Reservoir placement fields are
+`regime_geometry_preserves_particle_pools`. The bounded feature-bank fields are
+`regime_feature_slot_capacities`, `regime_feature_slot_counts_desired`,
+`regime_feature_slot_counts_rendered`, `regime_feature_slot_counts_resident`,
+and `regime_feature_controller_spare_capacity`. They distinguish the profile's
+requested count from the enabled regime-bank count, report the resident startup
+banks, and expose the one spare interaction/four spare source controller slots.
+Reservoir placement fields are
 `reservoir_center_pixels`, `reservoir_center_pixels_authored`,
 `reservoir_geometry_revision`, and `reservoir_geometry_revision_uniforms`.
 Shoreline fields are
-`shoreline_randomness`, `shoreline_count`, `shoreline_vertex_count`,
+`shoreline_effect_mode`, `shoreline_randomness`, `shoreline_count`,
+`shoreline_vertex_count`,
 `shoreline_ids`, `shoreline_obstacles`, `shoreline_data_texture_bound`,
 `shoreline_data_texture_size`, `shoreline_count_uniforms`,
 `shoreline_texture_bound_uniforms`, `shoreline_inlet_y_range_pixels`,
 `shoreline_inlet_y_range_uniforms`, `shoreline_overlay_count`, and
-`shoreline_preserves_interaction_capacity`.
+`shoreline_preserves_interaction_capacity`. `shoreline_effect_mode` reports
+`EDGE_TURBULENCE`; the legacy geometry/texture fields report zero/empty/unbound
+and the inlet reports the full range. Edge-field diagnostics are
+`edge_turbulence_amount`, `edge_turbulence_band_pixels`,
+`edge_turbulence_wall_band_pixels`, `edge_turbulence_crossflow_ratio`,
+`edge_turbulence_streamwise_ratio`, `edge_turbulence_inward_ratio`,
+`edge_turbulence_amount_uniforms`, `edge_turbulence_band_uniforms`,
+`edge_turbulence_wall_band_uniforms`, and
+`edge_turbulence_parameter_upload_count`.
 Clock fields are `model_day_index`, `model_day_of_year`,
 `model_minute_of_day`, `model_elapsed_seconds`, `model_year_progress`,
 `model_year_duration_seconds`, `model_year_frames_at_30_fps`,
@@ -560,6 +595,12 @@ eight polygons, with at most 12 vertices in each polygon. Controller vertices
 use the same 16 x 9, Y-up world as the CPU model; the stage converts each point
 to the native 1920 x 1080 canvas as `(x * 120, (9 - y) * 120)`.
 
+An opted-in production stage allocates a fixed regime bank at startup: five
+drain/field polygons and two obstacles. Those seven resident resources leave
+one of the eight interaction records available to controller geometry. Inactive
+internal bank members remain resident but are omitted from the packed GPU
+records; switching regimes only changes their enabled state and placement.
+
 Every polygon has these mutable fields:
 
 - `mode`: `"absorb"` or `"repel"`
@@ -619,12 +660,15 @@ Mutable fields can also be set through `changes` as
 ```
 
 Absorption applies only to a swept entry through an upstream-facing boundary
-edge: its outward normal must point toward -X. The shader makes one
-deterministic accept/reject choice from the polygon's stable ID and the global
-particle identity. An accepted head stops just inside the crossed edge; its
-already emitted tail is immutable and fades normally, then the occupied head
-slot recycles cleanly. A rejected head receives one Y wave impulse and
-continues downstream. This is line absorption rather than visual clipping.
+edge: its outward normal must point toward -X. The shader makes one deterministic
+accept/reject choice for the drain/field feature cohort and global particle
+lifecycle. Every active drain compares that same cohort selector with the same
+regime-wide budget, so adding more field polygons does not compound the
+fraction. An accepted head stops just inside the crossed edge; its already
+emitted tail is immutable and fades normally, then the occupied head slot
+recycles cleanly. A rejected head receives one Y wave impulse and continues
+downstream. This is line absorption rather than visual clipping. Obstacles use
+the corresponding feature-wide obstacle cohort.
 
 Repulsion acts on heads only. It applies a soft redirect within the configured
 influence distance and a swept boundary correction when a fixed step would
@@ -642,6 +686,10 @@ being added.
 ordinary GPU water heads can begin a new lifecycle. A stage supports at most
 eight sources with at most 12 vertices each. Controller geometry remains in the
 16 x 9 Y-up world. Each source has these fields:
+
+An opted-in production stage allocates four resident regime-source slots once,
+leaving four of the eight records free for controller geometry. Inactive regime
+slots remain resident but are omitted from the packed GPU records.
 
 - `vertices`: three through 12 finite vertices forming a simple polygon
 - `enabled`: whether the source participates in water admission
@@ -692,6 +740,11 @@ complete bounding-box minimum and maximum X. Heads therefore emerge throughout
 the source's horizontal extent instead of sharing one hard vertical launch
 seam. The head then travels in the configured direction, so the polygon visibly
 produces water rather than serving only as a debug shape.
+
+For regime-owned sources, the normalized source budget admits a lifecycle once
+for the complete feature cohort before the shader chooses among the enabled
+source slots. Adding source polygons therefore distributes the admitted water
+without multiplying the regime budget.
 
 Source configuration is packed into its own fixed 128 x 1 `RGBAF` texture.
 Only the water-head particle-process shader reads it. Configuration-time image
@@ -1151,11 +1204,14 @@ the project's 30 FPS cap, the two-second segment fade, the 96-pixel
 discontinuity cutoff, identity aliases, gate width conversion, pause state, and
 debug visibility. It verifies the transparent native water-only viewport, its
 single composite display, and the ecological overlays' occupancy isolation. It
-also verifies that runtime
-reservoir center and radius updates reach every particle simulation layer, that
-the two default interaction polygons pack into the shared 128 x 1 `RGBAF`
-texture, and that controller upsert, field update, reshape, and removal reach all
-seven particle materials.
+also verifies that runtime reservoir center and radius updates reach every
+particle simulation layer, that the bounded interaction/source banks activate
+and compact to their expected GPU records, that the one interaction and four
+source controller slots remain available, and that controller upsert, field
+update, reshape, and removal reach all seven particle materials. Regime coverage
+includes Agriculture's four drains and one obstacle, deterministic per-screen
+and per-regime placement, explicit-zero removal, undefined fallback, and stable
+pool/resource identity across live transitions.
 The source, salmon, and leaf smoke scenes additionally validate source packing,
 weighted-edge Y plus independent bounding-box X sampling, release scheduling,
 their occupancy contracts, bounded water/salmon immutable trails, fixed circular

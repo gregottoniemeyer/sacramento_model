@@ -176,7 +176,7 @@ count and `p` is interaction power.
 | Regime | Current per-river matrix and schedule |
 |---|---|
 | Kinship | All: `R 0/c0`, `Dr 0/p0`, `Ob 0/p0`, `So .10`, `Sh 1`; salmon `11/01–01/31` daily, leaves `10/01–10/31` every 2 days. |
-| Agriculture (`ranch`) | `R .20/c1` S/Mi/F/A, `.20/c2` Mc/D, `0/c0` C; `Dr .75` all; `Sh .30` S/Mc/C, `0` elsewhere. Positive-area gates open `06/01–08/31`; aperture blank. |
+| Agriculture (`ranch`) | `R .20/c1` S/Mi/F/A, `.20/c2` Mc/D, `0/c0` C; `Dr .75` and `Ob .10` all; `Sh .30` S/Mc/C, `0` elsewhere. Positive-area gates open `06/01–08/31`; aperture blank. |
 | Gold Rush | F/A/D only: `R .10` with count blank, `Dr .30/p1`, `Ob .30/p1`, `Sh 1`, and the Kinship salmon/leaf seasons. S/Mc/C/Mi are blank. |
 | Water Projects | S/Mc/F/A/D: `R .33/c1`, `Dr .50`; C/Mi: explicit `R 0/c0`, `Dr 0`; five of seven whole-river stages is the nearest discrete allocation to 75%; all: `Sh 0`, leaves `0`; no gate schedule. |
 | Hydropower | S/Mc/Mi/F/A/D: `R .50/c2`, aperture `.33`, open `01/01–12/31`; C: `R 0/c0`, no gate. `Dr .25` all; `Sh .20` Mc/C and `0` elsewhere. |
@@ -184,30 +184,45 @@ count and `p` is interaction power.
 | Watershed | Reserved for the future AI watershed model; no linked river table and no runtime effects yet. |
 
 Area fractions are deterministic admission/encounter budgets, not literal
-geometry or guaranteed screen-area coverage. Stable selectors decide which
-particle lifecycles encounter the authored reservoir, drain/field, obstacle, or
-source behavior. Drain and obstacle `power` independently set response strength
-for admitted encounters. A defined zero reservoir area or count removes the
-reservoir constraint and guide; defined zero drain or obstacle area removes its
-constraint and guide. When a live regime removes a reservoir, retained heads are
-released into downstream flow and their already-recorded orbit trails fade over
-the ordinary trail lifetime. The GPU stage has only one physical
-`reservoir_main`; `reservoir_count=2` is retained desired-state data awaiting a
-two-slot renderer and does not produce a second reservoir.
+geometry or guaranteed screen-area coverage. A positive drain, obstacle, or
+source weight also chooses a count from its bounded resident bank with
+`ceil(weight * capacity)`: five drains, two obstacles, and four sources.
+Agriculture's `.75` drain weight therefore activates four field/drain polygons,
+while its `.10` obstacle weight activates one obstacle. A feature-wide stable
+selector applies each budget once across the complete bank; four drains do not
+independently compound the `.75` encounter budget. Drain and obstacle `power`
+independently set response strength for admitted encounters. A defined zero
+activates no bank slots. An undefined feature preserves one authored fallback
+slot and its authored budget.
 
-The current production geometry remains a fixed, bounded set: one authored
-slot each for the reservoir, drain, obstacle, and source. A regime change
-translates those existing shapes without resizing them or allocating another
-node, resource, particle pool, or reservoir. For each defined feature, its
-center is derived deterministically from the stable `screen_id`, feature kind,
-slot index, and sorted contributor IDs. Each contributor produces its own
-stable candidate center; multiple active contributors use the equal blend of
-those centers. Geometry is always translated from the captured authored shape,
-never from its previous translated position, so `A -> B -> A` returns to the
-exact same A placement without drift. An undefined feature restores its
-authored center and vertices. An explicit zero remains a defined override: its
-stable placement can be retained internally, but its physics and debug guide
-remain absent rather than falling back to the authored feature.
+The seven resident interaction resources—five drains and two obstacles—fit in
+the eight-record interaction texture and leave one controller slot. Four
+resident sources use four records in their separate eight-record source
+texture. The banks are allocated once during startup. Regime changes enable,
+disable, and translate those resources without allocating another node,
+resource, particle pool, or texture.
+
+Feature centers are derived deterministically from the stable `screen_id`,
+feature kind, slot index, and the sorted IDs of all active regimes that define a
+physical feature for that screen. Slot X ranges are stratified, so multiple
+fields and sources spread across the stage. Each distinct set of contributing
+active regimes gets its own stable, per-screen complete layout; an undefined
+feature follows that new layout at authored strength, while a truly
+unaffected/no-op regime retains the authored layout. Geometry is always
+translated from captured authored shapes, never from its previous live
+position, so `A -> B -> A` returns to the exact same A placement without drift.
+An explicit zero remains in the layout key but activates no physics or debug
+guide for that feature.
+
+A defined zero reservoir area or count removes the reservoir constraint and
+guide. When a live regime removes or relocates a reservoir, retained heads are
+released into downstream flow and their already-recorded orbit trails fade over
+the ordinary trail lifetime. Obstacles affect moving heads on the next step;
+sources affect future or recycled lifecycles; heads stopped in a removed field
+recycle after their immutable trail lifetime. No transition restarts the water
+particles. The GPU stage has one physical `reservoir_main`;
+`reservoir_count=2` remains desired-state data and does not produce a second
+reservoir.
 
 Gate scheduling is an area-weighted layer over the feature mean. Each active
 profile with positive reservoir area and a complete schedule contributes its
@@ -220,18 +235,17 @@ Agriculture alone uses the authored aperture in season and closes it outside
 the season; Hydropower alone uses `.33` year-round. The authored/manual gate
 state remains an outer enable.
 
-Each river owns two fixed deterministic chains named
-`shoreline_obstacle_top` and `shoreline_obstacle_bottom`. Each water-facing
-chain has 17 ordered points at model X `0…16`; the stable `screen_id` and stage
-identity make the seven river shapes visibly different. The inlet and outlet
-samples are generated as part of each bank rather than pinned to Y `0` and `9`.
-Intrusion may reach `2.6` world units, with a per-column minimum open-channel
-height of `5.25`. Regime changes alter only the normalized repellent strength.
-Zero skips shoreline physics; it does not rebuild a straight geometric bank.
-`1.0` applies the full field. Existing immutable water history is never
-rewritten. While the field is active, ordinary left-edge head lifecycles spawn
-only inside the generated inlet opening, with clearance from both banks;
-explicit interior source polygons are unchanged.
+The legacy `shoreline_randomness` field now maps directly to a lightweight
+top/bottom edge-turbulence amount. Its normalized `0…1` value scales a
+180-pixel band at each edge. Most of the band applies deterministic, zero-mean
+cross-stream turbulence plus a smaller streamwise component; only the outermost
+40 pixels apply inward confinement. At zero the complete effect is disabled;
+at `1.0` it is at full strength. No production shoreline polygon, collision
+chain, debug outline, or data texture is created, so the effect does not narrow
+the river. Ordinary left-edge lifecycles retain the full `y = 28…1052` inlet at
+every setting, while explicit interior sources retain their own spawning
+behavior. Existing immutable water history is never rewritten. The uniform
+field is cheaper than the former shoreline force and swept-crossing passes.
 
 ### Regime-transition work and bounded state
 
@@ -246,17 +260,18 @@ Every real `ModelRegimes` revision also increments the reservoir geometry
 revision before the new regime center is applied. The shader releases any
 reservoir-owned heads in place into downstream flow before they can respond to
 the new-center reservoir physics. Already-recorded orbit trails stay at their
-old positions and fade over the ordinary trail lifetime. Placement is evaluated
-only during initial stage hydration or a real regime transition; it is not
-recomputed or uploaded every frame. The single physical reservoir capacity is
-unchanged even when the profile's desired `reservoir_count` is `2`.
+old positions and fade over the ordinary trail lifetime. Reservoir and bounded
+feature-bank placement is evaluated only during initial stage hydration or a
+real regime transition; it is not recomputed or uploaded every frame. The single
+physical reservoir capacity is unchanged even when the profile's desired
+`reservoir_count` is `2`.
 
-Both shoreline force and swept-crossing lookups map the relevant X interval to
-the local 16th-grid span and one neighboring span on either side. The shader
-therefore preserves endpoint coverage without scanning all 16 segments of each
-bank for every lookup. Kinship's explicit zero drain and obstacle budgets also
-skip both generic interaction-polygon passes while its full shoreline field
-remains active.
+Edge turbulence is one bounded uniform calculation in the water-head shader. It
+does not scan shoreline segments or perform swept-polygon collisions. Regime
+changes upload only the current field parameters to the seven resident water
+materials. Kinship's explicit zero drain and obstacle budgets also skip both
+generic interaction-polygon passes while its full edge-turbulence field remains
+active.
 
 The salmon and leaf release systems each retain a fixed 300-slot circular control
 pool. Releases overwrite old commands; they do not append particles, nodes,
@@ -280,24 +295,27 @@ positions; the head and segment draw shaders remain rendering-only and never
 sample the geometry texture.
 
 This fixed-size representation makes geometry edits inexpensive and keeps the
-shader loop bounded. It is separate from the CPU profile's circle, rectangle,
-shoreline, polygon-obstacle, and rectangular-absorber collections.
+shader loop bounded. Production reserves seven resident records for its five
+drain/field and two obstacle slots, leaving one record for controller geometry.
+Only active resident slots are packed for a given regime. It is separate from
+the CPU profile's circle, rectangle, shoreline, polygon-obstacle, and
+rectangular-absorber collections.
 
-The two production shoreline chains use their own 40 x 1 `RGBAF` texture (two
-20-texel records) and therefore consume none of the eight addressable
-interaction-polygon slots. Only the 17 water-facing segments participate in
-physics and debug drawing; diagnostic land closures never become collision
-edges.
+Production edge turbulence consumes no interaction record and no configuration
+texture. The legacy shoreline geometry diagnostic fields remain available for
+compatibility but report zero/empty/unbound values.
 
 `GPUFlowSourcePolygon` uses an independent 128 x 1 `RGBAF` texture with the
-same maximum of eight polygons and 12 vertices per polygon. A source stores its
-enabled state, emission fraction, flow direction, optional deterministic seed,
-and edge-weight data. New/recycled water heads choose a source on the GPU and
-use a weighted downstream-edge sample for Y. In the production +X model, an
-independent deterministic sample spreads X across the polygon's bounding-box
-minimum and maximum, eliminating a hard vertical launch seam. Heads not
-selected by the active source fractions continue to use the ordinary left
-inlet.
+same maximum of eight polygons and 12 vertices per polygon. Production allocates
+four resident source slots once, leaving four records for controller geometry;
+only active slots are packed. A source stores its enabled state, emission
+fraction, flow direction, optional deterministic seed, and edge-weight data.
+New/recycled water heads first enter one feature-wide source cohort, then choose
+among its active sources on the GPU and use a weighted downstream-edge sample
+for Y. In the production +X model, an independent deterministic sample spreads
+X across the polygon's bounding-box minimum and maximum, eliminating a hard
+vertical launch seam. Heads not selected by the active source fraction continue
+to use the ordinary full-height left inlet.
 
 ## Screen IDs and stage presentation
 
@@ -744,7 +762,7 @@ Production GPU presentation, regime, calendar, and watershed paths are:
 
 | Runtime path | Compatibility alias | Value/effect |
 |---|---|---|
-| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir, drain/obstacle, shoreline, and source debug geometry without changing physics |
+| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir, drain/obstacle, and source debug geometry without changing physics |
 | `stage.title` | `stage_title` | River display text |
 | `stage.title_visible` | `stage_title_visible` | Title visibility |
 | `stage.regime_panel_visible` | `regime_panel_visible` | Active-regime panel visibility on this screen |
@@ -770,7 +788,7 @@ Production GPU presentation, regime, calendar, and watershed paths are:
 | `regimes.hydropower` | none | Set Hydropower active/inactive |
 | `regimes.tech` | none | Set Tech active/inactive |
 | `regimes.watershed` | none | Set Watershed active/inactive |
-| `shoreline.randomness` | `shoreline_randomness`, `shorelines.randomness` | Direct per-stage shoreline-force override `0…1`; a later regime change reapplies the normalized shared value |
+| `shoreline.randomness` | `shoreline_randomness`, `shorelines.randomness` | Direct per-stage top/bottom edge-turbulence override `0…1`; a later regime change reapplies the normalized shared value |
 
 From the repository root, the fleet controller sends that visibility as an
 absolute state to every configured screen and persists it across fleet starts:
@@ -780,9 +798,9 @@ python3 fleet/godot_controller.py set --geo FALSE
 python3 fleet/godot_controller.py set --geo TRUE
 ```
 
-`FALSE` hides guides/outlines only; reservoirs, drains, obstacles, shorelines,
-and sources keep their current physics. `--geo` can be combined with one or
-more `--regime` arguments in the same `set` command.
+`FALSE` hides guides/outlines only; reservoirs, drains, obstacles, sources, and
+the non-geometric edge-turbulence field keep their current physics. `--geo` can
+be combined with one or more `--regime` arguments in the same `set` command.
 
 The public `set_model_date_time(model_date_time)` method provides the same
 validated external-time handoff as `calendar.date` and `stage.date`;
@@ -817,17 +835,32 @@ these and publishes its resolved `regime_effective_feature_state`,
 `regime_geometry_mode`, `regime_geometry_keys`,
 `regime_geometry_update_count`, `regime_geometry_undefined_fallback`,
 `regime_geometry_mixed_contributors`, and
-`regime_geometry_preserves_particle_pools`. Reservoir diagnostics also expose
+`regime_geometry_preserves_particle_pools`. Feature-bank diagnostics are
+`regime_feature_slot_capacities`, `regime_feature_slot_counts_desired`,
+`regime_feature_slot_counts_rendered`, `regime_feature_slot_counts_resident`,
+and `regime_feature_controller_spare_capacity`. Together they expose the
+profile-derived counts, enabled regime-bank counts, the resident startup banks,
+and the remaining one interaction/four source controller slots. Reservoir
+diagnostics also expose
 `reservoir_center_pixels`, `reservoir_center_pixels_authored`,
 `reservoir_geometry_revision`, and `reservoir_geometry_revision_uniforms`.
 These fields distinguish an undefined feature that preserves authored behavior
 from an explicit-zero override. Shoreline diagnostics are
-`shoreline_randomness`, `shoreline_count`, `shoreline_vertex_count`,
+`shoreline_effect_mode`, `shoreline_randomness`, `shoreline_count`,
+`shoreline_vertex_count`,
 `shoreline_ids`, `shoreline_obstacles`, `shoreline_data_texture_bound`,
 `shoreline_data_texture_size`, `shoreline_count_uniforms`,
 `shoreline_texture_bound_uniforms`, `shoreline_inlet_y_range_pixels`,
 `shoreline_inlet_y_range_uniforms`, `shoreline_overlay_count`, and
-`shoreline_preserves_interaction_capacity`.
+`shoreline_preserves_interaction_capacity`. `shoreline_effect_mode` reports
+`EDGE_TURBULENCE`; the legacy geometry and texture fields report
+zero/empty/unbound and the inlet reports its full range.
+Edge-field diagnostics are `edge_turbulence_amount`,
+`edge_turbulence_band_pixels`, `edge_turbulence_wall_band_pixels`,
+`edge_turbulence_crossflow_ratio`, `edge_turbulence_streamwise_ratio`,
+`edge_turbulence_inward_ratio`, `edge_turbulence_amount_uniforms`,
+`edge_turbulence_band_uniforms`, `edge_turbulence_wall_band_uniforms`, and
+`edge_turbulence_parameter_upload_count`.
 
 Presentation paths do not alter `screen_id`, `model_id`, particle state, debug
 visibility, or the water-only occupancy texture. Calendar paths update the
@@ -1560,7 +1593,7 @@ When `accept_keyboard_input` is enabled on a model:
 | Key | Runtime effect |
 |---|---|
 | `0`, `8`, `9` | Production GPU: set `flow_rate` to `0/9`, `8/9`, or `9/9` |
-| `V` | Apply one synchronized absolute obstacle, shoreline, absorber, source, and reservoir debug-visibility state to every active stage in the process |
+| `V` | Apply one synchronized absolute drain/obstacle, source, and reservoir debug-visibility state to every active stage in the process; edge turbulence has no geometry guide |
 | `G` | Toggle the first reservoir's gate |
 | `[` | Narrow the first reservoir gate by `gate_width_step` |
 | `]` | Widen the first reservoir gate by `gate_width_step` |

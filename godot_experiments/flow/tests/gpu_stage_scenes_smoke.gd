@@ -22,6 +22,11 @@ const EXPECTED_TITLE_FONT_SIZE := 60
 const EXPECTED_DATE_FONT_SIZE := 48
 const EXPECTED_DATE_OPENTYPE_FEATURE := "tnum"
 const EXPECTED_REGIME_PROFILE_PATH := "res://regime_feature_profiles.txt"
+const EXPECTED_REGIME_SLOT_CAPACITIES := {
+	"drain": 5,
+	"obstacle": 2,
+	"source": 4,
+}
 const EXPECTED_REGIME_NAMES := [
 	"Kinship",
 	"Agriculture",
@@ -72,7 +77,6 @@ const SCENES: Array[Dictionary] = [
 var _failures := PackedStringArray()
 var _seen_ids: Dictionary = {}
 var _expected_timeline_snapshot: Dictionary = {}
-var _shoreline_signature_by_screen: Dictionary = {}
 var _regime_geometry_signature_by_screen: Dictionary = {}
 
 
@@ -89,13 +93,6 @@ func _run() -> void:
 	_expect(
 		_seen_ids.size() == SCENES.size(),
 		"The seven scenes must expose seven unique screen/stage IDs."
-	)
-	var unique_shoreline_signatures: Dictionary = {}
-	for shoreline_signature: Variant in _shoreline_signature_by_screen.values():
-		unique_shoreline_signatures[String(shoreline_signature)] = true
-	_expect(
-		unique_shoreline_signatures.size() == SCENES.size(),
-		"The seven stages must generate seven distinct shoreline shapes."
 	)
 	var unique_regime_geometry_signatures: Dictionary = {}
 	for geometry_signature: Variant in _regime_geometry_signature_by_screen.values():
@@ -306,7 +303,7 @@ func _regime_matrix_expected_features(
 				),
 				"reservoir_count": reservoir_counts[screen_id],
 				"drain_area_fraction": 0.75,
-				"obstacle_area_fraction": null,
+				"obstacle_area_fraction": 0.10,
 				"source_area_fraction": null,
 				"shoreline_randomness": (
 					0.30
@@ -490,18 +487,9 @@ func _check_two_stage_texture_isolation() -> void:
 		var first_summary: Dictionary = first_stage.call(&"runtime_summary")
 		var second_summary: Dictionary = second_stage.call(&"runtime_summary")
 		_expect(
-			_shoreline_geometry_signature(first_summary)
-				== String(_shoreline_signature_by_screen.get(
-					String(SCENES[0]["id"]), ""
-				)),
-			"Reinstantiating a screen must reproduce its fixed shoreline."
-		)
-		_expect(
-			_shoreline_geometry_signature(second_summary)
-				== String(_shoreline_signature_by_screen.get(
-					String(SCENES[1]["id"]), ""
-				)),
-			"The second screen must reproduce its fixed shoreline."
+			_shoreline_geometry_signature(first_summary).is_empty()
+			and _shoreline_geometry_signature(second_summary).is_empty(),
+			"Simultaneous stages must not recreate legacy shoreline banks."
 		)
 		var first_viewport := first_stage.get_node_or_null("WaterOnlyViewport") as SubViewport
 		var second_viewport := second_stage.get_node_or_null("WaterOnlyViewport") as SubViewport
@@ -1008,8 +996,8 @@ func _check_regime_panel(
 func _check_ecology(stage: Node, scene_path: String) -> void:
 	var summary: Dictionary = stage.call(&"runtime_summary")
 	_expect(
-		int(summary.get("source_polygon_count", 0)) == 1,
-		"%s must contain one default addressable water source." % scene_path
+		int(summary.get("source_polygon_count", 0)) == 4,
+		"%s must contain the fixed four-slot source bank." % scene_path
 	)
 
 
@@ -1209,9 +1197,9 @@ func _check_shoreline(
 			"contributors": ["ranch", "tech"],
 		},
 		"obstacle_area_fraction": {
-			"defined": false,
-			"value": 0.0,
-			"contributors": [],
+			"defined": true,
+			"value": 0.10,
+			"contributors": ["ranch"],
 		},
 		"source_area_fraction": {
 			"defined": false,
@@ -1260,7 +1248,7 @@ func _check_shoreline(
 		"regime_applied_feature_budgets",
 		{}
 	)
-	var expected_budget_values := [expected_reservoir_weight, 0.75, 1.0, 1.0]
+	var expected_budget_values := [expected_reservoir_weight, 0.75, 0.10, 1.0]
 	var budget_names := [
 		"reservoir_area_fraction",
 		"drain_area_fraction",
@@ -1282,129 +1270,143 @@ func _check_shoreline(
 	_expect(
 		bool(applied_overrides.get("reservoir", false))
 		and bool(applied_overrides.get("drain_area", false))
-		and not bool(applied_overrides.get("obstacle_area", true))
+		and bool(applied_overrides.get("obstacle_area", false))
 		and not bool(applied_overrides.get("source", true)),
 		"%s must distinguish defined budgets from authored fallbacks." % scene_path
 	)
-	_expect(
-		int(summary.get("shoreline_count", 0)) == 2
-		and int(summary.get("shoreline_vertex_count", 0)) == 17
-		and int(summary.get("shoreline_overlay_count", 0)) == 2,
-		"%s must expose two 17-point shoreline banks." % scene_path
+	_expect_feature_slots(
+		summary,
+		{"drain": 4, "obstacle": 1, "source": 1},
+		scene_path,
 	)
-	_expect(
-		bool(summary.get("shoreline_data_texture_bound", false))
-		and Vector2(summary.get("shoreline_data_texture_size", Vector2.ZERO))
-			== Vector2(40.0, 1.0)
-		and bool(summary.get("shoreline_preserves_interaction_capacity", false)),
-		"%s must bind the dedicated shoreline texture without spending polygon slots."
-			% scene_path
-	)
-	var shoreline_ids := Array(summary.get("shoreline_ids", []))
-	_expect(
-		shoreline_ids.size() == 2
-		and shoreline_ids.has("shoreline_obstacle_top")
-		and shoreline_ids.has("shoreline_obstacle_bottom"),
-		"%s shoreline IDs are incomplete." % scene_path
-	)
-	var bottom_vertices := PackedVector2Array()
-	var top_vertices := PackedVector2Array()
-	for definition_variant: Variant in Array(
-		summary.get("shoreline_obstacles", [])
-	):
-		if not definition_variant is Dictionary:
-			continue
-		var definition: Dictionary = definition_variant
-		var vertices_variant: Variant = definition.get(
-			"vertices_world", PackedVector2Array()
-		)
-		if not vertices_variant is PackedVector2Array:
-			continue
-		var vertices: PackedVector2Array = vertices_variant
-		_expect(
-			vertices.size() == 17,
-			"%s shoreline chain does not have one point at every grid X."
-				% scene_path
-		)
-		for vertex_index in range(vertices.size()):
-			_expect(
-				is_equal_approx(vertices[vertex_index].x, float(vertex_index)),
-				"%s shoreline grid-X anchoring is incorrect." % scene_path
-			)
-		match String(definition.get("side", "")):
-			"bottom":
-				bottom_vertices = vertices
-			"top":
-				top_vertices = vertices
-	_expect(
-		bottom_vertices.size() == 17 and top_vertices.size() == 17,
-		"%s must expose both named bank chains." % scene_path
-	)
-	if bottom_vertices.size() == 17 and top_vertices.size() == 17:
-		var maximum_intrusion := 0.0
-		var endpoint_is_generated := false
-		for endpoint_index in [0, 16]:
-			var bottom_endpoint := bottom_vertices[endpoint_index].y
-			var top_endpoint := top_vertices[endpoint_index].y
-			_expect(
-				is_finite(bottom_endpoint)
-				and bottom_endpoint >= 0.0
-				and bottom_endpoint <= 2.60 + 0.0001
-				and is_finite(top_endpoint)
-				and top_endpoint >= 9.0 - 2.60 - 0.0001
-				and top_endpoint <= 9.0,
-				"%s shoreline endpoints fall outside the generated bank range."
-					% scene_path
-			)
-			endpoint_is_generated = (
-				endpoint_is_generated
-				or bottom_endpoint > 0.0001
-				or top_endpoint < 8.9999
-			)
-		_expect(
-			endpoint_is_generated,
-			"%s shoreline endpoints are still forced to the screen boundaries."
-				% scene_path
-		)
-		for vertex_index in range(17):
-			maximum_intrusion = maxf(
-				maximum_intrusion,
-				maxf(
-					bottom_vertices[vertex_index].y,
-					9.0 - top_vertices[vertex_index].y
-				)
-			)
-			_expect(
-				top_vertices[vertex_index].y - bottom_vertices[vertex_index].y
-					>= 5.25 - 0.0001,
-				"%s shoreline channel becomes narrower than its safety bound."
-					% scene_path
-			)
-		_expect(
-			maximum_intrusion > 1.45,
-			"%s shoreline still uses the old narrow variation range." % scene_path
-		)
-		var inlet_range := Vector2(summary.get(
-			"shoreline_inlet_y_range_pixels",
-			Vector2.ZERO,
-		))
-		var expected_inlet_range := Vector2(28.0, 1052.0)
-		if expected_shoreline_weight > 0.000001:
-			var expected_clearance := 93.5
-			expected_inlet_range = Vector2(
-				(9.0 - top_vertices[0].y) * 120.0 + expected_clearance,
-				(9.0 - bottom_vertices[0].y) * 120.0 - expected_clearance
-			)
-		_expect(
-			inlet_range.is_equal_approx(expected_inlet_range),
-			"%s water inlet lanes do not match its per-river shoreline policy."
-				% scene_path
-		)
-	_shoreline_signature_by_screen[String(expected_id)] = (
-		_shoreline_geometry_signature(summary)
-	)
+	_check_edge_turbulence(summary, expected_shoreline_weight, scene_path)
 	_regime_geometry_signature_by_screen[String(expected_id)] = (
 		_regime_geometry_signature(summary)
+	)
+
+
+func _expect_feature_slots(
+	summary: Dictionary,
+	expected: Dictionary,
+	context: String,
+) -> void:
+	_expect(
+		Dictionary(summary.get("regime_feature_slot_capacities", {}))
+			== EXPECTED_REGIME_SLOT_CAPACITIES
+		and Dictionary(summary.get("regime_feature_slot_counts_resident", {}))
+			== EXPECTED_REGIME_SLOT_CAPACITIES,
+		"%s must retain fixed 5-drain, 2-obstacle, 4-source banks." % context,
+	)
+	_expect(
+		Dictionary(summary.get("regime_feature_slot_counts_desired", {})) == expected
+		and Dictionary(summary.get("regime_feature_slot_counts_rendered", {})) == expected,
+		"%s has incorrect desired or rendered feature counts." % context,
+	)
+	_expect(
+		Dictionary(summary.get("regime_feature_controller_spare_capacity", {})) == {
+			"interaction": 1,
+			"source": 4,
+		},
+		"%s did not preserve controller capacity outside the fixed banks." % context,
+	)
+	_expect(
+		int(summary.get("interaction_polygon_count", 0)) == 7
+		and int(summary.get("source_polygon_count", 0)) == 4
+		and int(summary.get("interaction_overlay_count", 0))
+			== int(expected.get("drain", 0)) + int(expected.get("obstacle", 0))
+		and int(summary.get("source_overlay_count", 0))
+			== int(expected.get("source", 0)),
+		"%s does not retain the complete resident feature resources." % context,
+	)
+	var expected_interaction_count := int(expected.get("drain", 0)) + int(
+		expected.get("obstacle", 0)
+	)
+	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
+		_expect(
+			int(count_variant) == expected_interaction_count,
+			"%s interaction count did not reach every shader." % context,
+		)
+	for count_variant: Variant in Array(summary.get("source_count_uniforms", [])):
+		_expect(
+			int(count_variant) == int(expected.get("source", 0)),
+			"%s source count did not reach every shader." % context,
+		)
+
+
+func _check_edge_turbulence(
+	summary: Dictionary,
+	expected_amount: float,
+	context: String,
+) -> void:
+	_expect(
+		String(summary.get("shoreline_effect_mode", "")) == "EDGE_TURBULENCE"
+		and is_equal_approx(
+			float(summary.get("edge_turbulence_amount", -1.0)),
+			expected_amount,
+		)
+		and is_equal_approx(
+			float(summary.get("edge_turbulence_band_pixels", -1.0)),
+			180.0,
+		)
+		and is_equal_approx(
+			float(summary.get("edge_turbulence_wall_band_pixels", -1.0)),
+			40.0,
+		),
+		"%s has incorrect edge-turbulence settings." % context,
+	)
+	_expect(
+		int(summary.get("shoreline_count", -1)) == 0
+		and int(summary.get("shoreline_vertex_count", -1)) == 0
+		and Array(summary.get("shoreline_ids", [])).is_empty()
+		and Array(summary.get("shoreline_obstacles", [])).is_empty()
+		and int(summary.get("shoreline_overlay_count", -1)) == 0
+		and not bool(summary.get("shoreline_data_texture_bound", true))
+		and Vector2(summary.get("shoreline_data_texture_size", Vector2.ONE))
+			== Vector2.ZERO,
+		"%s still allocates legacy shoreline geometry, texture, or overlays." % context,
+	)
+	_expect(
+		Vector2(summary.get("shoreline_inlet_y_range_pixels", Vector2.ZERO))
+			== Vector2(28.0, 1052.0),
+		"%s edge turbulence must retain the full 28..1052 inlet." % context,
+	)
+	for uniform_spec: Array in [
+		["edge_turbulence_amount_uniforms", expected_amount],
+		["edge_turbulence_band_uniforms", 180.0],
+		["edge_turbulence_wall_band_uniforms", 40.0],
+	]:
+		var values := Array(summary.get(String(uniform_spec[0]), []))
+		_expect(
+			values.size() == 7,
+			"%s %s must reach all seven shader layers." % [context, uniform_spec[0]],
+		)
+		for value_variant: Variant in values:
+			_expect(
+				is_equal_approx(float(value_variant), float(uniform_spec[1])),
+				"%s %s is inconsistent across shaders." % [context, uniform_spec[0]],
+			)
+	for count_variant: Variant in Array(summary.get("shoreline_count_uniforms", [])):
+		_expect(
+			int(count_variant) == 0,
+			"%s still enables legacy shoreline shader records." % context,
+		)
+	for bound_variant: Variant in Array(
+		summary.get("shoreline_texture_bound_uniforms", [])
+	):
+		_expect(
+			not bool(bound_variant),
+			"%s still binds a legacy shoreline texture to a shader." % context,
+		)
+	for inlet_variant: Variant in Array(
+		summary.get("shoreline_inlet_y_range_uniforms", [])
+	):
+		_expect(
+			Vector2(inlet_variant) == Vector2(28.0, 1052.0),
+			"%s full inlet did not reach every shader." % context,
+		)
+	_expect(
+		int(summary.get("edge_turbulence_parameter_upload_count", 0)) >= 1,
+		"%s never uploaded its edge-turbulence parameters." % context,
 	)
 
 
@@ -1570,9 +1572,14 @@ func _check_control_route(
 	await get_tree().process_frame
 	summary = stage.call(&"runtime_summary")
 	_expect(
-		int(summary.get("source_polygon_count", 0)) == 2,
-		"%s routed source upsert must add to the default source." % scene_path
+		int(summary.get("source_polygon_count", 0)) == 5,
+		"%s routed source upsert must add outside the resident source bank." % scene_path
 	)
+	for count_variant: Variant in Array(summary.get("source_count_uniforms", [])):
+		_expect(
+			int(count_variant) == 2,
+			"%s routed source did not reach every shader." % scene_path,
+		)
 	var salmon_after: Dictionary = summary.get("salmon_summary", {})
 	_expect(
 		int(salmon_after.get("release_serial", 0))
@@ -1614,8 +1621,8 @@ func _check_control_route(
 	await get_tree().process_frame
 	summary = stage.call(&"runtime_summary")
 	_expect(
-		int(summary.get("source_polygon_count", 0)) == 1,
-		"%s routed source removal must restore the default source." % scene_path
+		int(summary.get("source_polygon_count", 0)) == 4,
+		"%s routed source removal must restore the resident source bank." % scene_path
 	)
 
 	var polygon_id := "integration_%s" % String(expected_id)
@@ -1645,12 +1652,13 @@ func _check_control_route(
 	await get_tree().process_frame
 	summary = stage.call(&"runtime_summary")
 	_expect(
-		int(summary.get("interaction_polygon_count", 0)) == 3,
-		"%s routed polygon upsert must add to the two defaults." % scene_path
+		int(summary.get("interaction_polygon_count", 0)) == 8,
+		"%s routed polygon upsert must add outside the resident interaction bank."
+			% scene_path
 	)
 	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
 		_expect(
-			int(count_variant) == 3,
+			int(count_variant) == 6,
 			"%s routed polygon count must reach every shader layer." % scene_path
 		)
 
@@ -1696,8 +1704,9 @@ func _check_control_route(
 	await get_tree().process_frame
 	summary = stage.call(&"runtime_summary")
 	_expect(
-		int(summary.get("interaction_polygon_count", 0)) == 2,
-		"%s routed polygon removal must restore the two defaults." % scene_path
+		int(summary.get("interaction_polygon_count", 0)) == 7,
+		"%s routed polygon removal must restore the resident interaction bank."
+			% scene_path
 	)
 
 

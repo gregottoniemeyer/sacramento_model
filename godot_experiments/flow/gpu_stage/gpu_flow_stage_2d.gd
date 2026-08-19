@@ -122,10 +122,6 @@ const MAX_SOURCE_POLYGONS := 8
 const SHORELINE_OBSTACLE_COUNT := 2
 const SHORELINE_EDGE_SPAN_COUNT := 16
 const SHORELINE_EDGE_VERTEX_COUNT := SHORELINE_EDGE_SPAN_COUNT + 1
-const SHORELINE_TEXELS_PER_OBSTACLE := 20
-const SHORELINE_TEXTURE_WIDTH := (
-	SHORELINE_OBSTACLE_COUNT * SHORELINE_TEXELS_PER_OBSTACLE
-)
 const SHORELINE_TOP_ID := &"shoreline_obstacle_top"
 const SHORELINE_BOTTOM_ID := &"shoreline_obstacle_bottom"
 const SHORELINE_MAX_INTRUSION_WORLD := 2.60
@@ -133,10 +129,18 @@ const SHORELINE_MIN_CHANNEL_HEIGHT_WORLD := 5.25
 const SHORELINE_INFLUENCE_WORLD := 0.75
 const SHORELINE_INLET_BASE_MARGIN_PIXELS := 28.0
 const SHORELINE_CLOSURE_MARGIN_WORLD := 2.0
+const EDGE_TURBULENCE_BAND_PIXELS := 180.0
+const EDGE_TURBULENCE_WALL_BAND_PIXELS := 40.0
+const EDGE_TURBULENCE_CROSSFLOW_RATIO := 0.65
+const EDGE_TURBULENCE_STREAMWISE_RATIO := 0.08
+const EDGE_TURBULENCE_INWARD_RATIO := 0.75
 const REGIME_GEOMETRY_BASELINE_KEY := "authored"
 const REGIME_GEOMETRY_WORLD_EDGE_MARGIN := 0.25
 const REGIME_RESERVOIR_X_FRACTION_RANGE := Vector2(0.32, 0.82)
 const REGIME_RESERVOIR_Y_FRACTION_RANGE := Vector2(0.24, 0.76)
+const REGIME_DRAIN_SLOT_CAPACITY := 5
+const REGIME_OBSTACLE_SLOT_CAPACITY := 2
+const REGIME_SOURCE_SLOT_CAPACITY := 4
 const TYPE_ROTATION_RADIANS := -PI * 0.5
 const TYPE_ROTATION_DEGREES := -90.0
 const STAGE_TITLE_POSITION := Vector2(60.0, 540.0)
@@ -368,9 +372,9 @@ var _water_canvas: Node2D
 var _salmon_school: GPUSalmon2D
 var _leaf_field: GPULeaf2D
 var _interaction_data_texture: ImageTexture
-var _shoreline_data_texture: ImageTexture
 var _shoreline_obstacles: Array[Dictionary] = []
 var _shoreline_randomness: float = 0.0
+var _edge_turbulence_parameter_upload_count: int = 0
 var _regime_feature_state_for_screen: Dictionary = {}
 var _regime_reservoir_override_enabled: bool = false
 var _regime_reservoir_count_override_enabled: bool = false
@@ -402,8 +406,10 @@ var _regime_geometry_initialized: bool = false
 var _authored_reservoir_center_pixels := Vector2.ZERO
 var _authored_interaction_vertices: Dictionary = {}
 var _authored_interaction_instance_ids: Dictionary = {}
+var _authored_interaction_enabled: Dictionary = {}
 var _authored_source_vertices: Dictionary = {}
 var _authored_source_instance_ids: Dictionary = {}
+var _authored_source_enabled: Dictionary = {}
 var _applied_regime_geometry_keys: Dictionary = {
 	"reservoir": "",
 	"drain": "",
@@ -449,10 +455,10 @@ func _ready() -> void:
 	add_to_group(&"flow_models")
 	_bind_model_timeline()
 	_bind_model_regimes()
-	_build_shoreline_obstacles()
 	_apply_regime_features_from_state(_regime_snapshot)
 	_install_default_interaction_polygons_if_needed()
 	_install_default_source_polygons_if_needed()
+	_ensure_regime_feature_slot_banks()
 	_capture_authored_regime_geometry()
 	_apply_regime_geometry_from_state()
 	_source_texture_packer = SOURCE_TEXTURE_PACKER_SCRIPT.new(
@@ -788,13 +794,8 @@ func set_shoreline_randomness(value: float) -> void:
 	if is_equal_approx(_shoreline_randomness, next_value):
 		return
 	_shoreline_randomness = next_value
-	for shoreline_index in range(_shoreline_obstacles.size()):
-		var definition := _shoreline_obstacles[shoreline_index]
-		definition["weight"] = _shoreline_randomness
-		_shoreline_obstacles[shoreline_index] = definition
-	# During _ready(), the immutable bank definitions are built before the GPU
-	# materials and overlay. The explicit post-build upload handles that first
-	# application; runtime changes upload exactly once here.
+	# The legacy data name now controls a uniform edge field. No geometry or
+	# texture is regenerated when a regime changes.
 	if is_node_ready():
 		_apply_shoreline_geometry()
 
@@ -1054,6 +1055,74 @@ func _regime_fraction(features: Dictionary, feature_name: String) -> float:
 	return clampf(numeric_value, 0.0, 1.0)
 
 
+func _ensure_regime_feature_slot_banks() -> void:
+	## Allocate a bounded candidate bank once. Regime changes only translate and
+	## enable these resources, so several fields can appear without runtime node or
+	## resource growth. One interaction slot remains available for controller work.
+	if not regime_profile_physics_enabled:
+		return
+	var drain_template: GPUFlowInteractionPolygon
+	var obstacle_template: GPUFlowInteractionPolygon
+	var drain_count := 0
+	var obstacle_count := 0
+	for polygon: GPUFlowInteractionPolygon in _gpu_interaction_polygons():
+		if polygon.mode == GPUFlowInteractionPolygon.Mode.ABSORB:
+			drain_count += 1
+			if drain_template == null:
+				drain_template = polygon
+		else:
+			obstacle_count += 1
+			if obstacle_template == null:
+				obstacle_template = polygon
+	while (
+		drain_template != null
+		and drain_count < REGIME_DRAIN_SLOT_CAPACITY
+		and interaction_polygons.size() < MAX_INTERACTION_POLYGONS
+	):
+		var clone := GPUFlowInteractionPolygon.new()
+		var definition := drain_template.to_dictionary()
+		definition["element_id"] = "regime_drain_slot_%d" % (drain_count + 1)
+		definition["enabled"] = false
+		if clone == null or not clone.apply_dictionary(definition):
+			break
+		interaction_polygons.append(clone)
+		drain_count += 1
+	while (
+		obstacle_template != null
+		and obstacle_count < REGIME_OBSTACLE_SLOT_CAPACITY
+		and interaction_polygons.size() < MAX_INTERACTION_POLYGONS
+	):
+		var clone := GPUFlowInteractionPolygon.new()
+		var definition := obstacle_template.to_dictionary()
+		definition["element_id"] = "regime_obstacle_slot_%d" % (obstacle_count + 1)
+		definition["enabled"] = false
+		if clone == null or not clone.apply_dictionary(definition):
+			break
+		interaction_polygons.append(clone)
+		obstacle_count += 1
+
+	var source_template: GPUFlowSourcePolygon
+	var source_count := 0
+	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
+		source_count += 1
+		if source_template == null:
+			source_template = source
+	while (
+		source_template != null
+		and source_count < REGIME_SOURCE_SLOT_CAPACITY
+		and source_polygons.size() < MAX_SOURCE_POLYGONS
+	):
+		var clone := GPUFlowSourcePolygon.new()
+		var definition := source_template.to_dictionary()
+		definition["element_id"] = "regime_source_slot_%d" % (source_count + 1)
+		definition["enabled"] = false
+		definition["seed"] = 1701 + (source_count + 1) * 977
+		if clone == null or not clone.apply_dictionary(definition):
+			break
+		source_polygons.append(clone)
+		source_count += 1
+
+
 func _capture_authored_regime_geometry() -> void:
 	## Keep immutable fallbacks for a cleared/undefined regime. Runtime switching
 	## only translates these existing slots; it never appends resources or nodes.
@@ -1062,6 +1131,7 @@ func _capture_authored_regime_geometry() -> void:
 	_authored_reservoir_center_pixels = reservoir_center_pixels
 	_authored_interaction_vertices.clear()
 	_authored_interaction_instance_ids.clear()
+	_authored_interaction_enabled.clear()
 	for polygon: GPUFlowInteractionPolygon in _gpu_interaction_polygons():
 		_authored_interaction_vertices[String(polygon.element_id)] = (
 			polygon.vertices.duplicate()
@@ -1069,8 +1139,10 @@ func _capture_authored_regime_geometry() -> void:
 		_authored_interaction_instance_ids[String(polygon.element_id)] = (
 			polygon.get_instance_id()
 		)
+		_authored_interaction_enabled[String(polygon.element_id)] = polygon.enabled
 	_authored_source_vertices.clear()
 	_authored_source_instance_ids.clear()
+	_authored_source_enabled.clear()
 	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
 		_authored_source_vertices[String(source.element_id)] = (
 			source.vertices.duplicate()
@@ -1078,6 +1150,7 @@ func _capture_authored_regime_geometry() -> void:
 		_authored_source_instance_ids[String(source.element_id)] = (
 			source.get_instance_id()
 		)
+		_authored_source_enabled[String(source.element_id)] = source.enabled
 	_regime_geometry_initialized = true
 	_applied_regime_state_revision = int(_regime_snapshot.get("revision", 0))
 
@@ -1105,16 +1178,112 @@ func _regime_feature_contributor_ids(feature_name: String) -> Array[String]:
 
 
 func _regime_geometry_key(feature_name: String) -> String:
-	if (
-		not regime_profile_physics_enabled
-		or not _regime_feature_is_defined(
-			_regime_feature_state_for_screen,
-			feature_name,
-		)
-	):
+	if not regime_profile_physics_enabled:
 		return REGIME_GEOMETRY_BASELINE_KEY
-	var contributors := _regime_feature_contributor_ids(feature_name)
-	return "defined:%s" % "|".join(PackedStringArray(contributors))
+	var contributors := _regime_layout_contributor_ids()
+	if contributors.is_empty():
+		return REGIME_GEOMETRY_BASELINE_KEY
+	return "active:%s:%s" % [
+		feature_name,
+		"|".join(PackedStringArray(contributors)),
+	]
+
+
+func _regime_layout_contributor_ids() -> Array[String]:
+	## Any regime with a defined physical effect owns a fresh complete layout for
+	## the screen. Undefined feature values still retain authored strength/count,
+	## while truly unaffected/no-op rows retain the authored layout exactly.
+	var result: Array[String] = []
+	for feature_name: String in [
+		"reservoir_area_fraction",
+		"drain_area_fraction",
+		"obstacle_area_fraction",
+		"source_area_fraction",
+		"shoreline_randomness",
+	]:
+		for contributor_id: String in _regime_feature_contributor_ids(feature_name):
+			if not result.has(contributor_id):
+				result.append(contributor_id)
+	result.sort()
+	return result
+
+
+func _regime_applied_feature_slot_count(feature_kind: String) -> int:
+	var capacity := 1
+	var present := true
+	var override_enabled := false
+	var weight := 1.0
+	match feature_kind:
+		"drain":
+			capacity = REGIME_DRAIN_SLOT_CAPACITY
+			present = _regime_drain_present
+			override_enabled = _regime_drain_override_enabled
+			weight = _regime_drain_weight
+		"obstacle":
+			capacity = REGIME_OBSTACLE_SLOT_CAPACITY
+			present = _regime_obstacle_present
+			override_enabled = _regime_obstacle_override_enabled
+			weight = _regime_obstacle_weight
+		"source":
+			capacity = REGIME_SOURCE_SLOT_CAPACITY
+			present = _regime_source_present
+			override_enabled = _regime_source_override_enabled
+			weight = _regime_source_weight
+	if not present:
+		return 0
+	if not override_enabled:
+		return 1
+	return clampi(ceili(clampf(weight, 0.0, 1.0) * float(capacity)), 1, capacity)
+
+
+func _regime_managed_feature_slot_count(
+	feature_kind: String,
+	enabled_only: bool = false,
+) -> int:
+	var result := 0
+	if feature_kind == "source":
+		for source: GPUFlowSourcePolygon in _gpu_source_polygons():
+			if not _is_regime_managed_source_polygon(source):
+				continue
+			if not enabled_only or source.enabled:
+				result += 1
+		return result
+	if feature_kind != "drain" and feature_kind != "obstacle":
+		return 0
+	var expected_mode := (
+		GPUFlowInteractionPolygon.Mode.ABSORB
+		if feature_kind == "drain"
+		else GPUFlowInteractionPolygon.Mode.REPEL
+	)
+	for polygon: GPUFlowInteractionPolygon in _gpu_interaction_polygons():
+		if (
+			polygon.mode != expected_mode
+			or not _is_regime_managed_interaction_polygon(polygon)
+		):
+			continue
+		if not enabled_only or polygon.enabled:
+			result += 1
+	return result
+
+
+func _is_regime_managed_interaction_polygon(
+	polygon: GPUFlowInteractionPolygon,
+) -> bool:
+	var element_id := String(polygon.element_id)
+	return (
+		_authored_interaction_instance_ids.has(element_id)
+		and int(_authored_interaction_instance_ids[element_id])
+			== polygon.get_instance_id()
+	)
+
+
+func _is_regime_managed_source_polygon(source: GPUFlowSourcePolygon) -> bool:
+	var element_id := String(source.element_id)
+	return (
+		_authored_source_instance_ids.has(element_id)
+		and int(_authored_source_instance_ids[element_id])
+			== source.get_instance_id()
+	)
 
 
 func _regime_seeded_center_world(
@@ -1145,6 +1314,20 @@ func _regime_seeded_center_world(
 	if maximum_center.y < minimum_center.y:
 		minimum_center.y = region.get_center().y
 		maximum_center.y = minimum_center.y
+	var slot_capacity := 1
+	match feature_kind:
+		"drain":
+			slot_capacity = REGIME_DRAIN_SLOT_CAPACITY
+		"obstacle":
+			slot_capacity = REGIME_OBSTACLE_SLOT_CAPACITY
+		"source":
+			slot_capacity = REGIME_SOURCE_SLOT_CAPACITY
+	if slot_capacity > 1 and maximum_center.x > minimum_center.x:
+		var complete_minimum_x := minimum_center.x
+		var complete_width := maximum_center.x - minimum_center.x
+		var slot_width := complete_width / float(slot_capacity)
+		minimum_center.x = complete_minimum_x + slot_width * float(slot_index)
+		maximum_center.x = complete_minimum_x + slot_width * float(slot_index + 1)
 	if contributors.is_empty():
 		return region.get_center()
 	var blended_center := Vector2.ZERO
@@ -1273,13 +1456,17 @@ func _apply_regime_geometry_from_state() -> void:
 	var drain_key := _regime_geometry_key("drain_area_fraction")
 	var obstacle_key := _regime_geometry_key("obstacle_area_fraction")
 	var source_key := _regime_geometry_key("source_area_fraction")
+	var layout_contributors := _regime_layout_contributor_ids()
+	var drain_active_count := _regime_applied_feature_slot_count("drain")
+	var obstacle_active_count := _regime_applied_feature_slot_count("obstacle")
+	var source_active_count := _regime_applied_feature_slot_count("source")
 	var any_geometry_changed := false
 
 	if String(_applied_regime_geometry_keys.get("reservoir", "")) != reservoir_key:
 		var next_reservoir_center := _authored_reservoir_center_pixels
 		if reservoir_key != REGIME_GEOMETRY_BASELINE_KEY:
 			next_reservoir_center = _regime_seeded_reservoir_center_pixels(
-				_regime_feature_contributor_ids("reservoir_area_fraction"),
+				layout_contributors,
 			)
 		if not reservoir_center_pixels.is_equal_approx(next_reservoir_center):
 			reservoir_center_pixels = next_reservoir_center
@@ -1317,11 +1504,6 @@ func _apply_regime_geometry_from_state() -> void:
 			if polygon.mode == GPUFlowInteractionPolygon.Mode.ABSORB
 			else "obstacle"
 		)
-		var feature_name := (
-			"drain_area_fraction"
-			if feature_kind == "drain"
-			else "obstacle_area_fraction"
-		)
 		var feature_key := drain_key if feature_kind == "drain" else obstacle_key
 		var slot_index := drain_slot if feature_kind == "drain" else obstacle_slot
 		if feature_kind == "drain":
@@ -1329,19 +1511,31 @@ func _apply_regime_geometry_from_state() -> void:
 		else:
 			obstacle_slot += 1
 		var target_vertices := baseline_vertices.duplicate()
+		var target_enabled := bool(_authored_interaction_enabled.get(
+			element_id,
+			polygon.enabled,
+		))
 		if feature_key != REGIME_GEOMETRY_BASELINE_KEY:
+			target_enabled = slot_index < (
+				drain_active_count
+				if feature_kind == "drain"
+				else obstacle_active_count
+			)
 			var bounds := _world_polygon_bounds(baseline_vertices)
 			target_vertices = _translated_polygon_vertices(
 				baseline_vertices,
 				_regime_seeded_center_world(
 					feature_kind,
-					_regime_feature_contributor_ids(feature_name),
+					layout_contributors,
 					slot_index,
 					bounds.size * 0.5,
 				),
 			)
 		if not _packed_vector2_arrays_equal(polygon.vertices, target_vertices):
 			polygon.vertices = target_vertices
+			interaction_geometry_changed = true
+		if polygon.enabled != target_enabled:
+			polygon.enabled = target_enabled
 			interaction_geometry_changed = true
 	_applied_regime_geometry_keys["drain"] = drain_key
 	_applied_regime_geometry_keys["obstacle"] = obstacle_key
@@ -1351,9 +1545,6 @@ func _apply_regime_geometry_from_state() -> void:
 		any_geometry_changed = true
 
 	var source_geometry_changed := false
-	var source_contributors := _regime_feature_contributor_ids(
-		"source_area_fraction",
-	)
 	var source_slot := 0
 	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
 		var element_id := String(source.element_id)
@@ -1366,19 +1557,27 @@ func _apply_regime_geometry_from_state() -> void:
 		var baseline_variant: Variant = _authored_source_vertices[element_id]
 		var baseline_vertices: PackedVector2Array = baseline_variant
 		var target_vertices := baseline_vertices.duplicate()
+		var target_enabled := bool(_authored_source_enabled.get(
+			element_id,
+			source.enabled,
+		))
 		if source_key != REGIME_GEOMETRY_BASELINE_KEY:
+			target_enabled = source_slot < source_active_count
 			var bounds := _world_polygon_bounds(baseline_vertices)
 			target_vertices = _translated_polygon_vertices(
 				baseline_vertices,
 				_regime_seeded_center_world(
 					"source",
-					source_contributors,
+					layout_contributors,
 					source_slot,
 					bounds.size * 0.5,
 				),
 			)
 		if not _packed_vector2_arrays_equal(source.vertices, target_vertices):
 			source.vertices = target_vertices
+			source_geometry_changed = true
+		if source.enabled != target_enabled:
+			source.enabled = target_enabled
 			source_geometry_changed = true
 		source_slot += 1
 	_applied_regime_geometry_keys["source"] = source_key
@@ -2355,6 +2554,9 @@ func runtime_summary() -> Dictionary:
 	var shoreline_count_uniforms: Array[int] = []
 	var shoreline_texture_bound_uniforms: Array[bool] = []
 	var shoreline_inlet_y_range_uniforms: Array[Vector2] = []
+	var edge_turbulence_amount_uniforms: Array[float] = []
+	var edge_turbulence_band_uniforms: Array[float] = []
+	var edge_turbulence_wall_band_uniforms: Array[float] = []
 	var source_count_uniforms: Array[int] = []
 	var source_texture_bound_uniforms: Array[bool] = []
 	var trail_recording_enabled_uniforms: Array[bool] = []
@@ -2471,11 +2673,20 @@ func runtime_summary() -> Dictionary:
 		shoreline_count_uniforms.append(int(
 			process_material.get_shader_parameter(&"shoreline_count")
 		))
-		shoreline_texture_bound_uniforms.append(
-			process_material.get_shader_parameter(&"shoreline_data_texture") != null
-		)
+		shoreline_texture_bound_uniforms.append(false)
 		shoreline_inlet_y_range_uniforms.append(Vector2(
 			process_material.get_shader_parameter(&"shoreline_inlet_y_range")
+		))
+		edge_turbulence_amount_uniforms.append(float(
+			process_material.get_shader_parameter(&"edge_turbulence_amount")
+		))
+		edge_turbulence_band_uniforms.append(float(
+			process_material.get_shader_parameter(&"edge_turbulence_band_pixels")
+		))
+		edge_turbulence_wall_band_uniforms.append(float(
+			process_material.get_shader_parameter(
+				&"edge_turbulence_wall_band_pixels"
+			)
 		))
 		source_count_uniforms.append(int(
 			process_material.get_shader_parameter(&"source_count")
@@ -2614,11 +2825,42 @@ func runtime_summary() -> Dictionary:
 		"regime_reservoir_count_desired_raw": _regime_reservoir_count,
 		"regime_reservoir_count_rendered": 1 if _regime_reservoir_present else 0,
 		"regime_reservoir_renderer_capacity": 1,
-		"regime_geometry_mode": "DETERMINISTIC_STABLE_SINGLE_SLOT",
+		"regime_feature_slot_capacities": {
+			"drain": REGIME_DRAIN_SLOT_CAPACITY,
+			"obstacle": REGIME_OBSTACLE_SLOT_CAPACITY,
+			"source": REGIME_SOURCE_SLOT_CAPACITY,
+		},
+		"regime_feature_slot_counts_desired": {
+			"drain": _regime_applied_feature_slot_count("drain"),
+			"obstacle": _regime_applied_feature_slot_count("obstacle"),
+			"source": _regime_applied_feature_slot_count("source"),
+		},
+		"regime_feature_slot_counts_rendered": {
+			"drain": _regime_managed_feature_slot_count("drain", true),
+			"obstacle": _regime_managed_feature_slot_count("obstacle", true),
+			"source": _regime_managed_feature_slot_count("source", true),
+		},
+		"regime_feature_slot_counts_resident": {
+			"drain": _regime_managed_feature_slot_count("drain"),
+			"obstacle": _regime_managed_feature_slot_count("obstacle"),
+			"source": _regime_managed_feature_slot_count("source"),
+		},
+		"regime_feature_controller_spare_capacity": {
+			"interaction": maxi(
+				MAX_INTERACTION_POLYGONS - _gpu_interaction_polygons().size(),
+				0,
+			),
+			"source": maxi(
+				MAX_SOURCE_POLYGONS - _gpu_source_polygons().size(),
+				0,
+			),
+		},
+		"regime_geometry_mode": "DETERMINISTIC_BOUNDED_SLOT_BANKS",
 		"regime_geometry_keys": _applied_regime_geometry_keys.duplicate(true),
 		"regime_geometry_update_count": _regime_geometry_update_count,
 		"regime_geometry_undefined_fallback": "AUTHORED_GEOMETRY",
-		"regime_geometry_mixed_contributors": "EQUAL_CENTER_BLEND",
+		"regime_geometry_mixed_contributors": "SORTED_CONTRIBUTOR_CENTER_BLEND",
+		"regime_geometry_layout_contributor_ids": _regime_layout_contributor_ids(),
 		"regime_geometry_preserves_particle_pools": true,
 		"regime_salmon_activity": _regime_salmon_activity,
 		"regime_leaf_activity": _regime_leaf_activity,
@@ -2627,6 +2869,9 @@ func runtime_summary() -> Dictionary:
 		"regime_ecology_evaluation_count": _regime_ecology_evaluation_count,
 		"gate_state_upload_count": _gate_state_upload_count,
 		"shoreline_geometry_upload_count": _shoreline_geometry_upload_count,
+		"edge_turbulence_parameter_upload_count": (
+			_edge_turbulence_parameter_upload_count
+		),
 		"regime_panel_visible": (
 			_regime_panel.visible if _regime_panel != null else false
 		),
@@ -2801,6 +3046,11 @@ func runtime_summary() -> Dictionary:
 		"shoreline_count_uniforms": shoreline_count_uniforms,
 		"shoreline_texture_bound_uniforms": shoreline_texture_bound_uniforms,
 		"shoreline_inlet_y_range_uniforms": shoreline_inlet_y_range_uniforms,
+		"edge_turbulence_amount_uniforms": edge_turbulence_amount_uniforms,
+		"edge_turbulence_band_uniforms": edge_turbulence_band_uniforms,
+		"edge_turbulence_wall_band_uniforms": (
+			edge_turbulence_wall_band_uniforms
+		),
 		"source_count_uniforms": source_count_uniforms,
 		"source_texture_bound_uniforms": source_texture_bound_uniforms,
 		"interaction_polygon_count": interaction_definitions.size(),
@@ -2808,8 +3058,15 @@ func runtime_summary() -> Dictionary:
 		"interaction_polygons": interaction_definitions,
 		"polygon_objects": interaction_definitions,
 		"shoreline_randomness": _shoreline_randomness,
+		"shoreline_effect_mode": "EDGE_TURBULENCE",
+		"edge_turbulence_amount": _shoreline_randomness,
+		"edge_turbulence_band_pixels": EDGE_TURBULENCE_BAND_PIXELS,
+		"edge_turbulence_wall_band_pixels": EDGE_TURBULENCE_WALL_BAND_PIXELS,
+		"edge_turbulence_crossflow_ratio": EDGE_TURBULENCE_CROSSFLOW_RATIO,
+		"edge_turbulence_streamwise_ratio": EDGE_TURBULENCE_STREAMWISE_RATIO,
+		"edge_turbulence_inward_ratio": EDGE_TURBULENCE_INWARD_RATIO,
 		"shoreline_count": shoreline_definitions.size(),
-		"shoreline_vertex_count": SHORELINE_EDGE_VERTEX_COUNT,
+		"shoreline_vertex_count": 0,
 		"shoreline_ids": shoreline_ids,
 		"shoreline_obstacles": shoreline_definitions,
 		"shoreline_inlet_y_range_pixels": _shoreline_inlet_y_range_pixels(),
@@ -3038,14 +3295,8 @@ func runtime_summary() -> Dictionary:
 		"shoreline_count_uniform": _process_material.get_shader_parameter(
 			&"shoreline_count"
 		),
-		"shoreline_data_texture_bound": (
-			_process_material.get_shader_parameter(&"shoreline_data_texture") != null
-		),
-		"shoreline_data_texture_size": (
-			_shoreline_data_texture.get_size()
-			if _shoreline_data_texture != null
-			else Vector2.ZERO
-		),
+		"shoreline_data_texture_bound": false,
+		"shoreline_data_texture_size": Vector2.ZERO,
 		"source_count_uniform": _process_material.get_shader_parameter(
 			&"source_count"
 		),
@@ -3305,8 +3556,12 @@ func _set_source_parameter_by_path(path: String, value: Variant) -> bool:
 		"id", "element_id":
 			return false
 	var updated := source.apply_dictionary({field: value})
-	if updated and field == "vertices":
+	if updated and field in ["vertices", "enabled"]:
 		_release_source_from_regime_geometry(source.element_id)
+		# The resource's changed signal fires synchronously before ownership is
+		# released. Apply once more so a controller-owned disabled record remains
+		# packed instead of being mistaken for an inactive internal bank slot.
+		_request_source_geometry_apply()
 	return updated
 
 
@@ -3329,8 +3584,11 @@ func _set_interaction_parameter_by_path(path: String, value: Variant) -> bool:
 			# Stable controller IDs are immutable. Remove and upsert to rename one.
 			return false
 	var updated := polygon.apply_dictionary({field: value})
-	if updated and field == "vertices":
+	if updated and field in ["vertices", "enabled", "mode"]:
 		_release_interaction_from_regime_geometry(polygon.element_id)
+		# See the source counterpart above: the synchronous first upload still saw
+		# this polygon as regime-owned, so repack after transferring ownership.
+		_apply_interaction_geometry()
 	return updated
 
 
@@ -3338,12 +3596,14 @@ func _release_interaction_from_regime_geometry(element_id: StringName) -> void:
 	var key := String(element_id)
 	_authored_interaction_vertices.erase(key)
 	_authored_interaction_instance_ids.erase(key)
+	_authored_interaction_enabled.erase(key)
 
 
 func _release_source_from_regime_geometry(element_id: StringName) -> void:
 	var key := String(element_id)
 	_authored_source_vertices.erase(key)
 	_authored_source_instance_ids.erase(key)
+	_authored_source_enabled.erase(key)
 
 
 func _upsert_interaction_polygon(operation: Dictionary, kind: String) -> bool:
@@ -3371,7 +3631,11 @@ func _upsert_interaction_polygon(operation: Dictionary, kind: String) -> bool:
 	var existing := _find_interaction_polygon(element_id)
 	if existing != null:
 		var updated := existing.apply_dictionary(definition)
-		if updated and definition.has("vertices"):
+		if updated and (
+			definition.has("vertices")
+			or definition.has("enabled")
+			or definition.has("mode")
+		):
 			_release_interaction_from_regime_geometry(element_id)
 		if updated:
 			_apply_interaction_geometry()
@@ -3426,6 +3690,7 @@ func _replace_interaction_polygons(values: Array) -> bool:
 	interaction_polygons = replacements
 	_authored_interaction_vertices.clear()
 	_authored_interaction_instance_ids.clear()
+	_authored_interaction_enabled.clear()
 	_bind_interaction_polygon_signals()
 	_apply_interaction_geometry()
 	return true
@@ -3448,7 +3713,7 @@ func _upsert_source_polygon(operation: Dictionary) -> bool:
 	var existing := _find_source_polygon(element_id)
 	if existing != null:
 		var updated := existing.apply_dictionary(definition)
-		if updated and definition.has("vertices"):
+		if updated and (definition.has("vertices") or definition.has("enabled")):
 			_release_source_from_regime_geometry(element_id)
 		return updated
 	if source_polygons.size() >= MAX_SOURCE_POLYGONS:
@@ -3501,6 +3766,7 @@ func _replace_source_polygons(values: Array) -> bool:
 	source_polygons = replacements
 	_authored_source_vertices.clear()
 	_authored_source_instance_ids.clear()
+	_authored_source_enabled.clear()
 	_bind_source_polygon_signals()
 	_request_source_geometry_apply()
 	return true
@@ -4130,122 +4396,48 @@ func _shoreline_intrusion_samples(side: String) -> PackedFloat32Array:
 
 
 func _shoreline_inlet_y_range_pixels() -> Vector2:
-	var full_range := Vector2(
+	return Vector2(
 		SHORELINE_INLET_BASE_MARGIN_PIXELS,
 		STAGE_SIZE.y - SHORELINE_INLET_BASE_MARGIN_PIXELS
 	)
-	if _shoreline_randomness <= 0.000001:
-		return full_range
-	var top_channel_y := 0.0
-	var bottom_channel_y := STAGE_SIZE.y
-	var found_top := false
-	var found_bottom := false
-	for definition: Dictionary in _shoreline_obstacles:
-		var vertices: PackedVector2Array = definition.get(
-			"vertices_world",
-			PackedVector2Array()
-		)
-		if vertices.is_empty():
-			continue
-		var inlet_y_pixels := (
-			WORLD_SIZE.y - vertices[0].y
-		) * PIXELS_PER_WORLD_UNIT
-		match String(definition.get("side", "")):
-			"top":
-				top_channel_y = inlet_y_pixels
-				found_top = true
-			"bottom":
-				bottom_channel_y = inlet_y_pixels
-				found_bottom = true
-	if not found_top or not found_bottom:
-		return full_range
-	var clearance := maxf(
-		SHORELINE_INLET_BASE_MARGIN_PIXELS,
-		SHORELINE_INFLUENCE_WORLD
-			* PIXELS_PER_WORLD_UNIT
-			+ maxf(line_width_min, line_width_max) * 0.5
-			+ 1.0
-	)
-	var inlet_min := top_channel_y + clearance
-	var inlet_max := bottom_channel_y - clearance
-	if inlet_max <= inlet_min:
-		var center_y := (top_channel_y + bottom_channel_y) * 0.5
-		return Vector2(center_y - 1.0, center_y + 1.0)
-	return Vector2(inlet_min, inlet_max)
 
 
 func _apply_shoreline_geometry() -> void:
-	_shoreline_geometry_upload_count += 1
-	var data_image := Image.create(
-		SHORELINE_TEXTURE_WIDTH,
-		1,
-		false,
-		Image.FORMAT_RGBAF
-	)
-	data_image.fill(Color(0.0, 0.0, 0.0, 0.0))
-	var packed_count := mini(
-		_shoreline_obstacles.size(),
-		SHORELINE_OBSTACLE_COUNT
-	)
-	var overlay_definitions: Array[Dictionary] = []
-	for shoreline_index in range(packed_count):
-		var definition := _shoreline_obstacles[shoreline_index]
-		var world_vertices: PackedVector2Array = definition["vertices_world"]
-		if world_vertices.size() != SHORELINE_EDGE_VERTEX_COUNT:
-			continue
-		var native_vertices := _polygon_native_vertices(world_vertices)
-		var bounds := _native_polygon_bounds(native_vertices)
-		var record_start := shoreline_index * SHORELINE_TEXELS_PER_OBSTACLE
-		data_image.set_pixel(
-			record_start,
-			0,
-			Color(
-				clampf(float(definition.get("weight", 0.0)), 0.0, 1.0),
-				float(definition["channel_y_sign_pixels"]),
-				float(definition["influence_world"]) * PIXELS_PER_WORLD_UNIT,
-				float(native_vertices.size())
-			)
-		)
-		data_image.set_pixel(
-			record_start + 1,
-			0,
-			Color(
-				bounds.position.x,
-				bounds.position.y,
-				bounds.end.x,
-				bounds.end.y
-			)
-		)
-		for vertex_index in range(native_vertices.size()):
-			var vertex := native_vertices[vertex_index]
-			data_image.set_pixel(
-				record_start + 2 + vertex_index,
-				0,
-				Color(vertex.x, vertex.y, 0.0, 0.0)
-			)
-		overlay_definitions.append({
-			"element_id": String(definition["element_id"]),
-			"side": String(definition["side"]),
-			"weight": float(definition.get("weight", 0.0)),
-			"vertices": native_vertices,
-		})
-	if _shoreline_data_texture == null:
-		_shoreline_data_texture = ImageTexture.create_from_image(data_image)
-	else:
-		_shoreline_data_texture.update(data_image)
+	_edge_turbulence_parameter_upload_count += 1
 	var inlet_y_range := _shoreline_inlet_y_range_pixels()
 	for process_material in _process_material_layers:
-		process_material.set_shader_parameter(
-			&"shoreline_data_texture",
-			_shoreline_data_texture
-		)
-		process_material.set_shader_parameter(&"shoreline_count", packed_count)
+		process_material.set_shader_parameter(&"shoreline_count", 0)
 		process_material.set_shader_parameter(
 			&"shoreline_inlet_y_range",
 			inlet_y_range
 		)
+		process_material.set_shader_parameter(
+			&"edge_turbulence_amount",
+			_shoreline_randomness
+		)
+		process_material.set_shader_parameter(
+			&"edge_turbulence_band_pixels",
+			EDGE_TURBULENCE_BAND_PIXELS
+		)
+		process_material.set_shader_parameter(
+			&"edge_turbulence_wall_band_pixels",
+			EDGE_TURBULENCE_WALL_BAND_PIXELS
+		)
+		process_material.set_shader_parameter(
+			&"edge_turbulence_crossflow_ratio",
+			EDGE_TURBULENCE_CROSSFLOW_RATIO
+		)
+		process_material.set_shader_parameter(
+			&"edge_turbulence_streamwise_ratio",
+			EDGE_TURBULENCE_STREAMWISE_RATIO
+		)
+		process_material.set_shader_parameter(
+			&"edge_turbulence_inward_ratio",
+			EDGE_TURBULENCE_INWARD_RATIO
+		)
 	if _overlay != null:
-		_overlay.call(&"set_shoreline_obstacles", overlay_definitions)
+		var no_shoreline_obstacles: Array[Dictionary] = []
+		_overlay.call(&"set_shoreline_obstacles", no_shoreline_obstacles)
 
 
 func _shoreline_runtime_definitions() -> Array[Dictionary]:
@@ -4269,7 +4461,13 @@ func _shoreline_runtime_definitions() -> Array[Dictionary]:
 
 
 func _apply_interaction_geometry() -> void:
-	var active_polygons := _gpu_interaction_polygons()
+	var active_polygons: Array[GPUFlowInteractionPolygon] = []
+	for polygon: GPUFlowInteractionPolygon in _gpu_interaction_polygons():
+		if (
+			polygon.enabled
+			or not _is_regime_managed_interaction_polygon(polygon)
+		):
+			active_polygons.append(polygon)
 	var data_image := Image.create(
 		INTERACTION_TEXTURE_WIDTH,
 		1,
@@ -4356,7 +4554,13 @@ func _apply_source_geometry() -> void:
 			STAGE_SIZE,
 			WORLD_SIZE
 		)
-	var active_sources := _gpu_source_polygons()
+	var active_sources: Array[GPUFlowSourcePolygon] = []
+	for source: GPUFlowSourcePolygon in _gpu_source_polygons():
+		if (
+			source.enabled
+			or not _is_regime_managed_source_polygon(source)
+		):
+			active_sources.append(source)
 	_source_texture_packer.pack_sources(active_sources)
 	_source_data_texture = _source_texture_packer.get_texture()
 	var packed_count := _source_texture_packer.get_record_count()
@@ -4516,15 +4720,6 @@ func _build_particles() -> void:
 	)
 	interaction_image.fill(Color(0.0, 0.0, 0.0, 0.0))
 	_interaction_data_texture = ImageTexture.create_from_image(interaction_image)
-	if _shoreline_data_texture == null:
-		var shoreline_image := Image.create(
-			SHORELINE_TEXTURE_WIDTH,
-			1,
-			false,
-			Image.FORMAT_RGBAF
-		)
-		shoreline_image.fill(Color(0.0, 0.0, 0.0, 0.0))
-		_shoreline_data_texture = ImageTexture.create_from_image(shoreline_image)
 	var desired_lifetime: float = clampf(trail_lifetime, 0.1, 8.0)
 	var desired_ratio: float = clampf(flow_rate, 0.0, 1.0)
 	for layer_index in range(PALETTE_LAYER_COUNT):
@@ -4584,10 +4779,6 @@ func _build_particles() -> void:
 			_interaction_data_texture
 		)
 		process_material.set_shader_parameter(&"shoreline_count", 0)
-		process_material.set_shader_parameter(
-			&"shoreline_data_texture",
-			_shoreline_data_texture
-		)
 		process_material.set_shader_parameter(&"source_count", 0)
 		process_material.set_shader_parameter(&"source_admission_enabled", true)
 		process_material.set_shader_parameter(

@@ -16,6 +16,11 @@ const EXPECTED_TITLE_COLOR := Color("4ab0e1")
 const EXPECTED_TITLE_FONT_SIZE := 60
 const EXPECTED_DATE_FONT_SIZE := 48
 const EXPECTED_DATE_OPENTYPE_FEATURE := "tnum"
+const EXPECTED_REGIME_SLOT_CAPACITIES := {
+	"drain": 5,
+	"obstacle": 2,
+	"source": 4,
+}
 const EXPECTED_REGIME_PANEL_POSITION := Vector2(1324.0, 1050.0)
 const EXPECTED_REGIME_NAMES := [
 	"Kinship",
@@ -551,53 +556,49 @@ func _ready() -> void:
 		if not bool(interaction_enabled):
 			errors.append("polygon interaction did not start after empty prewarm")
 			break
-	if int(summary.get("interaction_polygon_count", 0)) != 2:
-		errors.append("expected the default absorber and repeller polygons")
+	if int(summary.get("interaction_polygon_count", 0)) != 7:
+		errors.append("expected seven resident drain/obstacle slots")
 	if int(summary.get("interaction_overlay_count", 0)) != 2:
-		errors.append("debug overlay did not receive both default polygons")
+		errors.append("debug overlay did not receive both active fallback polygons")
 	if not bool(summary.get("interaction_data_texture_bound", false)):
 		errors.append("polygon geometry texture is not bound")
 	if Vector2(summary.get("interaction_data_texture_size", Vector2.ZERO)) != Vector2(
 		128.0, 1.0
 	):
 		errors.append("polygon geometry texture is not the 128x1 production layout")
-	if int(summary.get("shoreline_count", 0)) != 2:
-		errors.append("expected dedicated top and bottom shoreline obstacles")
-	if int(summary.get("shoreline_vertex_count", 0)) != 17:
-		errors.append("shoreline obstacles do not span all 17 model-grid columns")
-	var shoreline_ids := Array(summary.get("shoreline_ids", []))
+	if String(summary.get("shoreline_effect_mode", "")) != "EDGE_TURBULENCE":
+		errors.append("shoreline weight is not implemented as edge turbulence")
 	if (
-		shoreline_ids.size() != 2
-		or not shoreline_ids.has("shoreline_obstacle_top")
-		or not shoreline_ids.has("shoreline_obstacle_bottom")
+		int(summary.get("shoreline_count", -1)) != 0
+		or int(summary.get("shoreline_vertex_count", -1)) != 0
+		or not Array(summary.get("shoreline_ids", [])).is_empty()
+		or not Array(summary.get("shoreline_obstacles", [])).is_empty()
+		or int(summary.get("shoreline_overlay_count", -1)) != 0
 	):
-		errors.append("shoreline obstacle IDs are not stable")
-	if not bool(summary.get("shoreline_data_texture_bound", false)):
-		errors.append("shoreline geometry texture is not bound")
-	if Vector2(summary.get("shoreline_data_texture_size", Vector2.ZERO)) != Vector2(
-		40.0, 1.0
-	):
-		errors.append("shoreline geometry texture is not the dedicated 40x1 layout")
-	if int(summary.get("shoreline_overlay_count", 0)) != 2:
-		errors.append("debug overlay did not receive both shoreline banks")
+		errors.append("legacy shoreline geometry or overlay banks are still resident")
+	if bool(summary.get("shoreline_data_texture_bound", true)):
+		errors.append("legacy shoreline geometry texture is still bound")
+	if Vector2(summary.get("shoreline_data_texture_size", Vector2.ONE)) != Vector2.ZERO:
+		errors.append("legacy shoreline geometry texture still has an allocation")
 	if not bool(summary.get("shoreline_preserves_interaction_capacity", false)):
-		errors.append("shorelines unexpectedly consume addressable polygon capacity")
+		errors.append("edge turbulence unexpectedly consumes polygon capacity")
 	for shoreline_count: Variant in Array(
 		summary.get("shoreline_count_uniforms", [])
 	):
-		if int(shoreline_count) != 2:
-			errors.append("shoreline banks did not reach all seven head shaders")
+		if int(shoreline_count) != 0:
+			errors.append("legacy shoreline collision is active in a head shader")
 			break
 	for shoreline_bound: Variant in Array(
 		summary.get("shoreline_texture_bound_uniforms", [])
 	):
-		if not bool(shoreline_bound):
-			errors.append("a head shader is missing the shoreline texture")
+		if bool(shoreline_bound):
+			errors.append("a head shader still binds the legacy shoreline texture")
 			break
-	if int(summary.get("source_polygon_count", 0)) != 1:
-		errors.append("expected one default water source polygon")
+	_check_edge_turbulence_contract(summary, 0.0, errors)
+	if int(summary.get("source_polygon_count", 0)) != 4:
+		errors.append("expected four resident water-source slots")
 	if int(summary.get("source_overlay_count", 0)) != 1:
-		errors.append("debug overlay did not receive the default source")
+		errors.append("debug overlay did not receive the active fallback source")
 	if not bool(summary.get("source_data_texture_bound", false)):
 		errors.append("source geometry texture is not bound")
 	if Vector2(summary.get("source_data_texture_size", Vector2.ZERO)) != Vector2(
@@ -610,8 +611,39 @@ func _ready() -> void:
 			break
 	for polygon_count: Variant in Array(summary.get("interaction_count_uniforms", [])):
 		if int(polygon_count) != 2:
-			errors.append("default polygons did not reach all seven head shaders")
+			errors.append("the two authored fallback polygons did not reach every shader")
 			break
+	if Dictionary(summary.get("regime_feature_slot_capacities", {})) != (
+		EXPECTED_REGIME_SLOT_CAPACITIES
+	):
+		errors.append("regime feature slot capacities are not 5 drains, 2 obstacles, 4 sources")
+	if Dictionary(summary.get("regime_feature_slot_counts_resident", {})) != (
+		EXPECTED_REGIME_SLOT_CAPACITIES
+	):
+		errors.append(
+			"the complete fixed feature bank was not allocated at startup: %s"
+				% summary.get("regime_feature_slot_counts_resident", {})
+		)
+	if Dictionary(summary.get("regime_feature_controller_spare_capacity", {})) != {
+		"interaction": 1,
+		"source": 4,
+	}:
+		errors.append("the fixed banks did not preserve controller spare capacity")
+	if Dictionary(summary.get("regime_feature_slot_counts_desired", {})) != {
+		"drain": 1,
+		"obstacle": 1,
+		"source": 1,
+	}:
+		errors.append("undefined baseline state did not request one authored slot per feature")
+	if Dictionary(summary.get("regime_feature_slot_counts_rendered", {})) != {
+		"drain": 1,
+		"obstacle": 1,
+		"source": 1,
+	}:
+		errors.append(
+			"undefined baseline state did not render one authored slot per feature: %s"
+				% summary.get("regime_feature_slot_counts_rendered", {})
+		)
 	if Vector2(summary.get("stage_size", Vector2.ZERO)) != Vector2(1920.0, 1080.0):
 		errors.append("stage is not native 1920 x 1080")
 	if not bool(stage.call(&"accepts_control_target", "delta")):
@@ -1063,7 +1095,7 @@ func _ready() -> void:
 			== "ANTIALIASED_DISK_HEAD"
 	):
 		errors.append("controller leaf radius variation did not reach disk renderer")
-	if int(summary.get("interaction_polygon_count", 0)) != 3:
+	if int(summary.get("interaction_polygon_count", 0)) != 8:
 		errors.append("controller polygon upsert did not add an addressable object")
 	for polygon_count: Variant in Array(summary.get("interaction_count_uniforms", [])):
 		if int(polygon_count) != 3:
@@ -1139,8 +1171,8 @@ func _ready() -> void:
 	})
 	await get_tree().process_frame
 	summary = stage.call(&"runtime_summary")
-	if int(summary.get("interaction_polygon_count", 0)) != 2:
-		errors.append("controller polygon removal did not restore default object count")
+	if int(summary.get("interaction_polygon_count", 0)) != 7:
+		errors.append("controller polygon removal did not restore the resident slot bank")
 	if int(summary.get("trail_segment_capacity", 0)) != 22500:
 		errors.append("polygon geometry edits unexpectedly changed trail capacity")
 
@@ -1184,8 +1216,8 @@ func _ready() -> void:
 	})
 	await get_tree().process_frame
 	summary = stage.call(&"runtime_summary")
-	if int(summary.get("interaction_polygon_count", 0)) != 2:
-		errors.append("plural-kind polygon removal did not restore defaults")
+	if int(summary.get("interaction_polygon_count", 0)) != 7:
+		errors.append("plural-kind polygon removal did not restore the slot bank")
 
 	var source_packer_before: Dictionary = summary.get("source_texture_packer", {})
 	var source_revision_before := int(source_packer_before.get("revision", -1))
@@ -1212,7 +1244,7 @@ func _ready() -> void:
 	var source_packer_after: Dictionary = summary.get("source_texture_packer", {})
 	if int(source_packer_after.get("revision", -1)) != source_revision_before + 1:
 		errors.append("one source controller batch did not produce exactly one upload")
-	if int(summary.get("source_polygon_count", 0)) != 2:
+	if int(summary.get("source_polygon_count", 0)) != 5:
 		errors.append("controller source upsert did not add an addressable source")
 	var source_ids: Array[String] = []
 	for source_variant: Variant in Array(summary.get("source_polygons", [])):
@@ -1235,8 +1267,8 @@ func _ready() -> void:
 	})
 	await get_tree().process_frame
 	summary = stage.call(&"runtime_summary")
-	if int(summary.get("source_polygon_count", 0)) != 1:
-		errors.append("controller source removal did not restore the default source")
+	if int(summary.get("source_polygon_count", 0)) != 4:
+		errors.append("controller source removal did not restore the resident source bank")
 
 	# Width appears before radius on purpose. The raw request must survive its
 	# temporary clamp against the old radius, then become a true full aperture
@@ -1293,6 +1325,7 @@ func _ready() -> void:
 		errors.append("idempotent native reservoir radius flushed ownership")
 	_check_kinship_ecology_schedule(stage, errors)
 	await _check_regime_runtime_stability(stage, errors)
+	_check_controller_ownership_regression(stage, errors)
 	await _check_stage_title_reset_independence(stage, errors)
 
 	if errors.is_empty():
@@ -1395,7 +1428,7 @@ func _check_regime_panel(
 		["reservoir_count_raw", 2.0],
 		["drain_area_fraction", 0.75],
 		["drain_power", 1.0],
-		["obstacle_area_fraction", 1.0],
+		["obstacle_area_fraction", 0.1],
 		["source_area_fraction", 1.0],
 	]:
 		if not is_equal_approx(
@@ -1407,7 +1440,7 @@ func _check_regime_panel(
 		["regime_reservoir_weight_uniforms", 0.475],
 		["regime_drain_weight_uniforms", 0.75],
 		["regime_drain_power_uniforms", 1.0],
-		["regime_obstacle_weight_uniforms", 1.0],
+		["regime_obstacle_weight_uniforms", 0.1],
 		["regime_source_weight_uniforms", 1.0],
 	]:
 		var uniform_values := Array(active_summary.get(String(uniform_spec[0]), []))
@@ -1419,7 +1452,14 @@ func _check_regime_panel(
 				errors.append("regime budget shader uniform is inconsistent")
 				break
 	if _shoreline_geometry_from_summary(active_summary) != shoreline_geometry:
-		errors.append("regime activation regenerated the fixed shoreline geometry")
+		errors.append("regime activation unexpectedly created shoreline geometry")
+	_check_edge_turbulence_contract(active_summary, 0.0, errors)
+	_expect_regime_slot_counts(
+		active_summary,
+		{"drain": 4, "obstacle": 1, "source": 1},
+		"Agriculture + Tech",
+		errors,
+	)
 	var active_inlet_range := Vector2(active_summary.get(
 		"shoreline_inlet_y_range_pixels",
 		Vector2.ZERO,
@@ -1453,6 +1493,7 @@ func _check_regime_panel(
 			["reservoir_count", 2.0],
 			["drain_area_fraction", 0.75],
 			["drain_power", 1.0],
+			["obstacle_area_fraction", 0.1],
 			["shoreline_randomness", 0.0],
 		],
 		errors,
@@ -1461,7 +1502,6 @@ func _check_regime_panel(
 		active_summary,
 		"Agriculture + Tech",
 		[
-			["obstacle_area_fraction", "obstacle_area", "obstacle_area_fraction"],
 			["source_area_fraction", "source", "source_area_fraction"],
 		],
 		errors,
@@ -1543,6 +1583,13 @@ func _check_regime_panel(
 		errors.append("Kinship did not hide the reservoir diagnostic overlay")
 	if int(kinship_summary.get("interaction_overlay_visible_count", -1)) != 0:
 		errors.append("Kinship did not hide drain and obstacle diagnostic overlays")
+	_expect_regime_slot_counts(
+		kinship_summary,
+		{"drain": 0, "obstacle": 0, "source": 1},
+		"Kinship",
+		errors,
+	)
+	_check_edge_turbulence_contract(kinship_summary, 1.0, errors)
 	for reservoir_present: Variant in Array(
 		kinship_summary.get("regime_reservoir_present_uniforms", [])
 	):
@@ -1554,7 +1601,14 @@ func _check_regime_panel(
 	if not is_zero_approx(float(cleared_summary.get("shoreline_randomness", -1.0))):
 		errors.append("clearing regimes did not disable shoreline force")
 	if _shoreline_geometry_from_summary(cleared_summary) != shoreline_geometry:
-		errors.append("clearing regimes regenerated the fixed shoreline geometry")
+		errors.append("clearing regimes unexpectedly created shoreline geometry")
+	_check_edge_turbulence_contract(cleared_summary, 0.0, errors)
+	_expect_regime_slot_counts(
+		cleared_summary,
+		{"drain": 1, "obstacle": 1, "source": 1},
+		"cleared regime fallback",
+		errors,
+	)
 	if Vector2(cleared_summary.get(
 		"shoreline_inlet_y_range_pixels",
 		Vector2.ZERO,
@@ -1578,13 +1632,48 @@ func _check_delta_regime_profile_contracts(
 	stage: Node,
 	errors: PackedStringArray
 ) -> void:
+	stage.call(&"set_active_regime_names", ["Agriculture"])
+	var agriculture: Dictionary = stage.call(&"runtime_summary")
+	_expect_regime_feature_values(
+		agriculture,
+		"Agriculture Delta",
+		[
+			["drain_area_fraction", 0.75],
+			["obstacle_area_fraction", 0.10],
+			["shoreline_randomness", 0.0],
+		],
+		errors,
+	)
+	_expect_undefined_regime_fallbacks(
+		agriculture,
+		"Agriculture Delta",
+		[["source_area_fraction", "source", "source_area_fraction"]],
+		errors,
+	)
+	_expect_regime_slot_counts(
+		agriculture,
+		{"drain": 4, "obstacle": 1, "source": 1},
+		"Agriculture Delta",
+		errors,
+	)
+	_check_edge_turbulence_contract(agriculture, 0.0, errors)
+
 	stage.call(&"set_active_regime_names", ["Gold Rush"])
 	var gold_rush: Dictionary = stage.call(&"runtime_summary")
 	var gold_rush_geometry := _regime_geometry_snapshot(gold_rush)
 	if String(gold_rush.get("regime_geometry_mode", "")) != (
-		"DETERMINISTIC_STABLE_SINGLE_SLOT"
+		"DETERMINISTIC_BOUNDED_SLOT_BANKS"
 	):
-		errors.append("regime geometry does not use fixed deterministic slots")
+		errors.append("regime geometry does not use a fixed deterministic slot bank")
+	if _regime_geometry_snapshot(agriculture) == gold_rush_geometry:
+		errors.append("Gold Rush reused the Agriculture feature placement")
+	_expect_regime_slot_counts(
+		gold_rush,
+		{"drain": 2, "obstacle": 1, "source": 1},
+		"Gold Rush Delta",
+		errors,
+	)
+	_check_edge_turbulence_contract(gold_rush, 1.0, errors)
 	var gold_rush_presence: Dictionary = gold_rush.get(
 		"regime_feature_presence",
 		{},
@@ -1600,6 +1689,13 @@ func _check_delta_regime_profile_contracts(
 	var hydropower_geometry := _regime_geometry_snapshot(hydropower)
 	if hydropower_geometry == gold_rush_geometry:
 		errors.append("Hydropower reused the Gold Rush feature placement")
+	_expect_feature_layouts_differ(
+		gold_rush,
+		hydropower,
+		"Gold Rush",
+		"Hydropower",
+		errors,
+	)
 	if int(hydropower.get("reservoir_geometry_revision", 0)) == int(
 		gold_rush.get("reservoir_geometry_revision", 0)
 	):
@@ -1614,6 +1710,13 @@ func _check_delta_regime_profile_contracts(
 		):
 			errors.append("reservoir geometry revision missed a water shader")
 			break
+	_expect_regime_slot_counts(
+		hydropower,
+		{"drain": 2, "obstacle": 1, "source": 1},
+		"Hydropower Delta",
+		errors,
+	)
+	_check_edge_turbulence_contract(hydropower, 0.0, errors)
 	_expect_regime_feature_values(
 		hydropower,
 		"Hydropower Delta",
@@ -1669,6 +1772,13 @@ func _check_delta_regime_profile_contracts(
 
 	stage.call(&"set_active_regime_names", ["Water Projects"])
 	var water_projects: Dictionary = stage.call(&"runtime_summary")
+	_expect_regime_slot_counts(
+		water_projects,
+		{"drain": 3, "obstacle": 1, "source": 1},
+		"Water Projects Delta",
+		errors,
+	)
+	_check_edge_turbulence_contract(water_projects, 0.0, errors)
 	_expect_regime_feature_values(
 		water_projects,
 		"Water Projects Delta",
@@ -1700,6 +1810,20 @@ func _check_delta_regime_profile_contracts(
 	var tech_geometry := _regime_geometry_snapshot(tech)
 	if tech_geometry == hydropower_geometry:
 		errors.append("Tech reused the Hydropower feature placement")
+	_expect_feature_layouts_differ(
+		hydropower,
+		tech,
+		"Hydropower",
+		"Tech",
+		errors,
+	)
+	_expect_regime_slot_counts(
+		tech,
+		{"drain": 4, "obstacle": 1, "source": 1},
+		"Tech Delta",
+		errors,
+	)
+	_check_edge_turbulence_contract(tech, 0.0, errors)
 	_expect_regime_feature_values(
 		tech,
 		"Tech Delta",
@@ -1736,6 +1860,13 @@ func _check_delta_regime_profile_contracts(
 
 	stage.call(&"set_active_regime_names", ["Watershed"])
 	var watershed: Dictionary = stage.call(&"runtime_summary")
+	_expect_regime_slot_counts(
+		watershed,
+		{"drain": 1, "obstacle": 1, "source": 1},
+		"undefined Watershed Delta",
+		errors,
+	)
+	_check_edge_turbulence_contract(watershed, 0.0, errors)
 	_expect_undefined_regime_fallbacks(
 		watershed,
 		"Watershed Delta",
@@ -1772,6 +1903,19 @@ func _check_delta_regime_profile_contracts(
 		or not bool(watershed_presence.get("obstacle", false))
 	):
 		errors.append("undefined Watershed features did not restore authored presence")
+	var watershed_geometry := _regime_geometry_snapshot(watershed)
+	var watershed_update_count := int(watershed.get(
+		"regime_geometry_update_count",
+		-1,
+	))
+	stage.call(&"set_active_regime_names", [])
+	var cleared_after_watershed: Dictionary = stage.call(&"runtime_summary")
+	if _regime_geometry_snapshot(cleared_after_watershed) != watershed_geometry:
+		errors.append("no-op Watershed did not retain the authored fallback layout")
+	if int(cleared_after_watershed.get("regime_geometry_update_count", -2)) != (
+		watershed_update_count
+	):
+		errors.append("clearing no-op Watershed redundantly uploaded geometry")
 
 	# A -> B -> A restores the exact candidate pose. Replaying the same absolute
 	# state then performs no extra geometry upload.
@@ -1790,6 +1934,10 @@ func _check_delta_regime_profile_contracts(
 	):
 		errors.append("replaying Gold Rush redundantly uploaded geometry")
 
+func _check_controller_ownership_regression(
+	stage: Node,
+	errors: PackedStringArray,
+) -> void:
 	# Once the controller reshapes an authored object, that exact resource becomes
 	# controller-owned. Later regime placement must leave the edited vertices alone.
 	var controller_interaction_vertices := [
@@ -1834,6 +1982,62 @@ func _check_delta_regime_profile_contracts(
 		errors,
 	)
 
+	# Structural controller edits transfer exact resource ownership. Disabled
+	# controller records remain packed, including a custom ID that happens to use
+	# the internal-looking `regime_` prefix.
+	if not bool(stage.call(
+		&"set_runtime_parameter",
+		&"polygon.absorber_test.mode",
+		"repel",
+	)):
+		errors.append("controller could not change an authored polygon mode")
+	if not bool(stage.call(
+		&"set_runtime_parameter",
+		&"polygon.absorber_test.enabled",
+		false,
+	)):
+		errors.append("controller could not disable an authored polygon")
+	if not bool(stage.call(
+		&"set_runtime_parameter",
+		&"source.source_test.enabled",
+		false,
+	)):
+		errors.append("controller could not disable an authored source")
+	var guard_id := &"regime_controller_guard"
+	if not bool(stage.call(
+		&"_upsert_interaction_polygon",
+		{
+			"id": String(guard_id),
+			"value": {
+				"enabled": false,
+				"mode": "repel",
+				"vertices": [
+					[4.0, 1.0],
+					[4.5, 1.0],
+					[4.5, 1.5],
+					[4.0, 1.5],
+				],
+			},
+		},
+		"polygon",
+	)):
+		errors.append("controller could not add the regime_-prefixed guard polygon")
+	for state_name: String in ["Tech", "Hydropower"]:
+		stage.call(&"set_active_regime_names", [state_name])
+		_expect_disabled_controller_records_packed(
+			stage.call(&"runtime_summary"),
+			state_name,
+			errors,
+		)
+	stage.call(&"set_active_regime_names", [])
+	_expect_disabled_controller_records_packed(
+		stage.call(&"runtime_summary"),
+		"cleared regimes",
+		errors,
+	)
+	if not bool(stage.call(&"_remove_interaction_polygon", guard_id)):
+		errors.append("controller could not remove the regime_-prefixed guard polygon")
+
 
 func _regime_geometry_snapshot(summary: Dictionary) -> Dictionary:
 	return {
@@ -1842,6 +2046,47 @@ func _regime_geometry_snapshot(summary: Dictionary) -> Dictionary:
 		"sources": Array(summary.get("source_polygons", [])).duplicate(true),
 		"keys": Dictionary(summary.get("regime_geometry_keys", {})).duplicate(true),
 	}
+
+
+func _expect_feature_layouts_differ(
+	before: Dictionary,
+	after: Dictionary,
+	before_label: String,
+	after_label: String,
+	errors: PackedStringArray,
+) -> void:
+	for feature_kind: String in ["drain", "obstacle", "source"]:
+		if _feature_layout_snapshot(before, feature_kind) == _feature_layout_snapshot(
+			after,
+			feature_kind,
+		):
+			errors.append(
+				"%s reused the %s %s layout"
+					% [after_label, before_label, feature_kind]
+			)
+
+
+func _feature_layout_snapshot(summary: Dictionary, feature_kind: String) -> Array:
+	var result: Array = []
+	if feature_kind == "source":
+		for definition_variant: Variant in Array(summary.get("source_polygons", [])):
+			if definition_variant is Dictionary:
+				result.append([
+					String(definition_variant.get("element_id", "")),
+					Array(definition_variant.get("vertices", [])).duplicate(true),
+				])
+		return result
+	var expected_mode := "absorb" if feature_kind == "drain" else "repel"
+	for definition_variant: Variant in Array(summary.get("interaction_polygons", [])):
+		if (
+			definition_variant is Dictionary
+			and String(definition_variant.get("mode", "")) == expected_mode
+		):
+			result.append([
+				String(definition_variant.get("element_id", "")),
+				Array(definition_variant.get("vertices", [])).duplicate(true),
+			])
+	return result
 
 
 func _expect_controller_geometry_vertices(
@@ -1867,6 +2112,60 @@ func _expect_controller_geometry_vertices(
 		errors.append(
 			"%s regime move overwrote controller source vertices" % state_label
 		)
+
+
+func _expect_disabled_controller_records_packed(
+	summary: Dictionary,
+	state_label: String,
+	errors: PackedStringArray,
+) -> void:
+	var absorber: Dictionary = {}
+	var guard: Dictionary = {}
+	for definition_variant: Variant in Array(summary.get("interaction_polygons", [])):
+		if not definition_variant is Dictionary:
+			continue
+		var definition: Dictionary = definition_variant
+		match String(definition.get("element_id", "")):
+			"absorber_test":
+				absorber = definition
+			"regime_controller_guard":
+				guard = definition
+	var source: Dictionary = {}
+	for definition_variant: Variant in Array(summary.get("source_polygons", [])):
+		if (
+			definition_variant is Dictionary
+			and String(definition_variant.get("element_id", "")) == "source_test"
+		):
+			source = definition_variant
+			break
+	if (
+		absorber.is_empty()
+		or bool(absorber.get("enabled", true))
+		or String(absorber.get("mode", "")) != "repel"
+	):
+		errors.append("%s overwrote the controller-owned polygon state" % state_label)
+	if guard.is_empty() or bool(guard.get("enabled", true)):
+		errors.append("%s lost the disabled regime_-prefixed controller polygon" % state_label)
+	if source.is_empty() or bool(source.get("enabled", true)):
+		errors.append("%s overwrote the controller-owned source state" % state_label)
+	var rendered := Dictionary(summary.get("regime_feature_slot_counts_rendered", {}))
+	var interaction_packed := int(summary.get("interaction_overlay_count", 0))
+	var managed_interaction_count := int(rendered.get("drain", 0)) + int(
+		rendered.get("obstacle", 0)
+	)
+	if interaction_packed != managed_interaction_count + 2:
+		errors.append("%s compacted a disabled controller polygon" % state_label)
+	var source_packed := int(summary.get("source_overlay_count", 0))
+	if source_packed != int(rendered.get("source", 0)) + 1:
+		errors.append("%s compacted the disabled controller source" % state_label)
+	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
+		if int(count_variant) != interaction_packed:
+			errors.append("%s controller polygon packing missed a shader" % state_label)
+			break
+	for count_variant: Variant in Array(summary.get("source_count_uniforms", [])):
+		if int(count_variant) != source_packed:
+			errors.append("%s controller source packing missed a shader" % state_label)
+			break
 
 
 func _vertices_for_element(
@@ -1938,6 +2237,95 @@ func _expect_undefined_regime_fallbacks(
 			errors.append("%s unexpectedly overrides %s" % [label, feature_name])
 		if not is_equal_approx(float(budgets.get(budget_name, -1.0)), 1.0):
 			errors.append("%s did not preserve the %s fallback" % [label, feature_name])
+
+
+func _expect_regime_slot_counts(
+	summary: Dictionary,
+	expected: Dictionary,
+	label: String,
+	errors: PackedStringArray,
+) -> void:
+	var desired := Dictionary(summary.get("regime_feature_slot_counts_desired", {}))
+	var rendered := Dictionary(summary.get("regime_feature_slot_counts_rendered", {}))
+	var resident := Dictionary(summary.get("regime_feature_slot_counts_resident", {}))
+	if desired != expected:
+		errors.append("%s desired slot counts are incorrect" % label)
+	if rendered != expected:
+		errors.append("%s rendered slot counts are incorrect" % label)
+	if resident != EXPECTED_REGIME_SLOT_CAPACITIES:
+		errors.append("%s changed the fixed resident feature bank" % label)
+	var expected_interactions := int(expected.get("drain", 0)) + int(
+		expected.get("obstacle", 0)
+	)
+	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
+		if int(count_variant) != expected_interactions:
+			errors.append("%s interaction slot count missed a water shader" % label)
+			break
+	for count_variant: Variant in Array(summary.get("source_count_uniforms", [])):
+		if int(count_variant) != int(expected.get("source", 0)):
+			errors.append("%s source slot count missed a water shader" % label)
+			break
+
+
+func _check_edge_turbulence_contract(
+	summary: Dictionary,
+	expected_amount: float,
+	errors: PackedStringArray,
+) -> void:
+	if not (
+		String(summary.get("shoreline_effect_mode", "")) == "EDGE_TURBULENCE"
+		and is_equal_approx(
+			float(summary.get("edge_turbulence_amount", -1.0)),
+			expected_amount,
+		)
+		and is_equal_approx(
+			float(summary.get("edge_turbulence_band_pixels", -1.0)),
+			180.0,
+		)
+		and is_equal_approx(
+			float(summary.get("edge_turbulence_wall_band_pixels", -1.0)),
+			40.0,
+		)
+		and is_equal_approx(
+			float(summary.get("edge_turbulence_crossflow_ratio", -1.0)),
+			0.65,
+		)
+		and is_equal_approx(
+			float(summary.get("edge_turbulence_streamwise_ratio", -1.0)),
+			0.08,
+		)
+		and is_equal_approx(
+			float(summary.get("edge_turbulence_inward_ratio", -1.0)),
+			0.75,
+		)
+	):
+		errors.append("edge-turbulence scalar contract is incorrect")
+	for uniform_spec: Array in [
+		["edge_turbulence_amount_uniforms", expected_amount],
+		["edge_turbulence_band_uniforms", 180.0],
+		["edge_turbulence_wall_band_uniforms", 40.0],
+	]:
+		var values := Array(summary.get(String(uniform_spec[0]), []))
+		if values.size() != 7:
+			errors.append("%s did not reach all seven water shaders" % uniform_spec[0])
+			continue
+		for value: Variant in values:
+			if not is_equal_approx(float(value), float(uniform_spec[1])):
+				errors.append("%s is inconsistent across water shaders" % uniform_spec[0])
+				break
+	if Vector2(summary.get(
+		"shoreline_inlet_y_range_pixels",
+		Vector2.ZERO,
+	)) != Vector2(28.0, 1052.0):
+		errors.append("edge turbulence narrowed the full-height water inlet")
+	for inlet_variant: Variant in Array(
+		summary.get("shoreline_inlet_y_range_uniforms", [])
+	):
+		if Vector2(inlet_variant) != Vector2(28.0, 1052.0):
+			errors.append("the full-height inlet did not reach every water shader")
+			break
+	if int(summary.get("edge_turbulence_parameter_upload_count", 0)) < 1:
+		errors.append("edge-turbulence parameters were never uploaded")
 
 
 func _shoreline_geometry_from_summary(summary: Dictionary) -> Array:
@@ -2073,6 +2461,10 @@ func _check_regime_runtime_stability(
 	var baseline_node_count := _recursive_node_count(stage)
 	var baseline_pool_signature := _particle_pool_signature(stage)
 	var baseline_texture_signature := _stage_texture_signature(stage)
+	var baseline_feature_resource_signature := _feature_resource_signature(stage)
+	var baseline_slot_capacities := Dictionary(
+		stage.call(&"runtime_summary").get("regime_feature_slot_counts_resident", {})
+	).duplicate(true)
 	var baseline_flow_model_count := get_tree().get_nodes_in_group(
 		&"flow_models"
 	).size()
@@ -2086,7 +2478,7 @@ func _check_regime_runtime_stability(
 	for counter_name: String in [
 		"regime_ecology_evaluation_count",
 		"gate_state_upload_count",
-		"shoreline_geometry_upload_count",
+		"edge_turbulence_parameter_upload_count",
 		"regime_geometry_update_count",
 	]:
 		if after_idempotent.get(counter_name) != before_idempotent.get(counter_name):
@@ -2132,6 +2524,13 @@ func _check_regime_runtime_stability(
 		errors.append("rapid regime switching replaced or resized a particle pool")
 	if _stage_texture_signature(stage) != baseline_texture_signature:
 		errors.append("rapid regime switching replaced a resident stage texture")
+	if _feature_resource_signature(stage) != baseline_feature_resource_signature:
+		errors.append("rapid regime switching replaced a resident feature resource")
+	var final_slot_capacities := Dictionary(
+		stage.call(&"runtime_summary").get("regime_feature_slot_counts_resident", {})
+	)
+	if final_slot_capacities != baseline_slot_capacities:
+		errors.append("rapid regime switching changed the fixed feature-bank capacities")
 	if get_tree().get_nodes_in_group(&"flow_models").size() != baseline_flow_model_count:
 		errors.append("rapid regime switching changed the live flow-model count")
 
@@ -2178,7 +2577,6 @@ func _stage_texture_signature(stage: Node) -> Array:
 	var signature: Array = []
 	for property_name: String in [
 		"_interaction_data_texture",
-		"_shoreline_data_texture",
 		"_source_data_texture",
 	]:
 		var texture := stage.get(property_name) as Texture2D
@@ -2196,6 +2594,18 @@ func _stage_texture_signature(stage: Node) -> Array:
 		water_texture.get_instance_id() if water_texture != null else 0,
 		water_texture.get_rid() if water_texture != null else RID(),
 	])
+	return signature
+
+
+func _feature_resource_signature(stage: Node) -> Array:
+	var signature: Array = []
+	for property_name: String in ["interaction_polygons", "source_polygons"]:
+		var resources := Array(stage.get(property_name))
+		var ids: Array = []
+		for resource_variant: Variant in resources:
+			var resource := resource_variant as Resource
+			ids.append(resource.get_instance_id() if resource != null else 0)
+		signature.append([property_name, ids])
 	return signature
 
 
