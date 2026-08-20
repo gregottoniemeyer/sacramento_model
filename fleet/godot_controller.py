@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Control the Water Council Godot project on the master and three remote Macs."""
+"""Control and deploy the Water Council Godot project across the four-Mac fleet."""
 
 import argparse
 import json
 import os
+import posixpath
+import re
 import shlex
 import socket
 import subprocess
@@ -12,18 +14,20 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Optional
 
 
 COMPUTERS = {
-    # Change only the `stages` tuples to alter the screen assignment.
+    # Change only the stages tuples to alter the screen assignment.
     # Stage numbers correspond to scene_1.tscn through scene_7.tscn.
     "11": {
         "ip": "196.168.50.11",
         "user": "francescospagnolo",
         "project": "/Users/francescospagnolo/Documents/watercouncil/code",
         "stages": (7,),
-        "local": True,
+        "local": False,
+        "dedicated": True,
     },
     "21": {
         "ip": "196.168.50.21",
@@ -31,6 +35,7 @@ COMPUTERS = {
         "project": "/Users/gregniemeyer/Documents/watercouncil/code",
         "stages": (1, 2),
         "local": False,
+        "dedicated": True,
     },
     "31": {
         "ip": "196.168.50.31",
@@ -38,6 +43,7 @@ COMPUTERS = {
         "project": "/Users/gregniemeyer/Documents/watercouncil/code",
         "stages": (3, 4),
         "local": False,
+        "dedicated": True,
     },
     "41": {
         "ip": "196.168.50.41",
@@ -45,17 +51,57 @@ COMPUTERS = {
         "project": "/Users/gregniemeyer/Documents/watercouncil/code",
         "stages": (5, 6),
         "local": False,
+        "dedicated": True,
     },
 }
+OPERATORS = {
+    "196.168.50.11": {"name": "governator", "local_target": "11"},
+    "196.168.50.51": {"name": "studio", "local_target": None},
+}
 GODOT_BIN = "/Applications/Godot.app/Contents/MacOS/Godot"
-SSH_TIMEOUT_SECONDS = 8
+SSH_TIMEOUT_SECONDS = 15
+DEPLOY_TIMEOUT_SECONDS = 300
 PROCESS_STOP_TIMEOUT_SECONDS = 6.0
+SSH_IDENTITY_PATH = os.path.expanduser(
+    os.environ.get("WATER_COUNCIL_SSH_IDENTITY", "~/.ssh/water_council_fleet_ed25519")
+)
+SSH_OPTIONS = (
+    "-o", "BatchMode=yes",
+    "-o", "StrictHostKeyChecking=yes",
+    "-o", f"ConnectTimeout={SSH_TIMEOUT_SECONDS}",
+    "-o", "ConnectionAttempts=1",
+    "-o", "ServerAliveInterval=5",
+    "-o", "ServerAliveCountMax=1",
+    "-o", "IdentitiesOnly=yes",
+    "-i", SSH_IDENTITY_PATH,
+)
 FLOW_CONTROL_PORT = 5005
 REGIME_TARGET = "*"
 REGIME_ACK_PROTOCOL = "ink-flow/1-ack"
 REGIME_ACK_ATTEMPTS = 12
 REGIME_ACK_WAIT_SECONDS = 0.75
-REGIME_STATE_PATH = os.path.expanduser("~/.water_council_regime_state.json")
+REGIME_STATE_PATH = "/Users/francescospagnolo/.water_council_regime_state.json"
+PROJECT_SOURCE_DIR = Path(__file__).resolve().parents[1] / "godot_experiments"
+FLEET_SOURCE_DIR = Path(__file__).resolve().parent
+PROJECT_DEPLOY_EXCLUDES = (
+    # fleet/ is synchronized and verified independently. Excluding it here
+    # lets the project-root --delete remove every other retired file.
+    "fleet/",
+    ".godot/",
+    ".DS_Store",
+    "godot-remote.log",
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+)
+FLEET_DEPLOY_EXCLUDES = (
+    ".DS_Store",
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+)
+
+CURRENT_OPERATOR: Optional[dict] = None
 REGIMES = (
     ("kinship", "Kinship"),
     ("ranch", "Agriculture"),
@@ -76,7 +122,10 @@ STAGE_SCREEN_IDS = {
 }
 
 
-def run_local(command: list[str], timeout: int = SSH_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+def run_local(
+    command: list[str],
+    timeout: float = SSH_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             command,
@@ -89,16 +138,62 @@ def run_local(command: list[str], timeout: int = SSH_TIMEOUT_SECONDS) -> subproc
         return subprocess.CompletedProcess(command, 124, "", "command timed out")
 
 
-def ssh(computer: dict, remote_command: str) -> subprocess.CompletedProcess:
+def ssh(
+    computer: dict,
+    remote_command: str,
+    timeout: float = SSH_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess:
     return run_local(
         [
             "ssh",
-            "-o", "BatchMode=yes",
-            "-o", f"ConnectTimeout={SSH_TIMEOUT_SECONDS}",
+            *SSH_OPTIONS,
             f"{computer['user']}@{computer['ip']}",
             remote_command,
-        ]
+        ],
+        timeout=timeout,
     )
+
+
+def rsync_ssh_transport() -> str:
+    return " ".join(shlex.quote(part) for part in ("ssh", *SSH_OPTIONS))
+
+
+def configure_operator(ifconfig_output: Optional[str] = None) -> dict:
+    """Detect the only two supported operator modes and set target locality."""
+    global CURRENT_OPERATOR
+    if ifconfig_output is None:
+        result = run_local(["/sbin/ifconfig"], timeout=4)
+        if result.returncode != 0:
+            raise ValueError(f"could not inspect local network addresses: {error_message(result)}")
+        ifconfig_output = result.stdout
+    addresses = set(
+        re.findall(
+            r"(?m)^\s*inet\s+(\d+\.\d+\.\d+\.\d+)\b",
+            ifconfig_output,
+        )
+    )
+    matches = [(ip_address, OPERATORS[ip_address]) for ip_address in addresses if ip_address in OPERATORS]
+    if len(matches) != 1:
+        visible = ", ".join(sorted(addresses)) or "none"
+        raise ValueError(
+            "fleet controller requires exactly one operator address "
+            "(196.168.50.11 or 196.168.50.51); found: "
+            + visible
+        )
+    operator_ip, configured = matches[0]
+    profile = dict(configured)
+    profile["ip"] = operator_ip
+    local_target = profile["local_target"]
+    for target_name, computer in COMPUTERS.items():
+        computer["local"] = target_name == local_target
+    CURRENT_OPERATOR = profile
+    return profile
+
+
+def current_operator() -> dict:
+    if CURRENT_OPERATOR is None:
+        raise ValueError("operator mode has not been configured")
+    return CURRENT_OPERATOR
 
 
 def process_pattern(computer: dict) -> str:
@@ -107,13 +202,18 @@ def process_pattern(computer: dict) -> str:
 
 
 def all_godot_process_pattern() -> str:
-    # Fleet Macs are dedicated render nodes. A Godot process from another
-    # checkout can still own UDP 5005, so clean launch must stop every Godot.
     return "[/]Applications/Godot.app/Contents/MacOS/Godot"
 
 
 def stop_godot_processes(computer: dict) -> subprocess.CompletedProcess:
-    """Stop every Godot process on one fleet Mac and wait for exit."""
+    """Stop every Godot process on one explicitly dedicated fleet Mac."""
+    if computer.get("dedicated") is not True:
+        return subprocess.CompletedProcess(
+            ["stop-godot"],
+            15,
+            "",
+            "refusing broad Godot cleanup on a non-dedicated computer",
+        )
     pattern = all_godot_process_pattern()
     if computer["local"]:
         terminate = run_local(["pkill", "-TERM", "-f", pattern])
@@ -160,7 +260,120 @@ def stop_godot_processes(computer: dict) -> subprocess.CompletedProcess:
         f"if pgrep -f {shlex.quote(pattern)} >/dev/null; then "
         "echo 'Godot process did not exit after TERM and KILL'; exit 14; fi"
     )
-    return ssh(computer, remote_command)
+    return ssh(
+        computer,
+        remote_command,
+        timeout=SSH_TIMEOUT_SECONDS + PROCESS_STOP_TIMEOUT_SECONDS + 2,
+    )
+
+
+def required_project_files(computer: dict) -> list[str]:
+    return [
+        "project.godot",
+        "startup_selector.gd",
+        "startup_selector.tscn",
+        "dual_stage_host.gd",
+        "dual_stage_host.tscn",
+        "regime_feature_profiles.txt",
+        "flow/flow_control_bus.gd",
+        "flow/model_regimes.gd",
+        "flow/model_timeline.gd",
+        "flow/data/regimes/kinship.txt",
+        "flow/data/regimes/ranch.txt",
+        "flow/data/regimes/gold_rush.txt",
+        "flow/data/regimes/water_projects.txt",
+        "flow/data/regimes/hydropower.txt",
+        "flow/data/regimes/tech.txt",
+        "flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt",
+        *(f"scene_{stage}.tscn" for stage in computer["stages"]),
+    ]
+
+
+def check_computer(computer: dict) -> tuple[bool, str]:
+    project_dir = computer["project"]
+    required_files = required_project_files(computer)
+    if computer["local"]:
+        missing = []
+        if not os.access(GODOT_BIN, os.X_OK):
+            missing.append(f"Godot executable not found: {GODOT_BIN}")
+        if not os.path.isdir(project_dir):
+            missing.append(f"Project directory not found: {project_dir}")
+        else:
+            for relative_path in required_files:
+                if not os.path.isfile(os.path.join(project_dir, relative_path)):
+                    missing.append(f"Required project file not found: {relative_path}")
+            selector_path = os.path.join(project_dir, "startup_selector.gd")
+            if os.path.isfile(selector_path):
+                try:
+                    with open(selector_path, "r", encoding="utf-8") as selector_file:
+                        if "--stages=" not in selector_file.read():
+                            missing.append("startup_selector.gd needs the fleet-launch update")
+                except OSError as error:
+                    missing.append(f"Could not read startup_selector.gd: {error}")
+        return not missing, "; ".join(missing) or "Godot and project found"
+
+    command = (
+        f"if test ! -x {shlex.quote(GODOT_BIN)}; then "
+        f"echo {shlex.quote('Godot executable not found: ' + GODOT_BIN)}; exit 10; fi; "
+        f"if test ! -d {shlex.quote(project_dir)}; then "
+        f"echo {shlex.quote('Project directory not found: ' + project_dir)}; exit 11; fi; "
+    )
+    for relative_path in required_files:
+        full_path = f"{project_dir}/{relative_path}"
+        command += (
+            f"if test ! -f {shlex.quote(full_path)}; then "
+            f"echo {shlex.quote('Required project file not found: ' + relative_path)}; "
+            "exit 12; fi; "
+        )
+    command += (
+        f"if ! grep -q -- {shlex.quote('--stages=')} "
+        f"{shlex.quote(project_dir + '/startup_selector.gd')}; then "
+        f"echo {shlex.quote('startup_selector.gd needs the fleet-launch update')}; exit 13; fi"
+    )
+    result = ssh(computer, command)
+    return (
+        result.returncode == 0,
+        "Godot and project found" if result.returncode == 0 else error_message(result),
+    )
+
+
+def all_godot_status(computer: dict) -> tuple[bool, str]:
+    pattern = all_godot_process_pattern()
+    result = (
+        run_local(["pgrep", "-fal", pattern])
+        if computer["local"]
+        else ssh(computer, f"pgrep -fal {shlex.quote(pattern)}")
+    )
+    if result.returncode == 1:
+        return True, "stopped"
+    if result.returncode != 0:
+        return False, error_message(result)
+    processes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    stage_argument = "--stages=" + ",".join(str(stage) for stage in computer["stages"])
+    expected_command = [
+        GODOT_BIN,
+        "--path",
+        computer["project"],
+        "--",
+        stage_argument,
+    ]
+    parsed_commands = []
+    for process in processes:
+        try:
+            command = shlex.split(process)
+        except ValueError:
+            command = []
+        if command and command[0].isdigit():
+            command = command[1:]
+        parsed_commands.append(command)
+    if len(processes) == 1 and parsed_commands == [expected_command]:
+        return True, f"running: {processes[0]}"
+    detail = " | ".join(processes) or "(no process details)"
+    return (
+        False,
+        "unexpected Godot process layout "
+        f"(expected exactly: {' '.join(expected_command)}): {detail}",
+    )
 
 
 def perform(target: str, action: str) -> tuple[str, bool, str]:
@@ -171,124 +384,81 @@ def perform(target: str, action: str) -> tuple[str, bool, str]:
 
     if action == "ping":
         if computer["local"]:
-            return ip_address, True, "local master"
+            return ip_address, True, "local operator"
         result = run_local(["ping", "-c", "1", ip_address], timeout=4)
-        return ip_address, result.returncode == 0, "reachable" if result.returncode == 0 else "unreachable"
+        return (
+            ip_address,
+            result.returncode == 0,
+            "reachable" if result.returncode == 0 else "unreachable",
+        )
 
     if action == "check":
-        required_files = [
-            "project.godot",
-            "startup_selector.gd",
-            "startup_selector.tscn",
-            "dual_stage_host.gd",
-            "dual_stage_host.tscn",
-            "regime_feature_profiles.txt",
-            "flow/flow_control_bus.gd",
-            "flow/model_regimes.gd",
-            "flow/model_timeline.gd",
-            "flow/data/regimes/kinship.txt",
-            "flow/data/regimes/ranch.txt",
-            "flow/data/regimes/gold_rush.txt",
-            "flow/data/regimes/water_projects.txt",
-            "flow/data/regimes/hydropower.txt",
-            "flow/data/regimes/tech.txt",
-            "flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt",
-            *(f"scene_{stage}.tscn" for stage in computer["stages"]),
-        ]
-        if computer["local"]:
-            missing = []
-            if not os.access(GODOT_BIN, os.X_OK):
-                missing.append(f"Godot executable not found: {GODOT_BIN}")
-            if not os.path.isdir(project_dir):
-                missing.append(f"Project directory not found: {project_dir}")
-            else:
-                for relative_path in required_files:
-                    if not os.path.isfile(f"{project_dir}/{relative_path}"):
-                        missing.append(f"Required project file not found: {relative_path}")
-            return ip_address, not missing, "; ".join(missing) or "Godot and project found"
-        command = (
-            f"if test ! -x {shlex.quote(GODOT_BIN)}; then "
-            f"echo {shlex.quote('Godot executable not found: ' + GODOT_BIN)}; exit 10; fi; "
-            f"if test ! -d {shlex.quote(project_dir)}; then "
-            f"echo {shlex.quote('Project directory not found: ' + project_dir)}; exit 11; fi; "
-        )
-        for relative_path in required_files:
-            full_path = f"{project_dir}/{relative_path}"
-            command += (
-                f"if test ! -f {shlex.quote(full_path)}; then "
-                f"echo {shlex.quote('Required project file not found: ' + relative_path)}; "
-                f"exit 12; fi; "
-            )
-        command += (
-            f"if ! grep -q -- {shlex.quote('--stages=')} "
-            f"{shlex.quote(project_dir + '/startup_selector.gd')}; then "
-            f"echo {shlex.quote('startup_selector.gd needs the fleet-launch update')}; exit 13; fi"
-        )
-        result = ssh(computer, command)
-        message = "Godot and project found" if result.returncode == 0 else error_message(result)
-        return ip_address, result.returncode == 0, message
+        ok, message = check_computer(computer)
+        return ip_address, ok, message
 
     if action == "status":
-        status_command = ["pgrep", "-fal", process_pattern(computer)]
-        result = (
-            run_local(status_command)
-            if computer["local"]
-            else ssh(computer, f"pgrep -fal {shlex.quote(process_pattern(computer))}")
-        )
-        if result.returncode == 0:
-            return ip_address, True, f"running: {result.stdout.strip()}"
-        if result.returncode == 1:
-            return ip_address, True, "stopped"
-        return ip_address, False, error_message(result)
+        ok, message = all_godot_status(computer)
+        return ip_address, ok, message
 
     if action == "stop":
         result = stop_godot_processes(computer)
-        return ip_address, result.returncode == 0, "stopped" if result.returncode == 0 else error_message(result)
+        return (
+            ip_address,
+            result.returncode == 0,
+            "stopped" if result.returncode == 0 else error_message(result),
+        )
 
     if action in {"start", "editor"}:
-        # A clean launch is mandatory: duplicate project processes compete for UDP
-        # 5005, so the controller can update a hidden copy while the visible screens
-        # remain unchanged. Stop and reap every matching process before launching.
+        # Never stop a working display until the replacement launch is known to
+        # have an executable and a complete project tree.
+        ready, readiness_message = check_computer(computer)
+        if not ready:
+            return ip_address, False, f"preflight failed; left running processes untouched: {readiness_message}"
         stop_result = stop_godot_processes(computer)
         if stop_result.returncode != 0:
             return ip_address, False, error_message(stop_result)
-        editor_flag = " --editor" if action == "editor" else ""
         stage_argument = "--stages=" + ",".join(str(stage) for stage in computer["stages"])
         if computer["local"]:
-            if not os.access(GODOT_BIN, os.X_OK):
-                return ip_address, False, f"Godot executable not found: {GODOT_BIN}"
-            if not os.path.isfile(f"{project_dir}/project.godot"):
-                return ip_address, False, f"project.godot not found in: {project_dir}"
-            log_handle = open(log_file, "w", encoding="utf-8")
+            try:
+                log_handle = open(log_file, "w", encoding="utf-8")
+            except OSError as error:
+                return ip_address, False, f"could not open launch log: {error}"
             command = [GODOT_BIN, "--path", project_dir]
             if action == "editor":
                 command.append("--editor")
             else:
                 command.extend(["--", stage_argument])
-            subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            log_handle.close()
+            try:
+                subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                return ip_address, False, f"launch failed: {error}"
+            finally:
+                log_handle.close()
             return ip_address, True, f"launch requested for stages {computer['stages']}"
+
+        editor_flag = " --editor" if action == "editor" else ""
         command = (
-            f"test -x {shlex.quote(GODOT_BIN)} && "
-            f"test -f {shlex.quote(project_dir + '/project.godot')} && "
             f"nohup {shlex.quote(GODOT_BIN)} --path {shlex.quote(project_dir)}"
             f"{editor_flag}"
             + ("" if action == "editor" else f" -- {shlex.quote(stage_argument)}")
             + f" > {shlex.quote(log_file)} 2>&1 < /dev/null &"
         )
         result = ssh(computer, command)
-        message = (
-            f"launch requested for stages {computer['stages']}"
-            if result.returncode == 0
-            else error_message(result)
+        return (
+            ip_address,
+            result.returncode == 0,
+            (
+                f"launch requested for stages {computer['stages']}"
+                if result.returncode == 0
+                else error_message(result)
+            ),
         )
-        return ip_address, result.returncode == 0, message
 
     raise ValueError(f"Unknown action: {action}")
 
@@ -355,6 +525,7 @@ def send_fleet_regimes(
     changes = {"regimes.active_indices": indices}
     if geometry_visible is not None:
         changes["debug.geometry_visible"] = geometry_visible
+    source_name = CURRENT_OPERATOR["name"] if CURRENT_OPERATOR else "fleet-controller"
     payload = {
         "protocol": "ink-flow/1",
         "target": REGIME_TARGET,
@@ -362,16 +533,12 @@ def send_fleet_regimes(
         "geometry_ops": [],
         "actions": [],
         "metadata": {
-            "source": "governator",
+            "source": source_name,
             "command": command,
             "request_id": request_id,
         },
     }
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     destination_specs = regime_destination_specs(target_names)
     destinations = [destination for destination, _screens in destination_specs]
     expected_screens_by_destination = dict(destination_specs)
@@ -385,9 +552,7 @@ def send_fleet_regimes(
             for destination in list(pending):
                 sent = udp_socket.sendto(encoded, (destination, FLOW_CONTROL_PORT))
                 if sent != len(encoded):
-                    raise OSError(
-                        f"sent only {sent} of {len(encoded)} UDP bytes to {destination}"
-                    )
+                    raise OSError(f"sent only {sent} of {len(encoded)} UDP bytes to {destination}")
             deadline = time.monotonic() + REGIME_ACK_WAIT_SECONDS
             while pending and time.monotonic() < deadline:
                 udp_socket.settimeout(max(deadline - time.monotonic(), 0.01))
@@ -421,9 +586,7 @@ def send_fleet_regimes(
                     for screen_id in acknowledgement.get("recipient_screen_ids", [])
                 )
                 last_seen_screens[sender_ip] = received_screens
-                raw_geometry = acknowledgement.get(
-                    "recipient_debug_geometry_visible", {}
-                )
+                raw_geometry = acknowledgement.get("recipient_debug_geometry_visible", {})
                 received_geometry = (
                     {
                         str(screen_id): visible
@@ -446,13 +609,8 @@ def send_fleet_regimes(
                 if (
                     received_screens != expected_screens_by_destination[sender_ip]
                     or recipient_count != len(expected_screens_by_destination[sender_ip])
-                    or (
-                        expected_geometry is not None
-                        and received_geometry != expected_geometry
-                    )
+                    or (expected_geometry is not None and received_geometry != expected_geometry)
                 ):
-                    # The process may still be loading its assigned stages. Leave
-                    # it pending so the absolute packet is retried until ready.
                     continue
                 acknowledgements[sender_ip] = recipient_count
                 pending.remove(sender_ip)
@@ -483,18 +641,59 @@ def send_fleet_regimes(
 
 def format_regime_send(results: list[tuple[str, int, int]]) -> str:
     return ", ".join(
-        f"{destination}:{FLOW_CONTROL_PORT} "
-        f"({sent} bytes, {recipient_count} stage(s))"
+        f"{destination}:{FLOW_CONTROL_PORT} ({sent} bytes, {recipient_count} stage(s))"
         for destination, sent, recipient_count in results
     )
 
 
-def load_controller_state() -> tuple[set[str], Optional[bool]]:
-    if not os.path.isfile(REGIME_STATE_PATH):
-        return set(), None
-    try:
+def _read_controller_state_text() -> Optional[str]:
+    authority = COMPUTERS["11"]
+    if authority["local"]:
+        if not os.path.isfile(REGIME_STATE_PATH):
+            return None
         with open(REGIME_STATE_PATH, "r", encoding="utf-8") as state_file:
-            document = json.load(state_file)
+            return state_file.read()
+    command = (
+        f"if test -f {shlex.quote(REGIME_STATE_PATH)}; then "
+        f"cat {shlex.quote(REGIME_STATE_PATH)}; else exit 3; fi"
+    )
+    result = ssh(authority, command)
+    if result.returncode == 3:
+        return None
+    if result.returncode != 0:
+        raise OSError(f"could not read authoritative state on {authority['ip']}: {error_message(result)}")
+    return result.stdout
+
+
+def _state_document(
+    regime_ids: list[str],
+    geometry_visible: Optional[bool],
+) -> dict:
+    regime_indices(regime_ids)
+    requested_ids = set(regime_ids)
+    ordered_ids = [
+        regime_id
+        for regime_id, _display_name in REGIMES
+        if regime_id in requested_ids
+    ]
+    document = {"active_regime_ids": ordered_ids}
+    if geometry_visible is not None:
+        document["debug_geometry_visible"] = geometry_visible
+    return document
+
+
+def load_controller_state(
+    require_exists: bool = False,
+) -> tuple[set[str], Optional[bool]]:
+    try:
+        raw_document = _read_controller_state_text()
+        if raw_document is None:
+            if require_exists:
+                raise ValueError(
+                    "authoritative controller state does not exist on 196.168.50.11"
+                )
+            return set(), None
+        document = json.loads(raw_document)
         if not isinstance(document, dict):
             raise ValueError("controller state must be a JSON object")
         regime_ids = document.get("active_regime_ids", [])
@@ -508,9 +707,7 @@ def load_controller_state() -> tuple[set[str], Optional[bool]]:
             raise ValueError("debug_geometry_visible must be true or false")
         return set(regime_ids), geometry_visible
     except (OSError, ValueError, json.JSONDecodeError) as error:
-        raise ValueError(
-            f"invalid controller state {REGIME_STATE_PATH}: {error}"
-        ) from error
+        raise ValueError(f"invalid controller state {REGIME_STATE_PATH}: {error}") from error
 
 
 def load_controller_regime_state() -> set[str]:
@@ -522,40 +719,42 @@ def save_controller_state(
     regime_ids: list[str],
     geometry_visible: Optional[bool],
 ) -> None:
-    regime_indices(regime_ids)
-    requested_ids = set(regime_ids)
-    ordered_ids = [
-        regime_id
-        for regime_id, _display_name in REGIMES
-        if regime_id in requested_ids
-    ]
-    state_directory = os.path.dirname(REGIME_STATE_PATH) or "."
-    os.makedirs(state_directory, exist_ok=True)
-    file_descriptor, temporary_path = tempfile.mkstemp(
-        prefix=".water_council_regime_state.",
-        suffix=".tmp",
-        dir=state_directory,
-        text=True,
-    )
-    try:
-        document = {"active_regime_ids": ordered_ids}
-        if geometry_visible is not None:
-            document["debug_geometry_visible"] = geometry_visible
-        with os.fdopen(file_descriptor, "w", encoding="utf-8") as state_file:
-            json.dump(
-                document,
-                state_file,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            state_file.write("\n")
-        os.replace(temporary_path, REGIME_STATE_PATH)
-    except BaseException:
+    document = _state_document(regime_ids, geometry_visible)
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+    authority = COMPUTERS["11"]
+    if authority["local"]:
+        state_directory = os.path.dirname(REGIME_STATE_PATH) or "."
+        os.makedirs(state_directory, exist_ok=True)
+        file_descriptor, temporary_path = tempfile.mkstemp(
+            prefix=".water_council_regime_state.",
+            suffix=".tmp",
+            dir=state_directory,
+            text=True,
+        )
         try:
-            os.unlink(temporary_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as state_file:
+                state_file.write(encoded)
+            os.replace(temporary_path, REGIME_STATE_PATH)
+        except BaseException:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+            raise
+        return
+
+    temporary_path = f"{REGIME_STATE_PATH}.tmp.{uuid.uuid4().hex}"
+    command = (
+        "umask 077; "
+        f"_state_tmp={shlex.quote(temporary_path)}; "
+        "trap 'rm -f \"$_state_tmp\"' EXIT HUP INT TERM; "
+        f"printf '%s\\n' {shlex.quote(encoded.rstrip())} > \"$_state_tmp\" && "
+        f"mv \"$_state_tmp\" {shlex.quote(REGIME_STATE_PATH)}; "
+        "_state_status=$?; trap - EXIT HUP INT TERM; exit $_state_status"
+    )
+    result = ssh(authority, command)
+    if result.returncode != 0:
+        raise OSError(f"could not save authoritative state on {authority['ip']}: {error_message(result)}")
 
 
 def save_controller_regime_state(regime_ids: list[str]) -> None:
@@ -574,14 +773,12 @@ def run_regime_console() -> None:
     import termios
     import tty
 
-    active_ids, geometry_visible = load_controller_state()
+    active_ids, geometry_visible = load_controller_state(require_exists=True)
     file_descriptor = sys.stdin.fileno()
     original_terminal = termios.tcgetattr(file_descriptor)
     print("Regime console: 1-7 toggle, c clears, q or Esc quits.")
     print_regime_catalog()
-    ordered_start = [
-        regime_id for regime_id, _name in REGIMES if regime_id in active_ids
-    ]
+    ordered_start = [regime_id for regime_id, _name in REGIMES if regime_id in active_ids]
     sends = send_fleet_regimes(
         ordered_start,
         "regime-console-sync",
@@ -606,7 +803,7 @@ def run_regime_console() -> None:
                     "regime-clear",
                     geometry_visible=geometry_visible,
                 )
-            elif character and character in "1234567":
+            elif character in "1234567":
                 regime_id = REGIMES[int(character) - 1][0]
                 if regime_id in active_ids:
                     active_ids.remove(regime_id)
@@ -627,6 +824,441 @@ def run_regime_console() -> None:
         termios.tcsetattr(file_descriptor, termios.TCSADRAIN, original_terminal)
 
 
+def deployment_paths(computer: dict, deployment_id: str) -> tuple[str, str]:
+    project = computer["project"]
+    normalized = posixpath.normpath(project)
+    parent = posixpath.dirname(normalized)
+    basename = posixpath.basename(normalized)
+    if (
+        not posixpath.isabs(project)
+        or normalized != project
+        or not parent.startswith("/Users/")
+        or basename != "code"
+        or any(character in project for character in "\r\n")
+    ):
+        raise ValueError(f"unsafe configured project path: {project!r}")
+    if not re.fullmatch(r"[0-9a-f]{12}", deployment_id):
+        raise ValueError(f"unsafe deployment ID: {deployment_id!r}")
+    return (
+        posixpath.join(parent, f".{basename}.deploy-{deployment_id}"),
+        posixpath.join(parent, f".{basename}.backup-{deployment_id}"),
+    )
+
+
+def validate_deploy_source(targets: list[str]) -> Path:
+    source = PROJECT_SOURCE_DIR.resolve()
+    if not source.is_dir():
+        raise ValueError(f"authoritative project directory not found: {source}")
+    source_requirements = set(
+        required_project_files({"stages": tuple(STAGE_SCREEN_IDS)})
+    )
+    missing = sorted(path for path in source_requirements if not (source / path).is_file())
+    if missing:
+        raise ValueError("authoritative project is incomplete: " + ", ".join(missing))
+    fleet_source = FLEET_SOURCE_DIR.resolve()
+    fleet_requirements = ("godot_controller.py", "README.md", "test_godot_controller.py")
+    missing_fleet = sorted(
+        path for path in fleet_requirements if not (fleet_source / path).is_file()
+    )
+    if missing_fleet:
+        raise ValueError("authoritative fleet tools are incomplete: " + ", ".join(missing_fleet))
+    for target in targets:
+        computer = COMPUTERS[target]
+        deployment_paths(computer, "0" * 12)
+        if computer["local"]:
+            destination = Path(computer["project"]).resolve()
+            if (
+                source == destination
+                or source in destination.parents
+                or destination in source.parents
+            ):
+                raise ValueError(
+                    f"refusing overlapping deployment paths: source={source}, "
+                    f"destination={destination}"
+                )
+    return source
+
+
+def _rsync_command(
+    source: Path,
+    computer: dict,
+    destination: str,
+    verify: bool,
+    excludes: tuple[str, ...],
+) -> list[str]:
+    options = ["-rlcin", "--delete"] if verify else ["-a", "--delete"]
+    command = ["rsync", *options]
+    for pattern in excludes:
+        command.extend(["--exclude", pattern])
+    source_argument = str(source) + os.sep
+    if computer["local"]:
+        destination_argument = destination.rstrip("/") + "/"
+    else:
+        remote_path = shlex.quote(destination.rstrip("/") + "/")
+        destination_argument = f"{computer['user']}@{computer['ip']}:{remote_path}"
+        command.extend(["-e", rsync_ssh_transport()])
+    command.extend([source_argument, destination_argument])
+    return command
+
+
+def _rsync_project(
+    source: Path,
+    computer: dict,
+    destination: str,
+    verify: bool,
+    excludes: tuple[str, ...],
+) -> subprocess.CompletedProcess:
+    return run_local(
+        _rsync_command(source, computer, destination, verify, excludes),
+        timeout=DEPLOY_TIMEOUT_SECONDS,
+    )
+
+
+def _compare_tree(
+    source: Path,
+    computer: dict,
+    destination: str,
+) -> tuple[bool, bool, str]:
+    """Return (comparison_succeeded, trees_match, detail)."""
+    project_result = _rsync_project(
+        source,
+        computer,
+        destination,
+        verify=True,
+        excludes=PROJECT_DEPLOY_EXCLUDES,
+    )
+    if project_result.returncode != 0:
+        return False, False, "project comparison failed: " + error_message(project_result)
+    fleet_result = _rsync_project(
+        FLEET_SOURCE_DIR.resolve(),
+        computer,
+        posixpath.join(destination, "fleet"),
+        verify=True,
+        excludes=FLEET_DEPLOY_EXCLUDES,
+    )
+    if fleet_result.returncode != 0:
+        return False, False, "fleet comparison failed: " + error_message(fleet_result)
+    changes = "\n".join(
+        output.strip()
+        for output in (project_result.stdout, fleet_result.stdout)
+        if output.strip()
+    )
+    if changes:
+        return True, False, f"tree differs from authoritative source: {changes}"
+    return True, True, "checksum match"
+
+
+def _verify_tree(source: Path, computer: dict, destination: str) -> tuple[bool, str]:
+    compared, matches, message = _compare_tree(source, computer, destination)
+    return compared and matches, message
+
+
+def _prepare_stage(
+    target: str,
+    source: Path,
+    stage_path: str,
+    backup_path: str,
+) -> tuple[bool, str]:
+    computer = COMPUTERS[target]
+    parent = posixpath.dirname(computer["project"])
+    command = (
+        f"test -x {shlex.quote(GODOT_BIN)} || "
+        f"{{ echo {shlex.quote('Godot executable not found: ' + GODOT_BIN)}; exit 10; }}; "
+        f"test -d {shlex.quote(parent)} && test -w {shlex.quote(parent)} || "
+        f"{{ echo {shlex.quote('Deployment parent missing or not writable: ' + parent)}; exit 11; }}; "
+        f"test -d {shlex.quote(computer['project'])} || "
+        f"{{ echo {shlex.quote('Installed project missing: ' + computer['project'])}; exit 14; }}; "
+        f"test ! -e {shlex.quote(stage_path)} || "
+        f"{{ echo {shlex.quote('Stage path already exists: ' + stage_path)}; exit 12; }}; "
+        f"test ! -e {shlex.quote(backup_path)} || "
+        f"{{ echo {shlex.quote('Backup path already exists: ' + backup_path)}; exit 13; }}; "
+        f"mkdir {shlex.quote(stage_path)}"
+    )
+    prepared = ssh(computer, command)
+    if prepared.returncode != 0:
+        return False, error_message(prepared)
+    copied = _rsync_project(
+        source,
+        computer,
+        stage_path,
+        verify=False,
+        excludes=PROJECT_DEPLOY_EXCLUDES,
+    )
+    if copied.returncode != 0:
+        return False, error_message(copied)
+    fleet_copy = _rsync_project(
+        FLEET_SOURCE_DIR.resolve(),
+        computer,
+        posixpath.join(stage_path, "fleet"),
+        verify=False,
+        excludes=FLEET_DEPLOY_EXCLUDES,
+    )
+    if fleet_copy.returncode != 0:
+        return False, error_message(fleet_copy)
+    return _verify_tree(source, computer, stage_path)
+
+
+def _promote_stage(
+    target: str,
+    stage_path: str,
+    backup_path: str,
+) -> tuple[bool, str]:
+    computer = COMPUTERS[target]
+    project = computer["project"]
+    command = (
+        f"test -d {shlex.quote(stage_path)} || "
+        f"{{ echo {shlex.quote('Verified stage is missing: ' + stage_path)}; exit 20; }}; "
+        f"test -e {shlex.quote(project)} || "
+        f"{{ echo {shlex.quote('Installed project disappeared before promotion: ' + project)}; exit 23; }}; "
+        f"test ! -e {shlex.quote(backup_path)} || "
+        f"{{ echo {shlex.quote('Backup path appeared before promotion: ' + backup_path)}; exit 24; }}; "
+        f"mv {shlex.quote(project)} {shlex.quote(backup_path)} || exit 21; "
+        f"if mv {shlex.quote(stage_path)} {shlex.quote(project)}; then "
+        f"echo {shlex.quote(backup_path)}; "
+        "else "
+        f"mv {shlex.quote(backup_path)} {shlex.quote(project)}; exit 22; "
+        "fi"
+    )
+    result = ssh(computer, command)
+    return (
+        result.returncode == 0,
+        result.stdout.strip() if result.returncode == 0 else error_message(result),
+    )
+
+
+def _rollback_target(
+    target: str,
+    stage_path: str,
+    backup_path: str,
+) -> tuple[bool, str]:
+    computer = COMPUTERS[target]
+    project = computer["project"]
+    command = (
+        f"if test -e {shlex.quote(backup_path)}; then "
+        f"if test -e {shlex.quote(project)}; then "
+        f"test ! -e {shlex.quote(stage_path)} || "
+        f"{{ echo {shlex.quote('Cannot preserve failed tree; stage exists: ' + stage_path)}; exit 30; }}; "
+        f"mv {shlex.quote(project)} {shlex.quote(stage_path)} || exit 31; "
+        "fi; "
+        f"mv {shlex.quote(backup_path)} {shlex.quote(project)} || exit 32; "
+        "fi"
+    )
+    result = ssh(computer, command)
+    return (
+        result.returncode == 0,
+        "rolled back" if result.returncode == 0 else error_message(result),
+    )
+
+
+def _cleanup_stage(target: str, stage_path: str) -> tuple[bool, str]:
+    computer = COMPUTERS[target]
+    parent = posixpath.dirname(computer["project"])
+    prefix = f".{posixpath.basename(computer['project'])}.deploy-"
+    stage_name = posixpath.basename(stage_path)
+    if (
+        posixpath.dirname(stage_path) != parent
+        or re.fullmatch(re.escape(prefix) + r"[0-9a-f]{12}", stage_name) is None
+    ):
+        return False, f"refusing unsafe stage cleanup: {stage_path}"
+    result = ssh(computer, f"rm -rf -- {shlex.quote(stage_path)}")
+    return (
+        result.returncode == 0,
+        "stage cleaned" if result.returncode == 0 else error_message(result),
+    )
+
+
+def _cleanup_backup(target: str, backup_path: str) -> tuple[bool, str]:
+    computer = COMPUTERS[target]
+    parent = posixpath.dirname(computer["project"])
+    prefix = f".{posixpath.basename(computer['project'])}.backup-"
+    backup_name = posixpath.basename(backup_path)
+    if (
+        posixpath.dirname(backup_path) != parent
+        or re.fullmatch(re.escape(prefix) + r"[0-9a-f]{12}", backup_name) is None
+    ):
+        return False, f"refusing unsafe backup cleanup: {backup_path}"
+    result = ssh(computer, f"rm -rf -- {shlex.quote(backup_path)}")
+    return (
+        result.returncode == 0,
+        "old backup removed" if result.returncode == 0 else error_message(result),
+    )
+
+
+def _parallel(targets: list[str], operation) -> dict[str, tuple[bool, str]]:
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        values = list(pool.map(operation, targets))
+    return dict(zip(targets, values))
+
+
+def _deployment_failure_results(
+    targets: list[str],
+    phase: str,
+    phase_results: dict[str, tuple[bool, str]],
+    extra: str = "",
+) -> list[tuple[str, bool, str]]:
+    failures = "; ".join(
+        f".{target}: {message}"
+        for target, (ok, message) in phase_results.items()
+        if not ok
+    )
+    message = f"{phase} failed; deployment aborted: {failures}"
+    if extra:
+        message += f"; {extra}"
+    return [(COMPUTERS[target]["ip"], False, message) for target in targets]
+
+
+def deploy_targets(
+    targets: list[str],
+    dry_run: bool = False,
+) -> list[tuple[str, bool, str]]:
+    if len(set(targets)) != len(targets):
+        message = "duplicate deployment targets are not allowed"
+        return [
+            (COMPUTERS[target]["ip"], False, message)
+            for target in dict.fromkeys(targets)
+            if target in COMPUTERS
+        ]
+    if current_operator()["name"] != "studio":
+        return [
+            (
+                COMPUTERS[target]["ip"],
+                False,
+                "deploy is permitted only from the studio controller at 196.168.50.51",
+            )
+            for target in targets
+        ]
+    try:
+        source = validate_deploy_source(targets)
+    except ValueError as error:
+        return [(COMPUTERS[target]["ip"], False, str(error)) for target in targets]
+    if not os.path.isfile(SSH_IDENTITY_PATH):
+        message = (
+            f"dedicated SSH identity not found: {SSH_IDENTITY_PATH}; "
+            "create/install it before deployment"
+        )
+        return [(COMPUTERS[target]["ip"], False, message) for target in targets]
+    if any(COMPUTERS[target]["local"] for target in targets):
+        message = "studio deployment requires every selected fleet computer to be remote"
+        return [(COMPUTERS[target]["ip"], False, message) for target in targets]
+
+    if dry_run:
+        def compare(target: str) -> tuple[bool, str]:
+            computer = COMPUTERS[target]
+            compared, matches, message = _compare_tree(
+                source,
+                computer,
+                computer["project"],
+            )
+            if not compared:
+                return False, message
+            return True, "up to date" if matches else "changes required:\n" + message
+
+        comparisons = _parallel(targets, compare)
+        return [
+            (COMPUTERS[target]["ip"], comparisons[target][0], comparisons[target][1])
+            for target in targets
+        ]
+
+    deployment_id = uuid.uuid4().hex[:12]
+    paths = {
+        target: deployment_paths(COMPUTERS[target], deployment_id)
+        for target in targets
+    }
+    staged = _parallel(
+        targets,
+        lambda target: _prepare_stage(target, source, *paths[target]),
+    )
+    if any(not ok for ok, _message in staged.values()):
+        _parallel(targets, lambda target: _cleanup_stage(target, paths[target][0]))
+        return _deployment_failure_results(targets, "staging", staged)
+
+    stopped = _parallel(
+        targets,
+        lambda target: (
+            lambda result: (
+                result.returncode == 0,
+                "stopped" if result.returncode == 0 else error_message(result),
+            )
+        )(stop_godot_processes(COMPUTERS[target])),
+    )
+    if any(not ok for ok, _message in stopped.values()):
+        _parallel(targets, lambda target: _cleanup_stage(target, paths[target][0]))
+        stopped_targets = [
+            f".{target}"
+            for target, (ok, _message) in stopped.items()
+            if ok
+        ]
+        stopped_detail = ", ".join(stopped_targets) or "none"
+        return _deployment_failure_results(
+            targets,
+            "stop",
+            stopped,
+            "no project directories were promoted; stop completed on "
+            f"{stopped_detail}, which remain stopped; resolve the error, then run start",
+        )
+
+    promoted = _parallel(
+        targets,
+        lambda target: _promote_stage(target, *paths[target]),
+    )
+    if any(not ok for ok, _message in promoted.values()):
+        rolled_back = _parallel(
+            targets,
+            lambda target: _rollback_target(target, *paths[target]),
+        )
+        _parallel(targets, lambda target: _cleanup_stage(target, paths[target][0]))
+        rollback_failures = "; ".join(
+            f".{target}: {message}"
+            for target, (ok, message) in rolled_back.items()
+            if not ok
+        )
+        extra = "all promoted targets rolled back"
+        if rollback_failures:
+            extra = "ROLLBACK ERROR: " + rollback_failures
+        return _deployment_failure_results(targets, "promotion", promoted, extra)
+
+    verified = _parallel(
+        targets,
+        lambda target: _verify_tree(source, COMPUTERS[target], COMPUTERS[target]["project"]),
+    )
+    if any(not ok for ok, _message in verified.values()):
+        rolled_back = _parallel(
+            targets,
+            lambda target: _rollback_target(target, *paths[target]),
+        )
+        _parallel(targets, lambda target: _cleanup_stage(target, paths[target][0]))
+        rollback_failures = "; ".join(
+            f".{target}: {message}"
+            for target, (ok, message) in rolled_back.items()
+            if not ok
+        )
+        extra = "all promoted targets rolled back"
+        if rollback_failures:
+            extra = "ROLLBACK ERROR: " + rollback_failures
+        return _deployment_failure_results(targets, "verification", verified, extra)
+
+    cleaned = _parallel(
+        targets,
+        lambda target: _cleanup_backup(target, promoted[target][1]),
+    )
+    results = []
+    for target in targets:
+        cleanup_ok, cleanup_message = cleaned[target]
+        results.append(
+            (
+                COMPUTERS[target]["ip"],
+                cleanup_ok,
+                (
+                    "deployed and checksum-verified; left stopped; old backup removed"
+                    if cleanup_ok
+                    else "deployed and checksum-verified; left stopped; "
+                    f"OLD BACKUP CLEANUP FAILED: {cleanup_message}"
+                ),
+            )
+        )
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -639,6 +1271,7 @@ def main() -> None:
             "editor",
             "stop",
             "restart",
+            "deploy",
             "list",
             "set",
             "regime-clear",
@@ -666,7 +1299,24 @@ def main() -> None:
         metavar="TRUE/FALSE",
         help="absolute obstacle/debug geometry visibility for set",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show exact deploy differences without writing or stopping Godot",
+    )
     args = parser.parse_args()
+
+    try:
+        operator = configure_operator()
+    except ValueError as error:
+        parser.error(str(error))
+    print(
+        f"Controller: {operator['name']} at {operator['ip']} "
+        f"({'target .11 local' if operator['local_target'] else 'all fleet targets over SSH'})"
+    )
+
+    if args.dry_run and args.action != "deploy":
+        parser.error("--dry-run is accepted only by deploy")
 
     regime_actions = {"list", "set", "regime-clear", "regime-console"}
     if args.action in regime_actions:
@@ -689,7 +1339,10 @@ def main() -> None:
             if args.action == "regime-console":
                 run_regime_console()
                 return
-            saved_regime_ids, saved_geometry_visible = load_controller_state()
+            require_saved_state = args.action == "set" and not args.regime
+            saved_regime_ids, saved_geometry_visible = load_controller_state(
+                require_exists=require_saved_state,
+            )
             if args.action == "set":
                 regime_ids = (
                     args.regime
@@ -740,19 +1393,31 @@ def main() -> None:
             f"unknown target(s): {', '.join(invalid_targets)}; choose from: "
             f"{', '.join(COMPUTERS)}"
         )
+    if len(set(selected_targets)) != len(selected_targets):
+        parser.error("duplicate machine targets are not allowed")
     targets = selected_targets
 
-    if args.action == "restart":
-        with ThreadPoolExecutor(max_workers=len(targets)) as pool:
-            stop_results = list(pool.map(lambda target: perform(target, "stop"), targets))
-        failed_ips = {ip for ip, ok, _ in stop_results if not ok}
-        restart_targets = [target for target in targets if COMPUTERS[target]["ip"] not in failed_ips]
-        with ThreadPoolExecutor(max_workers=len(targets)) as pool:
-            start_results = list(pool.map(lambda target: perform(target, "start"), restart_targets))
-        results = [result for result in stop_results if not result[1]] + start_results
-    else:
-        with ThreadPoolExecutor(max_workers=len(targets)) as pool:
-            results = list(pool.map(lambda target: perform(target, args.action), targets))
+    if args.action == "deploy":
+        results = deploy_targets(targets, dry_run=args.dry_run)
+        failed = False
+        for ip_address, ok, message in results:
+            print(f"{'OK' if ok else 'ERROR':5} {ip_address}: {message}")
+            failed = failed or not ok
+        raise SystemExit(1 if failed else 0)
+
+    startup_state = None
+    if args.action in {"start", "restart"}:
+        try:
+            startup_state = load_controller_state(require_exists=True)
+        except (OSError, ValueError) as error:
+            parser.error(
+                "could not load the authoritative regime state before launch; "
+                f"left running processes untouched: {error}"
+            )
+
+    effective_action = "start" if args.action == "restart" else args.action
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        results = list(pool.map(lambda target: perform(target, effective_action), targets))
 
     failed = False
     for ip_address, ok, message in results:
@@ -767,7 +1432,7 @@ def main() -> None:
         ]
         if successful_targets:
             try:
-                active_ids, geometry_visible = load_controller_state()
+                active_ids, geometry_visible = startup_state
                 ordered_active = [
                     regime_id
                     for regime_id, _name in REGIMES
