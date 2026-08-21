@@ -994,6 +994,23 @@ def _rsync_project(
     )
 
 
+def _substantive_rsync_changes(output: str) -> str:
+    """Return content/tree changes, excluding rsync metadata-only notices.
+
+    The macOS rsync bundled on the fleet emits itemized ``.f..T....`` lines
+    for identical file contents whose mtimes differ, even when verification
+    uses checksums and does not request timestamp preservation.  An itemized
+    line beginning with ``.`` means rsync would not transfer or recreate that
+    entry.  Content changes, additions, link changes, and deletions begin with
+    ``>``, ``<``, ``c``, ``h``, or ``*`` and remain deployment blockers.
+    """
+    return "\n".join(
+        line
+        for line in output.splitlines()
+        if line.strip() and not line.startswith(".")
+    )
+
+
 def _compare_tree(
     source: Path,
     computer: dict,
@@ -1019,9 +1036,12 @@ def _compare_tree(
     if fleet_result.returncode != 0:
         return False, False, "fleet comparison failed: " + error_message(fleet_result)
     changes = "\n".join(
-        output.strip()
-        for output in (project_result.stdout, fleet_result.stdout)
-        if output.strip()
+        filtered
+        for filtered in (
+            _substantive_rsync_changes(project_result.stdout),
+            _substantive_rsync_changes(fleet_result.stdout),
+        )
+        if filtered
     )
     if changes:
         return True, False, f"tree differs from authoritative source: {changes}"

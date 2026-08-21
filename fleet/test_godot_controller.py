@@ -424,6 +424,50 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(failed[0][1])
         self.assertIn("connection timed out", failed[0][2])
 
+    def test_tree_comparison_ignores_only_rsync_metadata_notices(self):
+        self.configure_studio()
+        timestamp_only = completed(
+            stdout=(
+                ".f..T.... flow/assets/fonts/BarlowCondensed-Medium.ttf.import\n"
+                ".f..T.... img/icon.svg.import\n"
+            )
+        )
+        with mock.patch.object(
+            controller,
+            "_rsync_project",
+            side_effect=[timestamp_only, completed()],
+        ):
+            compared, matches, message = controller._compare_tree(
+                Path("/source/project"),
+                controller.COMPUTERS["11"],
+                controller.COMPUTERS["11"]["project"],
+            )
+        self.assertTrue(compared)
+        self.assertTrue(matches)
+        self.assertEqual("checksum match", message)
+
+        substantive_outputs = (
+            ">fc...... flow/gpu_stage/gpu_flow_stage_2d.gd\n",
+            ">f+++++++ flow/data/new.txt\n",
+            "cL++++++++ flow/link -> target\n",
+            "*deleting   flow/retired.txt\n",
+        )
+        for substantive_output in substantive_outputs:
+            with self.subTest(output=substantive_output.strip()):
+                with mock.patch.object(
+                    controller,
+                    "_rsync_project",
+                    side_effect=[completed(stdout=substantive_output), completed()],
+                ):
+                    compared, matches, message = controller._compare_tree(
+                        Path("/source/project"),
+                        controller.COMPUTERS["11"],
+                        controller.COMPUTERS["11"]["project"],
+                    )
+                self.assertTrue(compared)
+                self.assertFalse(matches)
+                self.assertIn(substantive_output.strip(), message)
+
     def test_geometry_only_set_requires_existing_authoritative_state(self):
         self.configure_studio()
         argv = ["godot_controller.py", "set", "--geo", "FALSE"]
