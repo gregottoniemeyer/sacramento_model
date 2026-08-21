@@ -78,9 +78,22 @@ SSH_OPTIONS = (
 FLOW_CONTROL_PORT = 5005
 REGIME_TARGET = "*"
 REGIME_ACK_PROTOCOL = "ink-flow/1-ack"
-REGIME_ACK_ATTEMPTS = 12
+REGIME_ACK_ATTEMPTS = 24
 REGIME_ACK_WAIT_SECONDS = 0.75
 REGIME_STATE_PATH = "/Users/francescospagnolo/.water_council_regime_state.json"
+GLOBAL_CLASS_CACHE_RELATIVE_PATH = ".godot/global_script_class_cache.cfg"
+FONT_CACHE_RELATIVE_PATH = (
+    ".godot/imported/"
+    "BarlowCondensed-Medium.ttf-55fe546e141a6200e28c93d92a23a9e8.fontdata"
+)
+REQUIRED_GLOBAL_CLASSES = (
+    "FlowMath",
+    "FlowReservoir",
+    "GPUFlowInteractionPolygon",
+    "GPUFlowStage2D",
+    "GPULeaf2D",
+    "GPUSalmon2D",
+)
 PROJECT_SOURCE_DIR = Path(__file__).resolve().parents[1] / "godot_experiments"
 FLEET_SOURCE_DIR = Path(__file__).resolve().parent
 PROJECT_DEPLOY_EXCLUDES = (
@@ -284,9 +297,28 @@ def required_project_files(computer: dict) -> list[str]:
         "flow/data/regimes/water_projects.txt",
         "flow/data/regimes/hydropower.txt",
         "flow/data/regimes/tech.txt",
-        "flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt",
+        "flow/data/water_pipeline/water_temperature_all_rivers_720.txt",
         *(f"scene_{stage}.tscn" for stage in computer["stages"]),
     ]
+
+
+def cache_validation_command(project_dir: str) -> str:
+    class_cache = posixpath.join(project_dir, GLOBAL_CLASS_CACHE_RELATIVE_PATH)
+    font_cache = posixpath.join(project_dir, FONT_CACHE_RELATIVE_PATH)
+    command = (
+        f"test -s {shlex.quote(class_cache)} || "
+        f"{{ echo {shlex.quote('Godot global script-class cache is missing')}; exit 14; }}; "
+        f"test -s {shlex.quote(font_cache)} || "
+        f"{{ echo {shlex.quote('Godot Barlow font import cache is missing')}; exit 15; }}; "
+    )
+    for class_name in REQUIRED_GLOBAL_CLASSES:
+        class_marker = f'\"class\": &\"{class_name}\"'
+        command += (
+            f"grep -Fq -- {shlex.quote(class_marker)} {shlex.quote(class_cache)} || "
+            f"{{ echo {shlex.quote('Godot global class is missing: ' + class_name)}; "
+            "exit 16; }; "
+        )
+    return command.rstrip("; ")
 
 
 def check_computer(computer: dict) -> tuple[bool, str]:
@@ -310,7 +342,22 @@ def check_computer(computer: dict) -> tuple[bool, str]:
                             missing.append("startup_selector.gd needs the fleet-launch update")
                 except OSError as error:
                     missing.append(f"Could not read startup_selector.gd: {error}")
-        return not missing, "; ".join(missing) or "Godot and project found"
+            class_cache = Path(project_dir) / GLOBAL_CLASS_CACHE_RELATIVE_PATH
+            if not class_cache.is_file() or class_cache.stat().st_size <= 0:
+                missing.append("Godot global script-class cache is missing")
+            else:
+                try:
+                    class_cache_text = class_cache.read_text(encoding="utf-8")
+                except OSError as error:
+                    missing.append(f"Could not read Godot global class cache: {error}")
+                else:
+                    for class_name in REQUIRED_GLOBAL_CLASSES:
+                        if f'\"class\": &\"{class_name}\"' not in class_cache_text:
+                            missing.append(f"Godot global class is missing: {class_name}")
+            font_cache = Path(project_dir) / FONT_CACHE_RELATIVE_PATH
+            if not font_cache.is_file() or font_cache.stat().st_size <= 0:
+                missing.append("Godot Barlow font import cache is missing")
+        return not missing, "; ".join(missing) or "Godot, project, and import cache found"
 
     command = (
         f"if test ! -x {shlex.quote(GODOT_BIN)}; then "
@@ -328,12 +375,15 @@ def check_computer(computer: dict) -> tuple[bool, str]:
     command += (
         f"if ! grep -q -- {shlex.quote('--stages=')} "
         f"{shlex.quote(project_dir + '/startup_selector.gd')}; then "
-        f"echo {shlex.quote('startup_selector.gd needs the fleet-launch update')}; exit 13; fi"
+        f"echo {shlex.quote('startup_selector.gd needs the fleet-launch update')}; exit 13; fi; "
+        + cache_validation_command(project_dir)
     )
     result = ssh(computer, command)
     return (
         result.returncode == 0,
-        "Godot and project found" if result.returncode == 0 else error_message(result),
+        "Godot, project, and import cache found"
+        if result.returncode == 0
+        else error_message(result),
     )
 
 
@@ -953,6 +1003,41 @@ def _verify_tree(source: Path, computer: dict, destination: str) -> tuple[bool, 
     return compared and matches, message
 
 
+def _verify_deployed_tree(source: Path, target: str) -> tuple[bool, str]:
+    computer = COMPUTERS[target]
+    project_path = computer["project"]
+    verified, verification_message = _verify_tree(source, computer, project_path)
+    if not verified:
+        return False, verification_message
+    validated = ssh(
+        computer,
+        cache_validation_command(project_path),
+        timeout=SSH_TIMEOUT_SECONDS,
+    )
+    if validated.returncode != 0:
+        return False, "active Godot cache validation failed: " + error_message(validated)
+    return True, "checksum match; Godot imports and global classes ready"
+
+
+def _import_stage_cache(target: str, project_path: str) -> tuple[bool, str]:
+    computer = COMPUTERS[target]
+    command = (
+        f"{shlex.quote(GODOT_BIN)} --headless --path "
+        f"{shlex.quote(project_path)} --import"
+    )
+    imported = ssh(computer, command, timeout=DEPLOY_TIMEOUT_SECONDS)
+    if imported.returncode != 0:
+        return False, "Godot import failed: " + error_message(imported)
+    validated = ssh(
+        computer,
+        cache_validation_command(project_path),
+        timeout=SSH_TIMEOUT_SECONDS,
+    )
+    if validated.returncode != 0:
+        return False, "Godot cache validation failed: " + error_message(validated)
+    return True, "Godot imports and global classes ready"
+
+
 def _prepare_stage(
     target: str,
     source: Path,
@@ -995,7 +1080,16 @@ def _prepare_stage(
     )
     if fleet_copy.returncode != 0:
         return False, error_message(fleet_copy)
-    return _verify_tree(source, computer, stage_path)
+    verified, verification_message = _verify_tree(source, computer, stage_path)
+    if not verified:
+        return False, verification_message
+    imported, import_message = _import_stage_cache(target, stage_path)
+    if not imported:
+        return False, import_message
+    verified, verification_message = _verify_tree(source, computer, stage_path)
+    if not verified:
+        return False, "post-import source verification failed: " + verification_message
+    return True, "checksum match; " + import_message
 
 
 def _promote_stage(
@@ -1219,7 +1313,7 @@ def deploy_targets(
 
     verified = _parallel(
         targets,
-        lambda target: _verify_tree(source, COMPUTERS[target], COMPUTERS[target]["project"]),
+        lambda target: _verify_deployed_tree(source, target),
     )
     if any(not ok for ok, _message in verified.values()):
         rolled_back = _parallel(

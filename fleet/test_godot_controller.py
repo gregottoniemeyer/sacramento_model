@@ -151,6 +151,18 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("refusing unsafe", message)
         remote.assert_not_called()
 
+    def test_remote_check_requires_class_and_font_caches(self):
+        self.configure_studio()
+        with mock.patch.object(controller, "ssh", return_value=completed()) as remote:
+            ok, message = controller.check_computer(controller.COMPUTERS["11"])
+        self.assertTrue(ok)
+        self.assertIn("import cache", message)
+        command = remote.call_args.args[1]
+        self.assertIn(controller.GLOBAL_CLASS_CACHE_RELATIVE_PATH, command)
+        self.assertIn(controller.FONT_CACHE_RELATIVE_PATH, command)
+        for class_name in controller.REQUIRED_GLOBAL_CLASSES:
+            self.assertIn(f'"class": &"{class_name}"', command)
+
     def test_start_preflight_failure_never_stops_working_godot(self):
         self.configure_studio()
         with mock.patch.object(
@@ -390,6 +402,77 @@ class ControllerTests(unittest.TestCase):
         stop.assert_not_called()
         promote.assert_not_called()
 
+    def test_import_stage_cache_runs_headless_import_and_validates_outputs(self):
+        self.configure_studio()
+        with mock.patch.object(
+            controller,
+            "ssh",
+            side_effect=[completed(), completed()],
+        ) as remote:
+            ok, message = controller._import_stage_cache(
+                "11",
+                "/Users/francescospagnolo/Documents/watercouncil/.code.deploy-0123456789ab",
+            )
+        self.assertTrue(ok)
+        self.assertIn("global classes ready", message)
+        import_command = remote.call_args_list[0].args[1]
+        self.assertIn("--headless", import_command)
+        self.assertIn("--import", import_command)
+        validation_command = remote.call_args_list[1].args[1]
+        self.assertIn(controller.GLOBAL_CLASS_CACHE_RELATIVE_PATH, validation_command)
+        self.assertIn(controller.FONT_CACHE_RELATIVE_PATH, validation_command)
+        for class_name in controller.REQUIRED_GLOBAL_CLASSES:
+            self.assertIn(f'"class": &"{class_name}"', validation_command)
+
+    def test_verify_deployed_tree_requires_checksum_and_active_cache(self):
+        self.configure_studio()
+        source = Path("/source/project")
+        project = controller.COMPUTERS["11"]["project"]
+        with mock.patch.object(
+            controller,
+            "_verify_tree",
+            return_value=(True, "checksum match"),
+        ) as verify:
+            with mock.patch.object(controller, "ssh", return_value=completed()) as remote:
+                ok, message = controller._verify_deployed_tree(source, "11")
+        self.assertTrue(ok)
+        self.assertIn("global classes ready", message)
+        verify.assert_called_once_with(source, controller.COMPUTERS["11"], project)
+        validation_command = remote.call_args.args[1]
+        self.assertIn(controller.GLOBAL_CLASS_CACHE_RELATIVE_PATH, validation_command)
+        self.assertIn(controller.FONT_CACHE_RELATIVE_PATH, validation_command)
+        for class_name in controller.REQUIRED_GLOBAL_CLASSES:
+            self.assertIn(f'"class": &"{class_name}"', validation_command)
+
+    def test_verify_deployed_tree_rejects_checksum_or_active_cache_failure(self):
+        self.configure_studio()
+        source = Path("/source/project")
+        with mock.patch.object(
+            controller,
+            "_verify_tree",
+            return_value=(False, "checksum mismatch"),
+        ):
+            with mock.patch.object(controller, "ssh") as remote:
+                ok, message = controller._verify_deployed_tree(source, "11")
+        self.assertFalse(ok)
+        self.assertIn("checksum mismatch", message)
+        remote.assert_not_called()
+
+        with mock.patch.object(
+            controller,
+            "_verify_tree",
+            return_value=(True, "checksum match"),
+        ):
+            with mock.patch.object(
+                controller,
+                "ssh",
+                return_value=completed(returncode=15, stderr="font cache missing"),
+            ):
+                ok, message = controller._verify_deployed_tree(source, "11")
+        self.assertFalse(ok)
+        self.assertIn("active Godot cache validation failed", message)
+        self.assertIn("font cache missing", message)
+
     def test_prepare_stage_requires_an_existing_installed_project(self):
         self.configure_studio()
         source = Path("/source/project")
@@ -408,6 +491,31 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("Installed project missing", message)
         self.assertIn(controller.COMPUTERS["11"]["project"], remote.call_args.args[1])
         copy.assert_not_called()
+
+    def test_prepare_stage_imports_before_success(self):
+        self.configure_studio()
+        source = Path("/source/project")
+        stage, backup = controller.deployment_paths(
+            controller.COMPUTERS["11"],
+            "0123456789ab",
+        )
+        with mock.patch.object(controller, "ssh", return_value=completed()):
+            with mock.patch.object(controller, "_rsync_project", return_value=completed()):
+                with mock.patch.object(
+                    controller,
+                    "_verify_tree",
+                    side_effect=[(True, "match"), (True, "match")],
+                ) as verify:
+                    with mock.patch.object(
+                        controller,
+                        "_import_stage_cache",
+                        return_value=(True, "cache ready"),
+                    ) as imported:
+                        ok, message = controller._prepare_stage("11", source, stage, backup)
+        self.assertTrue(ok)
+        self.assertIn("cache ready", message)
+        imported.assert_called_once_with("11", stage)
+        self.assertEqual(2, verify.call_count)
 
     def test_promotion_refuses_when_installed_project_disappears(self):
         self.configure_studio()
@@ -454,8 +562,8 @@ class ControllerTests(unittest.TestCase):
                             ):
                                 with mock.patch.object(
                                     controller,
-                                    "_verify_tree",
-                                    return_value=(True, "checksum match"),
+                                    "_verify_deployed_tree",
+                                    return_value=(True, "checksum and cache ready"),
                                 ):
                                     with mock.patch.object(
                                         controller,
@@ -492,8 +600,8 @@ class ControllerTests(unittest.TestCase):
                             ):
                                 with mock.patch.object(
                                     controller,
-                                    "_verify_tree",
-                                    return_value=(False, "mismatch"),
+                                    "_verify_deployed_tree",
+                                    return_value=(False, "active cache mismatch"),
                                 ):
                                     with mock.patch.object(
                                         controller,

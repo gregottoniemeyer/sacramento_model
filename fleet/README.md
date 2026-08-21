@@ -98,13 +98,17 @@ python3 fleet/godot_controller.py status
 The dry run reports intended changes without stopping Godot or changing remote
 files. Deployment requires an existing installed `code` tree on every selected
 Mac so that an automatic rollback always has a complete predecessor. A real
-deploy first stages and checksum-verifies every selected target
-while the current installation remains active. Only after every stage passes
+deploy first stages and checksum-verifies every selected target, runs Godot's
+headless import on each staged tree, and verifies the generated font and global
+script-class caches while the current installation remains active. Cache
+readiness requires the exact packaged Barlow font import and every global class
+used by the flow stages. Only after every stage passes
 does it stop Godot on those dedicated nodes and promote the staged trees. It
-then checksum-verifies the active trees. If staging, promotion, or final
-verification fails, it rolls back every target it already promoted and returns
-a nonzero status. Deployment intentionally leaves the nodes stopped; `start` is
-a separate, visible operator decision.
+then checksum-verifies the active trees and revalidates active font and global-class
+caches before deleting any predecessor backup. If staging, promotion, or final
+verification fails, it rolls back every target it already promoted and returns a
+nonzero status. Deployment intentionally leaves the nodes stopped; `start` is a
+separate, visible operator decision.
 
 Use a machine suffix only for a deliberate diagnostic or repair deployment:
 
@@ -122,14 +126,16 @@ During promotion, the previous tree is moved to the matching
 `.code.backup-<12-hex-id>` path so an automatic rollback remains possible.
 After every promoted tree passes checksum verification, that release's old
 backup is deleted. The deployed mirror excludes `.godot/`, `.DS_Store`,
-`godot-remote.log`, `__pycache__/`, `*.pyc`, and `*.pyo`. The controller does not
-update a running project in place and never deletes a path that does not match
-the exact generated backup/staging pattern.
+`godot-remote.log`, `__pycache__/`, `*.pyc`, and `*.pyo`. `.godot/` is generated
+afresh on each target rather than copied across machines. The controller does
+not update a running project in place and never deletes a path that does not
+match the exact generated backup/staging pattern.
 
 ## Daily start, stop, and status
 
 Use `status` before an intervention, `check` after a deployment, and `status`
-again after a start or restart:
+again after a start or restart. `check` includes the machine-local Godot global
+class cache and Barlow font import, not only source files:
 
 ```bash
 python3 fleet/godot_controller.py ping
