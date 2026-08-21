@@ -137,10 +137,11 @@ const REGIME_FIELD_LANE_PADDING_WORLD := 0.18
 const REGIME_FIELD_ROOT_WIDTH_RANGE := Vector2(0.90, 1.30)
 const REGIME_FIELD_MOUTH_WIDTH_RANGE := Vector2(0.65, 0.95)
 const REGIME_FIELD_DEPTH_RANGE := Vector2(1.55, 2.15)
-const BANK_FIELD_SUCTION_REACH_PIXELS := 180.0
-const BANK_FIELD_SUCTION_CROSSFLOW_RATIO := 1.25
-const BANK_FIELD_SUCTION_STREAMWISE_RATIO := 0.06
-const BANK_FIELD_CAPTURE_DEPTH_PIXELS := 10.0
+const BANK_FIELD_SUCTION_REACH_PIXELS := 300.0
+const BANK_FIELD_SUCTION_CROSSFLOW_RATIO := 1.60
+const BANK_FIELD_SUCTION_STREAMWISE_RATIO := 0.0
+const BANK_FIELD_MIN_WITHDRAWAL_SPEED_PIXELS := 540.0
+const BANK_FIELD_CAPTURE_DEPTH_PIXELS := 18.0
 const INTERACTION_BANK_EDGE_EPSILON_PIXELS := 1.0
 const TYPE_ROTATION_RADIANS := -PI * 0.5
 const TYPE_ROTATION_DEGREES := -90.0
@@ -150,8 +151,6 @@ const STAGE_TITLE_FONT_SIZE := 60
 const MODEL_DATE_FONT_SIZE := 48
 const MODEL_DATE_OPENTYPE_FEATURE := "tnum"
 const MODEL_DATE_POSITION := Vector2(1860.0, 540.0)
-const WATER_TEMPERATURE_FONT_SIZE := 48
-const WATER_TEMPERATURE_POSITION := Vector2(1740.0, 540.0)
 const WATER_TEMPERATURE_EXPECTED_ROW_COUNT := 720
 const WATER_TEMPERATURE_INTERPOLATION_MODE := (
 	"HALF_OPEN_ANNUAL_LINEAR_WRAP"
@@ -380,9 +379,8 @@ var _background_rect: ColorRect
 var _background_grid: Node2D
 var _stage_title_layer: Node2D
 var _stage_title_label: Label
+var _stage_title_font: FontVariation
 var _model_date_label: Label
-var _model_date_font: FontVariation
-var _water_temperature_label: Label
 var _model_timeline: Node
 var _model_regimes: Node
 var _regime_panel: Node2D
@@ -2581,6 +2579,7 @@ func runtime_summary() -> Dictionary:
 	var bank_field_suction_reach_uniforms: Array[float] = []
 	var bank_field_suction_crossflow_uniforms: Array[float] = []
 	var bank_field_suction_streamwise_uniforms: Array[float] = []
+	var bank_field_min_withdrawal_speed_uniforms: Array[float] = []
 	var bank_field_capture_depth_uniforms: Array[float] = []
 	var trail_recording_enabled_uniforms: Array[bool] = []
 	var head_layer_speed_scales: Array[float] = []
@@ -2720,6 +2719,11 @@ func runtime_summary() -> Dictionary:
 				&"bank_field_suction_streamwise_ratio"
 			)
 		))
+		bank_field_min_withdrawal_speed_uniforms.append(float(
+			process_material.get_shader_parameter(
+				&"bank_field_min_withdrawal_speed_pixels"
+			)
+		))
 		bank_field_capture_depth_uniforms.append(float(
 			process_material.get_shader_parameter(
 				&"bank_field_capture_depth_pixels"
@@ -2804,6 +2808,7 @@ func runtime_summary() -> Dictionary:
 		"screen_id": String(screen_id),
 		"control_target": String(control_target),
 		"stage_title": stage_title,
+		"stage_title_display_text": _formatted_stage_title(),
 		"stage_title_visible": stage_title_visible,
 		"stage_title_position": STAGE_TITLE_POSITION,
 		"stage_title_position_anchor": "CENTERLINE",
@@ -2811,6 +2816,17 @@ func runtime_summary() -> Dictionary:
 		"stage_title_color": STAGE_TITLE_COLOR,
 		"stage_title_font_size": STAGE_TITLE_FONT_SIZE,
 		"stage_title_font_resource": STAGE_TITLE_FONT.resource_path,
+		"stage_title_font_instance_id": (
+			_stage_title_font.get_instance_id()
+			if _stage_title_font != null
+			else 0
+		),
+		"stage_title_tabular_numerals": true,
+		"stage_title_opentype_feature": MODEL_DATE_OPENTYPE_FEATURE,
+		"stage_title_temperature_integrated": true,
+		"stage_title_temperature_visible": (
+			stage_title_visible and stage_temperature_visible
+		),
 		"stage_title_z_index": STAGE_TITLE_Z_INDEX,
 		"regime_state_shared": _model_regimes != null,
 		"regime_state_scope": String(regime_state.get("scope", "")),
@@ -2918,6 +2934,7 @@ func runtime_summary() -> Dictionary:
 		"regime_geometry_preserves_particle_pools": true,
 		"field_intake_mode": "BANK_CONNECTED_LATERAL_SUCTION",
 		"field_absorption_edge_mode": "RIVER_FACING_MOUTH",
+		"field_turn_mode": "SHARP_QUARTER_TURN_AT_MOUTH",
 		"field_draining_state_policy": "RECORD_THROUGH_FIELD_THEN_RECYCLE_OFFSCREEN",
 		"field_tail_policy": "IMMUTABLE_SEGMENTS_FADE_WITHOUT_TELEPORT",
 		"regime_field_bank_layouts": regime_field_bank_layouts,
@@ -2928,6 +2945,9 @@ func runtime_summary() -> Dictionary:
 		),
 		"bank_field_suction_streamwise_ratio": (
 			BANK_FIELD_SUCTION_STREAMWISE_RATIO
+		),
+		"bank_field_min_withdrawal_speed_pixels": (
+			BANK_FIELD_MIN_WITHDRAWAL_SPEED_PIXELS
 		),
 		"bank_field_capture_depth_pixels": BANK_FIELD_CAPTURE_DEPTH_PIXELS,
 		"regime_salmon_activity": _regime_salmon_activity,
@@ -2984,36 +3004,31 @@ func runtime_summary() -> Dictionary:
 		"stage_date_opentype_feature": MODEL_DATE_OPENTYPE_FEATURE,
 		"stage_date_z_index": STAGE_TITLE_Z_INDEX,
 		"water_temperature_visible": (
-			_water_temperature_label.visible
-			if _water_temperature_label != null
-			else false
+			stage_title_visible and stage_temperature_visible
 		),
-		"water_temperature_text": (
-			_water_temperature_label.text
-			if _water_temperature_label != null
-			else "WATER — °C"
-		),
+		"water_temperature_text": _formatted_water_temperature(),
 		"water_temperature_value_c": (
 			_temperature_current_value_c if _temperature_value_valid else null
 		),
 		"water_temperature_value_valid": _temperature_value_valid,
-		"water_temperature_position": WATER_TEMPERATURE_POSITION,
+		"water_temperature_position": STAGE_TITLE_POSITION,
 		"water_temperature_position_anchor": "CENTERLINE",
 		"water_temperature_rotation_degrees": TYPE_ROTATION_DEGREES,
 		"water_temperature_color": STAGE_TITLE_COLOR,
-		"water_temperature_font_size": WATER_TEMPERATURE_FONT_SIZE,
+		"water_temperature_font_size": STAGE_TITLE_FONT_SIZE,
 		"water_temperature_font_resource": STAGE_TITLE_FONT.resource_path,
 		"water_temperature_font_shared_with_date": true,
+		"water_temperature_font_shared_with_title": true,
 		"water_temperature_font_instance_id": (
-			_model_date_font.get_instance_id()
-			if _model_date_font != null
+			_stage_title_font.get_instance_id()
+			if _stage_title_font != null
 			else 0
 		),
 		"water_temperature_tabular_numerals": true,
 		"water_temperature_opentype_feature": MODEL_DATE_OPENTYPE_FEATURE,
 		"water_temperature_z_index": STAGE_TITLE_Z_INDEX,
-		"water_temperature_format": "WATER %.1f °C",
-		"water_temperature_fallback_text": "WATER — °C",
+		"water_temperature_format": "%.1f °C",
+		"water_temperature_fallback_text": "— °C",
 		"water_temperature_data_path": temperature_data_path,
 		"water_temperature_data_column": temperature_data_column,
 		"water_temperature_data_loaded": _temperature_data_status == "READY",
@@ -3031,32 +3046,28 @@ func runtime_summary() -> Dictionary:
 		"water_temperature_interpolation_mode": (
 			WATER_TEMPERATURE_INTERPOLATION_MODE
 		),
-		"water_temperature_node_path": "StageTitleLayer/WaterTemperature",
+		"water_temperature_node_path": "StageTitleLayer/StageTitle",
+		"water_temperature_integrated_with_stage_title": true,
 		"water_temperature_outside_water_viewport": true,
 		# Stage-prefixed aliases keep presentation inspection consistent with the
 		# existing stage title/date keys while the data keys remain grouped under
 		# water_temperature_data_*.
 		"stage_temperature_visible": (
-			_water_temperature_label.visible
-			if _water_temperature_label != null
-			else false
+			stage_title_visible and stage_temperature_visible
 		),
-		"stage_temperature_text": (
-			_water_temperature_label.text
-			if _water_temperature_label != null
-			else "WATER — °C"
-		),
+		"stage_temperature_text": _formatted_water_temperature(),
 		"stage_temperature_value_c": (
 			_temperature_current_value_c if _temperature_value_valid else null
 		),
-		"stage_temperature_position": WATER_TEMPERATURE_POSITION,
+		"stage_temperature_position": STAGE_TITLE_POSITION,
 		"stage_temperature_position_anchor": "CENTERLINE",
 		"stage_temperature_rotation_degrees": TYPE_ROTATION_DEGREES,
 		"stage_temperature_color": STAGE_TITLE_COLOR,
-		"stage_temperature_font_size": WATER_TEMPERATURE_FONT_SIZE,
+		"stage_temperature_font_size": STAGE_TITLE_FONT_SIZE,
 		"stage_temperature_font_resource": STAGE_TITLE_FONT.resource_path,
 		"stage_temperature_tabular_numerals": true,
 		"stage_temperature_opentype_feature": MODEL_DATE_OPENTYPE_FEATURE,
+		"stage_temperature_integrated_with_stage_title": true,
 		"stage_temperature_z_index": STAGE_TITLE_Z_INDEX,
 		"model_day_index": _model_day_index,
 		"model_day_of_year": _model_day_index + 1,
@@ -3197,6 +3208,9 @@ func runtime_summary() -> Dictionary:
 		),
 		"bank_field_suction_streamwise_uniforms": (
 			bank_field_suction_streamwise_uniforms
+		),
+		"bank_field_min_withdrawal_speed_uniforms": (
+			bank_field_min_withdrawal_speed_uniforms
 		),
 		"bank_field_capture_depth_uniforms": bank_field_capture_depth_uniforms,
 		"interaction_polygon_count": interaction_definitions.size(),
@@ -3947,6 +3961,10 @@ func _apply_runtime_parameters() -> void:
 		process_material.set_shader_parameter(
 			&"bank_field_suction_streamwise_ratio",
 			BANK_FIELD_SUCTION_STREAMWISE_RATIO,
+		)
+		process_material.set_shader_parameter(
+			&"bank_field_min_withdrawal_speed_pixels",
+			BANK_FIELD_MIN_WITHDRAWAL_SPEED_PIXELS,
 		)
 		process_material.set_shader_parameter(
 			&"bank_field_capture_depth_pixels",
@@ -4906,13 +4924,21 @@ func _build_stage_title() -> void:
 	_stage_title_layer.z_as_relative = false
 	add_child(_stage_title_layer)
 
+	_stage_title_font = FontVariation.new()
+	_stage_title_font.base_font = STAGE_TITLE_FONT
+	_stage_title_font.opentype_features = {
+		TextServerManager.get_primary_interface().name_to_tag(
+			MODEL_DATE_OPENTYPE_FEATURE
+		): 1,
+	}
+
 	_stage_title_label = Label.new()
 	_stage_title_label.name = "StageTitle"
 	_stage_title_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_stage_title_label.focus_mode = Control.FOCUS_NONE
 	_stage_title_label.autowrap_mode = TextServer.AUTOWRAP_OFF
 	_stage_title_label.clip_text = false
-	_stage_title_label.add_theme_font_override(&"font", STAGE_TITLE_FONT)
+	_stage_title_label.add_theme_font_override(&"font", _stage_title_font)
 	_stage_title_label.add_theme_font_size_override(
 		&"font_size",
 		STAGE_TITLE_FONT_SIZE
@@ -4929,14 +4955,7 @@ func _build_stage_title() -> void:
 	_model_date_label.focus_mode = Control.FOCUS_NONE
 	_model_date_label.autowrap_mode = TextServer.AUTOWRAP_OFF
 	_model_date_label.clip_text = false
-	_model_date_font = FontVariation.new()
-	_model_date_font.base_font = STAGE_TITLE_FONT
-	_model_date_font.opentype_features = {
-		TextServerManager.get_primary_interface().name_to_tag(
-			MODEL_DATE_OPENTYPE_FEATURE
-		): 1,
-	}
-	_model_date_label.add_theme_font_override(&"font", _model_date_font)
+	_model_date_label.add_theme_font_override(&"font", _stage_title_font)
 	_model_date_label.add_theme_font_size_override(
 		&"font_size",
 		MODEL_DATE_FONT_SIZE
@@ -4946,28 +4965,6 @@ func _build_stage_title() -> void:
 		STAGE_TITLE_COLOR
 	)
 	_stage_title_layer.add_child(_model_date_label)
-
-	_water_temperature_label = Label.new()
-	_water_temperature_label.name = "WaterTemperature"
-	_water_temperature_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_water_temperature_label.focus_mode = Control.FOCUS_NONE
-	_water_temperature_label.autowrap_mode = TextServer.AUTOWRAP_OFF
-	_water_temperature_label.clip_text = false
-	# Share the date's exact FontVariation resource so both readouts use the
-	# same tabular-numeral OpenType configuration.
-	_water_temperature_label.add_theme_font_override(
-		&"font",
-		_model_date_font,
-	)
-	_water_temperature_label.add_theme_font_size_override(
-		&"font_size",
-		WATER_TEMPERATURE_FONT_SIZE,
-	)
-	_water_temperature_label.add_theme_color_override(
-		&"font_color",
-		STAGE_TITLE_COLOR,
-	)
-	_stage_title_layer.add_child(_water_temperature_label)
 	_build_regime_panel()
 	_apply_stage_title()
 	_apply_model_date()
@@ -5045,18 +5042,34 @@ func _apply_regime_panel() -> void:
 		label.add_theme_color_override(&"font_color", label_color)
 
 
-func _apply_stage_title() -> void:
+func _apply_stage_title(emit_title_signal: bool = true) -> void:
 	if _stage_title_label == null:
 		return
-	_stage_title_label.text = stage_title
+	var next_text := _formatted_stage_title()
+	if _stage_title_label.text != next_text:
+		_stage_title_label.text = next_text
+		_center_label_on_rotated_centerline(
+			_stage_title_label,
+			STAGE_TITLE_POSITION
+		)
 	_stage_title_label.visible = stage_title_visible
-	_center_label_on_rotated_centerline(
-		_stage_title_label,
-		STAGE_TITLE_POSITION
-	)
-	_apply_regime_panel()
-	if is_node_ready():
+	if emit_title_signal and is_node_ready():
 		stage_title_changed.emit(screen_id, stage_title, stage_title_visible)
+
+
+func _formatted_stage_title() -> String:
+	if not stage_temperature_visible:
+		return stage_title
+	var temperature_text := _formatted_water_temperature()
+	if stage_title.is_empty():
+		return temperature_text
+	return "%s (%s)" % [stage_title, temperature_text]
+
+
+func _formatted_water_temperature() -> String:
+	if _temperature_value_valid:
+		return "%.1f °C" % _temperature_current_value_c
+	return "— °C"
 
 
 func _load_temperature_data() -> bool:
@@ -5442,20 +5455,10 @@ func _apply_model_date(emit_date_signal: bool = true) -> void:
 
 
 func _apply_water_temperature() -> void:
-	if _water_temperature_label == null:
-		return
-	var next_text := "WATER — °C"
-	if _temperature_value_valid:
-		next_text = "WATER %.1f °C" % _temperature_current_value_c
-	# Text changes are relatively infrequent after one-decimal formatting. Avoid
-	# reset_size()/pivot recalculation on every shared-timeline frame.
-	if _water_temperature_label.text != next_text:
-		_water_temperature_label.text = next_text
-		_center_label_on_rotated_centerline(
-			_water_temperature_label,
-			WATER_TEMPERATURE_POSITION,
-		)
-	_water_temperature_label.visible = stage_temperature_visible
+	# Temperature is part of the stage title. Re-center only when its one-decimal
+	# display value changes, and do not emit a title-change signal on each model
+	# timeline update.
+	_apply_stage_title(false)
 
 
 func _center_label_on_rotated_centerline(

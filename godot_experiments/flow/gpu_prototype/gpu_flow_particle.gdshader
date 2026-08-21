@@ -82,10 +82,11 @@ uniform float edge_turbulence_inward_ratio = 0.75;
 // A bank-connected ABSORB polygon is a lateral field intake. Eligible heads
 // bend toward its river-facing mouth, then continue through the field and leave
 // the viewport vertically instead of teleporting or stopping in the channel.
-uniform float bank_field_suction_reach_pixels = 180.0;
-uniform float bank_field_suction_crossflow_ratio = 1.25;
-uniform float bank_field_suction_streamwise_ratio = 0.06;
-uniform float bank_field_capture_depth_pixels = 10.0;
+uniform float bank_field_suction_reach_pixels = 300.0;
+uniform float bank_field_suction_crossflow_ratio = 1.60;
+uniform float bank_field_suction_streamwise_ratio = 0.0;
+uniform float bank_field_min_withdrawal_speed_pixels = 540.0;
+uniform float bank_field_capture_depth_pixels = 18.0;
 
 const float STATE_FLOWING = 0.0;
 const float STATE_ENTERING = 1.0;
@@ -456,11 +457,13 @@ void process() {
 	bool head_field_draining = CUSTOM.w > 8.5 && CUSTOM.w < 9.5;
 	if (head_field_draining) {
 		float field_direction_y = clamp(TRANSFORM[2].z, -1.0, 1.0);
+		float field_withdrawal_speed = max(
+			speed * max(bank_field_suction_crossflow_ratio, 0.0),
+			max(bank_field_min_withdrawal_speed_pixels, 0.0)
+		);
 		target_velocity = vec2(
 			speed * max(bank_field_suction_streamwise_ratio, 0.0),
-			field_direction_y
-				* speed
-				* max(bank_field_suction_crossflow_ratio, 0.0)
+			field_direction_y * field_withdrawal_speed
 		);
 	}
 	bool reservoir_geometry_changed = (
@@ -679,7 +682,6 @@ void process() {
 				if (!mouth_found) {
 					continue;
 				}
-				vec2 to_mouth = mouth_point - point;
 				float mouth_distance = sqrt(max(mouth_distance_squared, 0.0));
 				if (
 					mouth_distance > suction_reach
@@ -693,26 +695,34 @@ void process() {
 					mouth_distance
 				);
 				float active_strength = clamp(
-					proximity * absorption_probability,
+					proximity,
 					0.0,
 					1.0
 				);
 				if (active_strength <= bank_field_suction_strength) {
 					continue;
 				}
-				vec2 suction_direction = normalize(to_mouth + vec2(0.0001, 0.0));
+				// Aim beyond the mouth, not merely at its edge. This guarantees that
+				// accepted water crosses into the trapezoid before the latched field
+				// state resolves a crisp vertical quarter-turn toward the bank.
+				vec2 through_mouth_point = mouth_point + vec2(
+					0.0,
+					bank_direction_y * max(bank_field_capture_depth_pixels * 2.0, 36.0)
+				);
+				vec2 suction_direction = normalize(
+					through_mouth_point - point + vec2(0.0001, 0.0)
+				);
+				float withdrawal_speed = max(
+					speed * max(bank_field_suction_crossflow_ratio, 0.0),
+					max(bank_field_min_withdrawal_speed_pixels, 0.0)
+				);
 				float suction_x = max(
 					speed * max(bank_field_suction_streamwise_ratio, 0.0),
-					speed * (
-						max(bank_field_suction_streamwise_ratio, 0.0)
-						+ max(suction_direction.x, 0.0) * 0.30
-					)
+					max(suction_direction.x, 0.0) * withdrawal_speed
 				);
 				bank_field_suction_velocity = vec2(
 					suction_x,
-					bank_direction_y
-						* speed
-						* max(bank_field_suction_crossflow_ratio, 0.0)
+					suction_direction.y * withdrawal_speed
 				);
 				bank_field_suction_strength = active_strength;
 				bank_field_suction_active = true;
@@ -923,6 +933,11 @@ void process() {
 		}
 	}
 	vec2 resolved_velocity = approach_velocity(VELOCITY.xy, target_velocity, DELTA);
+	if (head_field_draining) {
+		// The swept mouth crossing is the corner: remove the last streamwise
+		// velocity immediately so the recorded trail makes a readable 90° turn.
+		resolved_velocity = target_velocity;
+	}
 	if (head_flowing && edge_resolved_inward_floor > 0.0) {
 		if (edge_inward_sign > 0.0) {
 			resolved_velocity.y = max(

@@ -17,23 +17,22 @@ const EXPECTED_TITLE_FONT_PATH := (
 )
 const EXPECTED_TITLE_POSITION := Vector2(60.0, 540.0)
 const EXPECTED_DATE_POSITION := Vector2(1860.0, 540.0)
-const EXPECTED_TEMPERATURE_POSITION := Vector2(1740.0, 540.0)
 const EXPECTED_TITLE_COLOR := Color("4ab0e1")
 const EXPECTED_TITLE_FONT_SIZE := 60
 const EXPECTED_DATE_FONT_SIZE := 48
 const EXPECTED_DATE_OPENTYPE_FEATURE := "tnum"
 const EXPECTED_TEMPERATURE_DATA_PATH := (
-	"res://flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt"
+	"res://flow/data/water_pipeline/water_temperature_all_rivers_720.txt"
 )
 const EXPECTED_TEMPERATURE_ROW_COUNT := 720
 const EXPECTED_TEMPERATURE_INTERPOLATION := "HALF_OPEN_ANNUAL_LINEAR_WRAP"
 const EXPECTED_TEMPERATURE_COLUMNS := {
 	"mount_shasta": "shasta_keswick_release_temp_c",
+	"mccloud_pit": "mccloud_above_shasta_lake_temp_c",
+	"mill_creek": "mill_creek_temp_c",
+	"feather_river": "feather_below_thermalito_temp_c",
+	"american_river": "american_fair_oaks_temp_c",
 	"delta": "delta_freeport_temp_c",
-}
-const EXPECTED_SHARED_TEMPERATURE_TEXT := {
-	"mount_shasta": "WATER 11.1 °C",
-	"delta": "WATER 21.3 °C",
 }
 const EXPECTED_REGIME_PROFILE_PATH := "res://regime_feature_profiles.txt"
 const EXPECTED_REGIME_SLOT_CAPACITIES := {
@@ -889,10 +888,14 @@ func _check_stage_title(
 		)
 	if title_label == null:
 		return
+	var expected_display_title := String(summary.get(
+		"stage_title_display_text",
+		expected_title,
+	))
 	_expect(
-		title_label.text == expected_title,
+		title_label.text == expected_display_title,
 		"%s title must be '%s'; got '%s'."
-			% [scene_path, expected_title, title_label.text]
+			% [scene_path, expected_display_title, title_label.text]
 	)
 	_expect(
 		(title_label.position + title_label.pivot_offset).is_equal_approx(
@@ -914,10 +917,16 @@ func _check_stage_title(
 		title_label.get_theme_font_size(&"font_size") == EXPECTED_TITLE_FONT_SIZE,
 		"%s title font size must be 60." % scene_path
 	)
-	var title_font := title_label.get_theme_font(&"font")
+	var title_font := title_label.get_theme_font(&"font") as FontVariation
+	var tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
+		EXPECTED_DATE_OPENTYPE_FEATURE
+	)
 	_expect(
-		title_font != null and title_font.resource_path == EXPECTED_TITLE_FONT_PATH,
-		"%s title must use the bundled Barlow Condensed Medium font." % scene_path
+		title_font != null
+		and title_font.base_font != null
+		and title_font.base_font.resource_path == EXPECTED_TITLE_FONT_PATH
+		and int(title_font.opentype_features.get(tnum_tag, 0)) == 1,
+		"%s title must use Barlow with tabular numerals." % scene_path
 	)
 	if date_label != null:
 		_expect(
@@ -935,15 +944,14 @@ func _check_stage_title(
 			"%s date must be 48 px." % scene_path
 		)
 		var date_font := date_label.get_theme_font(&"font") as FontVariation
-		var tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
-			EXPECTED_DATE_OPENTYPE_FEATURE
-		)
 		_expect(
 			date_font != null
+			and title_font != null
+			and date_font.get_instance_id() == title_font.get_instance_id()
 			and date_font.base_font != null
 			and date_font.base_font.resource_path == EXPECTED_TITLE_FONT_PATH
 			and int(date_font.opentype_features.get(tnum_tag, 0)) == 1,
-			"%s date must use Barlow tabular numerals." % scene_path
+			"%s title and date must share Barlow tabular numerals." % scene_path
 		)
 		_expect(
 			bool(summary.get("stage_date_tabular_numerals", false))
@@ -960,6 +968,8 @@ func _check_stage_title(
 	)
 	_expect(
 		String(summary.get("stage_title", "")) == expected_title
+		and String(summary.get("stage_title_display_text", ""))
+			== expected_display_title
 		and bool(summary.get("stage_title_visible", false))
 		and Vector2(summary.get("stage_title_position", Vector2.ZERO))
 			== EXPECTED_TITLE_POSITION
@@ -975,13 +985,19 @@ func _check_stage_title(
 			== EXPECTED_TITLE_FONT_SIZE
 		and String(summary.get("stage_title_font_resource", ""))
 			== EXPECTED_TITLE_FONT_PATH
+		and int(summary.get("stage_title_font_instance_id", 0))
+			== int(title_font.get_instance_id() if title_font != null else 0)
+		and bool(summary.get("stage_title_tabular_numerals", false))
+		and String(summary.get("stage_title_opentype_feature", ""))
+			== EXPECTED_DATE_OPENTYPE_FEATURE
+		and bool(summary.get("stage_title_temperature_integrated", false))
 		and bool(summary.get("water_texture_excludes_stage_title", false)),
 		"%s runtime summary must expose the complete title contract." % scene_path
 	)
 	var initial_debug_visible := bool(summary.get("debug_visible", true))
 	stage.call(&"set_debug_visible", not initial_debug_visible)
 	_expect(
-		title_label.visible and title_label.text == expected_title,
+		title_label.visible and title_label.text == expected_display_title,
 		"%s debug visibility must not affect the stage title." % scene_path
 	)
 	stage.call(&"set_debug_visible", initial_debug_visible)
@@ -1002,26 +1018,15 @@ func _check_water_temperature(
 	var water_viewport := stage.get_node_or_null(
 		"WaterOnlyViewport"
 	) as SubViewport
-	var title_layer := stage.get_node_or_null("StageTitleLayer") as Node2D
-	var date_label := stage.get_node_or_null(
-		"StageTitleLayer/ModelDate"
+	var title_label := stage.get_node_or_null(
+		"StageTitleLayer/StageTitle"
 	) as Label
-	var temperature_label := stage.get_node_or_null(
+	var separate_temperature_label := stage.get_node_or_null(
 		"StageTitleLayer/WaterTemperature"
-	) as Label
-	_expect(
-		temperature_label != null,
-		"%s must expose StageTitleLayer/WaterTemperature." % scene_path,
-	)
-	if temperature_label == null:
-		return
-	_expect(
-		temperature_label.get_parent() == title_layer,
-		"%s temperature must remain in StageTitleLayer." % scene_path,
 	)
 	_expect(
-		temperature_label.visible == expected_visible,
-		"%s temperature visibility must be Mount Shasta/Delta only."
+		separate_temperature_label == null,
+		"%s must integrate temperature into StageTitle, without a separate Label."
 			% scene_path,
 	)
 	_expect(
@@ -1031,50 +1036,13 @@ func _check_water_temperature(
 		"%s temperature export and summary visibility disagree." % scene_path,
 	)
 	_expect(
-		(temperature_label.position + temperature_label.pivot_offset)
-			.is_equal_approx(EXPECTED_TEMPERATURE_POSITION),
-		"%s temperature must be centered at (1740, 540)." % scene_path,
-	)
-	_expect(
-		is_equal_approx(temperature_label.rotation_degrees, -90.0),
-		"%s temperature must be rotated -90 degrees." % scene_path,
-	)
-	_expect(
-		temperature_label.get_theme_font_size(&"font_size")
-			== EXPECTED_DATE_FONT_SIZE,
-		"%s temperature must be 48 px." % scene_path,
-	)
-	_expect(
-		temperature_label.get_theme_color(&"font_color").is_equal_approx(
-			EXPECTED_TITLE_COLOR
+		title_label != null
+		and (
+			water_viewport == null
+			or not water_viewport.is_ancestor_of(title_label)
 		),
-		"%s temperature color must be #4AB0E1." % scene_path,
-	)
-	var date_font := (
-		date_label.get_theme_font(&"font") as FontVariation
-		if date_label != null
-		else null
-	)
-	var temperature_font := temperature_label.get_theme_font(
-		&"font"
-	) as FontVariation
-	var tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
-		EXPECTED_DATE_OPENTYPE_FEATURE
-	)
-	_expect(
-		date_font != null
-		and temperature_font != null
-		and temperature_font.get_instance_id() == date_font.get_instance_id()
-		and temperature_font.base_font != null
-		and temperature_font.base_font.resource_path == EXPECTED_TITLE_FONT_PATH
-		and int(temperature_font.opentype_features.get(tnum_tag, 0)) == 1,
-		"%s temperature must share the date's Barlow tnum FontVariation."
+		"%s temperature-bearing title must remain outside WaterOnlyViewport."
 			% scene_path,
-	)
-	_expect(
-		water_viewport == null
-		or not water_viewport.is_ancestor_of(temperature_label),
-		"%s temperature must remain outside WaterOnlyViewport." % scene_path,
 	)
 	_expect(
 		bool(summary.get("water_texture_excludes_stage_temperature", false)),
@@ -1084,7 +1052,7 @@ func _check_water_temperature(
 		Vector2(summary.get(
 			"water_temperature_position",
 			Vector2.ZERO,
-		)) == EXPECTED_TEMPERATURE_POSITION
+		)) == EXPECTED_TITLE_POSITION
 		and String(summary.get("water_temperature_position_anchor", ""))
 			== "CENTERLINE"
 		and is_equal_approx(
@@ -1096,17 +1064,35 @@ func _check_water_temperature(
 			Color.TRANSPARENT,
 		)).is_equal_approx(EXPECTED_TITLE_COLOR)
 		and int(summary.get("water_temperature_font_size", 0))
-			== EXPECTED_DATE_FONT_SIZE
+			== EXPECTED_TITLE_FONT_SIZE
 		and String(summary.get("water_temperature_font_resource", ""))
 			== EXPECTED_TITLE_FONT_PATH
 		and bool(summary.get("water_temperature_font_shared_with_date", false))
+		and bool(summary.get("water_temperature_font_shared_with_title", false))
 		and bool(summary.get("water_temperature_tabular_numerals", false))
 		and String(summary.get("water_temperature_opentype_feature", ""))
-			== EXPECTED_DATE_OPENTYPE_FEATURE,
-		"%s summary must expose the complete temperature typography contract."
+			== EXPECTED_DATE_OPENTYPE_FEATURE
+		and String(summary.get("water_temperature_node_path", ""))
+			== "StageTitleLayer/StageTitle"
+		and bool(summary.get(
+			"water_temperature_integrated_with_stage_title",
+			false,
+		))
+		and String(summary.get("water_temperature_format", "")) == "%.1f °C"
+		and String(summary.get("water_temperature_fallback_text", "")) == "— °C",
+		"%s summary must expose the integrated temperature typography contract."
 			% scene_path,
 	)
 	if not expected_visible:
+		_expect(
+			title_label != null
+			and title_label.text == String(stage.get("stage_title"))
+			and String(summary.get("water_temperature_data_path", "")).is_empty()
+			and String(summary.get("water_temperature_data_column", "")).is_empty()
+			and String(summary.get("water_temperature_text", "")) == "— °C",
+			"%s must remain title-only when no temperature series exists."
+				% scene_path,
+		)
 		return
 
 	_expect(
@@ -1167,17 +1153,21 @@ func _check_water_temperature(
 		"%s temperature must interpolate the selected measured-data column."
 			% scene_path,
 	)
-	var expected_text := "WATER %.1f °C" % expected_value
+	var expected_temperature_text := "%.1f °C" % expected_value
+	var expected_title_text := "%s (%s)" % [
+		String(stage.get("stage_title")),
+		expected_temperature_text,
+	]
 	_expect(
-		expected_text == String(EXPECTED_SHARED_TEMPERATURE_TEXT[screen_id]),
-		"%s smoke fixture temperature changed unexpectedly; got %s."
-			% [scene_path, expected_text],
-	)
-	_expect(
-		temperature_label.text == expected_text
-		and String(summary.get("water_temperature_text", "")) == expected_text,
-		"%s temperature must display exactly '%s'."
-			% [scene_path, expected_text],
+		title_label != null
+		and title_label.text == expected_title_text
+		and String(summary.get("stage_title_display_text", ""))
+			== expected_title_text
+		and String(summary.get("water_temperature_text", ""))
+			== expected_temperature_text
+		and bool(summary.get("stage_title_temperature_visible", false)),
+		"%s title must display exactly '%s'."
+			% [scene_path, expected_title_text],
 	)
 
 
@@ -1965,7 +1955,7 @@ func _finish() -> void:
 		print(
 			"GPU_STAGE_SCENES_SMOKE: PASS "
 			+ "(7 scenes, unique IDs/titles, 1920x1080, Mobile, "
-			+ "Shasta/Delta temperature, "
+			+ "six temperature-bearing titles, "
 			+ "persistent timeline/regimes + gate + routed "
 			+ "polygons/salmon/leaves)"
 		)

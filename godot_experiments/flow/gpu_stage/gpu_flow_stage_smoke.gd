@@ -12,13 +12,12 @@ const EXPECTED_TITLE_FONT_PATH := (
 )
 const EXPECTED_TITLE_POSITION := Vector2(60.0, 540.0)
 const EXPECTED_DATE_POSITION := Vector2(1860.0, 540.0)
-const EXPECTED_TEMPERATURE_POSITION := Vector2(1740.0, 540.0)
 const EXPECTED_TITLE_COLOR := Color("4ab0e1")
 const EXPECTED_TITLE_FONT_SIZE := 60
 const EXPECTED_DATE_FONT_SIZE := 48
 const EXPECTED_DATE_OPENTYPE_FEATURE := "tnum"
 const EXPECTED_TEMPERATURE_DATA_PATH := (
-	"res://flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt"
+	"res://flow/data/water_pipeline/water_temperature_all_rivers_720.txt"
 )
 const EXPECTED_DELTA_TEMPERATURE_COLUMN := "delta_freeport_temp_c"
 const EXPECTED_TEMPERATURE_ROW_COUNT := 720
@@ -93,6 +92,10 @@ func _ready() -> void:
 
 	var errors := PackedStringArray()
 	var summary: Dictionary = stage.call(&"runtime_summary")
+	var expected_title_text := String(summary.get(
+		"stage_title_display_text",
+		"Smoke River",
+	))
 	if summary.is_empty():
 		errors.append("runtime summary is empty")
 	if not bool(summary.get("model_timeline_shared", false)):
@@ -107,9 +110,9 @@ func _ready() -> void:
 	var title_layer := stage.get_node_or_null("StageTitleLayer") as Node2D
 	var title_label := stage.get_node_or_null("StageTitleLayer/StageTitle") as Label
 	var date_label := stage.get_node_or_null("StageTitleLayer/ModelDate") as Label
-	var temperature_label := stage.get_node_or_null(
+	var separate_temperature_label := stage.get_node_or_null(
 		"StageTitleLayer/WaterTemperature"
-	) as Label
+	)
 	var regime_panel := stage.get_node_or_null(
 		"StageTitleLayer/ActiveRegimes"
 	) as Node2D
@@ -153,11 +156,12 @@ func _ready() -> void:
 		water_display.z_index != 0 or water_display.z_as_relative
 	):
 		errors.append("water display is not absolute z=0 above the title")
+	var title_font: FontVariation = null
 	if title_label == null:
 		errors.append("stage title Label is missing")
 	else:
-		if title_label.text != "Smoke River":
-			errors.append("stage title text did not use the exported title")
+		if title_label.text != expected_title_text:
+			errors.append("stage title did not include the measured temperature")
 		if not (title_label.position + title_label.pivot_offset).is_equal_approx(
 			EXPECTED_TITLE_POSITION
 		):
@@ -170,9 +174,17 @@ func _ready() -> void:
 			errors.append("stage title color is not #4AB0E1")
 		if title_label.get_theme_font_size(&"font_size") != EXPECTED_TITLE_FONT_SIZE:
 			errors.append("stage title font size is not 60")
-		var title_font := title_label.get_theme_font(&"font")
-		if title_font == null or title_font.resource_path != EXPECTED_TITLE_FONT_PATH:
-			errors.append("stage title does not use the bundled Barlow Condensed font")
+		title_font = title_label.get_theme_font(&"font") as FontVariation
+		var title_tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
+			EXPECTED_DATE_OPENTYPE_FEATURE
+		)
+		if (
+			title_font == null
+			or title_font.base_font == null
+			or title_font.base_font.resource_path != EXPECTED_TITLE_FONT_PATH
+			or int(title_font.opentype_features.get(title_tnum_tag, 0)) != 1
+		):
+			errors.append("stage title does not use Barlow tabular numerals")
 	if date_label == null:
 		errors.append("model date Label is missing")
 	else:
@@ -186,7 +198,7 @@ func _ready() -> void:
 			errors.append("model date font size is not 48")
 		var date_font := date_label.get_theme_font(&"font") as FontVariation
 		if date_font == null:
-			errors.append("model date does not use a date-only font variation")
+			errors.append("model date does not use a FontVariation")
 		else:
 			var tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
 				EXPECTED_DATE_OPENTYPE_FEATURE
@@ -194,21 +206,23 @@ func _ready() -> void:
 			if int(date_font.opentype_features.get(tnum_tag, 0)) != 1:
 				errors.append("model date does not enable tabular numerals")
 			if (
-				date_font.base_font == null
+				title_font == null
+				or date_font.get_instance_id() != title_font.get_instance_id()
+				or date_font.base_font == null
 				or date_font.base_font.resource_path != EXPECTED_TITLE_FONT_PATH
 			):
-				errors.append("model date variation does not retain the Barlow base font")
+				errors.append("title and date do not share the Barlow tnum font")
 	if not (
 		bool(summary.get("stage_date_tabular_numerals", false))
 		and String(summary.get("stage_date_opentype_feature", ""))
 			== EXPECTED_DATE_OPENTYPE_FEATURE
 	):
 		errors.append("runtime summary does not report tabular date numerals")
-	_check_water_temperature_label(
+	_check_water_temperature_title(
 		stage,
 		water_viewport,
-		date_label,
-		temperature_label,
+		title_label,
+		separate_temperature_label,
 		summary,
 		errors,
 	)
@@ -230,6 +244,8 @@ func _ready() -> void:
 		errors.append("stage title layer and water-only viewport are not siblings")
 	if not (
 		String(summary.get("stage_title", "")) == "Smoke River"
+		and String(summary.get("stage_title_display_text", ""))
+			== expected_title_text
 		and bool(summary.get("stage_title_visible", false))
 		and Vector2(summary.get("stage_title_position", Vector2.ZERO))
 			== EXPECTED_TITLE_POSITION
@@ -245,6 +261,13 @@ func _ready() -> void:
 			== EXPECTED_TITLE_FONT_SIZE
 		and String(summary.get("stage_title_font_resource", ""))
 			== EXPECTED_TITLE_FONT_PATH
+		and int(summary.get("stage_title_font_instance_id", 0))
+			== int(title_font.get_instance_id() if title_font != null else 0)
+		and bool(summary.get("stage_title_tabular_numerals", false))
+		and String(summary.get("stage_title_opentype_feature", ""))
+			== EXPECTED_DATE_OPENTYPE_FEATURE
+		and bool(summary.get("stage_title_temperature_integrated", false))
+		and bool(summary.get("stage_title_temperature_visible", false))
 		and bool(summary.get("water_texture_excludes_stage_title", false))
 	):
 		errors.append("runtime summary does not expose the complete stage-title contract")
@@ -1334,62 +1357,23 @@ func _ready() -> void:
 	get_tree().quit(1)
 
 
-func _check_water_temperature_label(
+func _check_water_temperature_title(
 	stage: Node,
 	water_viewport: SubViewport,
-	date_label: Label,
-	temperature_label: Label,
+	title_label: Label,
+	separate_temperature_label: Node,
 	summary: Dictionary,
 	errors: PackedStringArray
 ) -> void:
-	if temperature_label == null:
-		errors.append("water temperature Label is missing")
+	if separate_temperature_label != null:
+		errors.append("water temperature still has a separate Label")
+	if title_label == null:
+		errors.append("temperature-bearing stage title is missing")
 		return
-	if not temperature_label.visible:
-		errors.append("Delta water temperature Label is not visible")
-	if not (
-		temperature_label.position + temperature_label.pivot_offset
-	).is_equal_approx(EXPECTED_TEMPERATURE_POSITION):
-		errors.append("water temperature is not centered at (1740, 540)")
-	if not is_equal_approx(temperature_label.rotation_degrees, -90.0):
-		errors.append("water temperature is not rotated -90 degrees")
-	if temperature_label.get_theme_font_size(&"font_size") != (
-		EXPECTED_DATE_FONT_SIZE
-	):
-		errors.append("water temperature font size is not 48")
-	if not temperature_label.get_theme_color(&"font_color").is_equal_approx(
-		EXPECTED_TITLE_COLOR
-	):
-		errors.append("water temperature color is not #4AB0E1")
-
-	var date_font := (
-		date_label.get_theme_font(&"font") as FontVariation
-		if date_label != null
-		else null
-	)
-	var temperature_font := temperature_label.get_theme_font(
-		&"font"
-	) as FontVariation
-	if temperature_font == null:
-		errors.append("water temperature does not use a FontVariation")
-	elif date_font == null or temperature_font.get_instance_id() != (
-		date_font.get_instance_id()
-	):
-		errors.append("water temperature does not share the date FontVariation")
-	else:
-		var tnum_tag := TextServerManager.get_primary_interface().name_to_tag(
-			EXPECTED_DATE_OPENTYPE_FEATURE
-		)
-		if int(temperature_font.opentype_features.get(tnum_tag, 0)) != 1:
-			errors.append("water temperature does not enable tabular numerals")
-		if (
-			temperature_font.base_font == null
-			or temperature_font.base_font.resource_path != EXPECTED_TITLE_FONT_PATH
-		):
-			errors.append("water temperature does not retain the Barlow base font")
-
-	if water_viewport != null and water_viewport.is_ancestor_of(temperature_label):
-		errors.append("water temperature is inside the water-only viewport")
+	if not title_label.visible:
+		errors.append("Delta temperature-bearing stage title is not visible")
+	if water_viewport != null and water_viewport.is_ancestor_of(title_label):
+		errors.append("temperature-bearing title is inside the water-only viewport")
 	if not bool(summary.get("water_texture_excludes_stage_temperature", false)):
 		errors.append("water texture does not exclude the temperature label")
 	if not (
@@ -1411,7 +1395,7 @@ func _check_water_temperature_label(
 		Vector2(summary.get(
 			"water_temperature_position",
 			Vector2.ZERO,
-		)) == EXPECTED_TEMPERATURE_POSITION
+		)) == EXPECTED_TITLE_POSITION
 		and String(summary.get("water_temperature_position_anchor", ""))
 			== "CENTERLINE"
 		and is_equal_approx(
@@ -1423,13 +1407,22 @@ func _check_water_temperature_label(
 			Color.TRANSPARENT,
 		)).is_equal_approx(EXPECTED_TITLE_COLOR)
 		and int(summary.get("water_temperature_font_size", 0))
-			== EXPECTED_DATE_FONT_SIZE
+			== EXPECTED_TITLE_FONT_SIZE
 		and String(summary.get("water_temperature_font_resource", ""))
 			== EXPECTED_TITLE_FONT_PATH
 		and bool(summary.get("water_temperature_font_shared_with_date", false))
+		and bool(summary.get("water_temperature_font_shared_with_title", false))
 		and bool(summary.get("water_temperature_tabular_numerals", false))
 		and String(summary.get("water_temperature_opentype_feature", ""))
 			== EXPECTED_DATE_OPENTYPE_FEATURE
+		and String(summary.get("water_temperature_node_path", ""))
+			== "StageTitleLayer/StageTitle"
+		and bool(summary.get(
+			"water_temperature_integrated_with_stage_title",
+			false,
+		))
+		and String(summary.get("water_temperature_format", "")) == "%.1f °C"
+		and String(summary.get("water_temperature_fallback_text", "")) == "— °C"
 	):
 		errors.append("runtime summary does not expose temperature typography")
 
@@ -1473,14 +1466,64 @@ func _check_water_temperature_label(
 	var actual_value := float(summary.get("water_temperature_value_c", NAN))
 	if not is_equal_approx(actual_value, expected_value):
 		errors.append("Delta temperature does not interpolate its selected column")
-	var expected_text := "WATER %.1f °C" % expected_value
-	if temperature_label.text != expected_text:
+	var expected_temperature_text := "%.1f °C" % expected_value
+	var expected_title_text := "Smoke River (%s)" % expected_temperature_text
+	if title_label.text != expected_title_text:
 		errors.append(
-			"water temperature text must be '%s'; got '%s'"
-				% [expected_text, temperature_label.text]
+			"temperature-bearing title must be '%s'; got '%s'"
+				% [expected_title_text, title_label.text]
 		)
-	if String(summary.get("water_temperature_text", "")) != expected_text:
-		errors.append("runtime summary temperature text does not match the Label")
+	if (
+		String(summary.get("water_temperature_text", ""))
+			!= expected_temperature_text
+		or String(summary.get("stage_title_display_text", ""))
+			!= expected_title_text
+	):
+		errors.append("runtime summary does not match the temperature-bearing title")
+
+	if not bool(stage.call(
+		&"set_runtime_parameter",
+		&"temperature.visible",
+		false,
+	)):
+		errors.append("temperature.visible=false was rejected")
+	var hidden_summary: Dictionary = stage.call(&"runtime_summary")
+	if (
+		title_label.text != "Smoke River"
+		or bool(hidden_summary.get("water_temperature_visible", true))
+		or bool(hidden_summary.get("stage_title_temperature_visible", true))
+	):
+		errors.append("hiding temperature did not restore the title-only display")
+	stage.call(&"set_runtime_parameter", &"temperature.visible", true)
+
+	if bool(stage.call(
+		&"set_runtime_parameter",
+		&"temperature.data_column",
+		"",
+	)):
+		errors.append("empty temperature column unexpectedly reported READY")
+	var fallback_summary: Dictionary = stage.call(&"runtime_summary")
+	if (
+		title_label.text != "Smoke River (— °C)"
+		or String(fallback_summary.get("water_temperature_text", "")) != "— °C"
+		or String(fallback_summary.get("water_temperature_fallback_text", ""))
+			!= "— °C"
+		or bool(fallback_summary.get("water_temperature_value_valid", true))
+	):
+		errors.append("missing temperature did not use the in-title fallback")
+	if not bool(stage.call(
+		&"set_runtime_parameter",
+		&"temperature.data_column",
+		EXPECTED_DELTA_TEMPERATURE_COLUMN,
+	)):
+		errors.append("restoring the Delta temperature column failed")
+	var restored_summary: Dictionary = stage.call(&"runtime_summary")
+	if (
+		title_label.text != expected_title_text
+		or String(restored_summary.get("stage_title_display_text", ""))
+			!= expected_title_text
+	):
+		errors.append("restoring temperature did not restore the combined title")
 
 
 func _load_temperature_fixture_column(
@@ -2411,6 +2454,8 @@ func _check_agriculture_field_contract(
 			== "BANK_CONNECTED_LATERAL_SUCTION"
 		and String(summary.get("field_absorption_edge_mode", ""))
 			== "RIVER_FACING_MOUTH"
+		and String(summary.get("field_turn_mode", ""))
+			== "SHARP_QUARTER_TURN_AT_MOUTH"
 		and String(summary.get("field_draining_state_policy", ""))
 			== "RECORD_THROUGH_FIELD_THEN_RECYCLE_OFFSCREEN"
 		and String(summary.get("field_tail_policy", ""))
@@ -2455,18 +2500,23 @@ func _check_agriculture_field_contract(
 					% [label, bank_side, root_y]
 			)
 	for uniform_spec: Array in [
-		["bank_field_suction_reach_pixels", "bank_field_suction_reach_uniforms", 180.0],
+		["bank_field_suction_reach_pixels", "bank_field_suction_reach_uniforms", 300.0],
 		[
 			"bank_field_suction_crossflow_ratio",
 			"bank_field_suction_crossflow_uniforms",
-			1.25,
+			1.60,
 		],
 		[
 			"bank_field_suction_streamwise_ratio",
 			"bank_field_suction_streamwise_uniforms",
-			0.06,
+			0.0,
 		],
-		["bank_field_capture_depth_pixels", "bank_field_capture_depth_uniforms", 10.0],
+		[
+			"bank_field_min_withdrawal_speed_pixels",
+			"bank_field_min_withdrawal_speed_uniforms",
+			540.0,
+		],
+		["bank_field_capture_depth_pixels", "bank_field_capture_depth_uniforms", 18.0],
 	]:
 		var scalar_name := String(uniform_spec[0])
 		var uniform_name := String(uniform_spec[1])
@@ -3002,6 +3052,9 @@ func _check_stage_title_runtime_independence(
 		return
 	var water_texture_rid := water_viewport.get_texture().get_rid()
 	var before: Dictionary = stage.call(&"runtime_summary")
+	var temperature_text := String(before.get("water_temperature_text", "— °C"))
+	var expected_base_title_text := "Smoke River (%s)" % temperature_text
+	var expected_runtime_title_text := "Runtime Smoke River (%s)" % temperature_text
 	var salmon_before: Dictionary = before.get("salmon_summary", {}).duplicate(true)
 	var leaves_before: Dictionary = before.get("leaf_summary", {}).duplicate(true)
 
@@ -3014,10 +3067,12 @@ func _check_stage_title_runtime_independence(
 	)):
 		errors.append("stage.title_visible runtime parameter was rejected")
 	var changed: Dictionary = stage.call(&"runtime_summary")
-	if title_label.text != "Runtime Smoke River" or title_label.visible:
+	if title_label.text != expected_runtime_title_text or title_label.visible:
 		errors.append("runtime title text/visibility did not update the Label directly")
 	if not (
 		String(changed.get("stage_title", "")) == "Runtime Smoke River"
+		and String(changed.get("stage_title_display_text", ""))
+			== expected_runtime_title_text
 		and not bool(changed.get("stage_title_visible", true))
 	):
 		errors.append("runtime title text/visibility did not update the summary")
@@ -3040,7 +3095,7 @@ func _check_stage_title_runtime_independence(
 	var debug_toggled: Dictionary = stage.call(&"runtime_summary")
 	if bool(debug_toggled.get("debug_visible", true)):
 		errors.append("V key did not toggle debug geometry for title independence test")
-	if not title_label.visible or title_label.text != "Smoke River":
+	if not title_label.visible or title_label.text != expected_base_title_text:
 		errors.append("V/debug toggle changed the stage title")
 	stage.call(&"_unhandled_input", v_key)
 
@@ -3048,8 +3103,10 @@ func _check_stage_title_runtime_independence(
 	var paused_title_summary: Dictionary = stage.call(&"runtime_summary")
 	if not (
 		title_label.visible
-		and title_label.text == "Smoke River"
+		and title_label.text == expected_base_title_text
 		and String(paused_title_summary.get("stage_title", "")) == "Smoke River"
+		and String(paused_title_summary.get("stage_title_display_text", ""))
+			== expected_base_title_text
 		and bool(paused_title_summary.get("stage_title_visible", false))
 	):
 		errors.append("pause changed the stage title")
@@ -3068,9 +3125,14 @@ func _check_stage_title_reset_independence(
 	stage.call(&"queue_control_message", {"actions": ["reset"]})
 	await get_tree().process_frame
 	var reset_summary: Dictionary = stage.call(&"runtime_summary")
+	var expected_display_text := String(reset_summary.get(
+		"stage_title_display_text",
+		"",
+	))
 	if not (
 		title_label.visible
-		and title_label.text == "Smoke River"
+		and title_label.text == expected_display_text
+		and expected_display_text.begins_with("Smoke River (")
 		and String(reset_summary.get("stage_title", "")) == "Smoke River"
 		and bool(reset_summary.get("stage_title_visible", false))
 	):

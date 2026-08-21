@@ -15,8 +15,9 @@ chevron/ring scenes with independent ports of the water-line simulation in
 The production GPU milestone includes immutable water trails, coherent noise,
 addressable absorb/repel polygons, reservoirs, live gates, GPU salmon, GPU
 leaves, a screen-fixed model grid and calendar, runtime
-geometry replacement, measured water-temperature text on Mount Shasta and
-Delta, a process-persistent historical-regime switcher, UDP control, and debug
+geometry replacement, measured water temperature integrated into every stage
+title except Cottonwood Creek, a process-persistent historical-regime switcher,
+UDP control, and debug
 drawing. The GPU stage implements both `release_salmon` and `release_leaves`.
 
 ## Architecture
@@ -27,16 +28,17 @@ drawing. The GPU stage implements both `release_salmon` and `release_leaves`.
 Its original seven-layer GPU water renderer runs once inside a transparent,
 native 1920 x 1080 `WaterOnlyViewport`. The stage composites that viewport back
 to the root with premultiplied alpha. The black background, model grid, cyan
-reservoir guide, gold interaction polygons, stage title, model date,
-water-temperature label, active-regime panel, salmon, and leaves are kept
-outside that viewport, so the water texture contains only water and no visual
+reservoir guide, gold interaction polygons, temperature-bearing stage title,
+model date, active-regime panel, salmon, and leaves are kept outside that
+viewport, so the water texture contains only water and no visual
 feedback.
 
 The presentation stack uses absolute canvas Z values: `Background` is `-100`,
 the stage-owned `BackgroundGrid` `Node2D` is `-75`, and `StageTitleLayer` is
 `-50`; water, salmon, and leaves are `0` or higher. `StageTitleLayer` owns the
-river title, model date, optional measured water temperature, and optional
-active-regime panel. None of it is part of the debug overlay, so `V` does not
+temperature-bearing river title, model date, and optional active-regime panel;
+there is no separate temperature node. None of it is part of the debug overlay,
+so `V` does not
 hide it.
 
 Salmon and leaves sample this water texture's alpha directly in their
@@ -336,24 +338,24 @@ and should remain stable even if scene files or display labels are renamed.
 | `scene_6.tscn` | American River | `american_river` |
 | `scene_7.tscn` | Delta | `delta` |
 
-Every production wrapper sets its title explicitly on `GPUFlowStage2D`. The
-stage renders that text bottom-to-top at `-90` degrees, centered on native
-point `(60, 540)` in `#4AB0E1`, using the bundled
+Every production wrapper sets its base title explicitly on
+`GPUFlowStage2D`. The stage renders `StageTitle` bottom-to-top at `-90`
+degrees, centered on native point `(60, 540)` in `#4AB0E1`, using the bundled
 `res://flow/assets/fonts/BarlowCondensed-Medium.ttf` at 60 pixels. The 48-pixel
-model date uses the same font and color, centered on `(1860, 540)`, but enables
-the OpenType `tnum` feature (tabular figures) so every date digit occupies a
-fixed width. Titles, the regime heading, and regime names keep the font's
-proportional spacing. These are the physical top and bottom centerlines after
-the displays are mounted vertically. The font is part of the project rather
-than resolved from the host operating system.
+model date uses the same font and color, centered on `(1860, 540)`. Title and
+date share one `FontVariation` with OpenType `tnum` enabled, so changing
+temperature and date digits use fixed-width tabular figures. These are the
+physical top and bottom centerlines after the displays are mounted vertically.
+The font is part of the project rather than resolved from the host operating
+system.
 
-Mount Shasta and Delta additionally enable `WaterTemperature`, a 48-pixel label
-centered on native point `(1740, 540)`. It is centerline anchored, rotated
-`-90` degrees, colored `#4AB0E1`, and uses the exact same bundled
-`FontVariation` and OpenType `tnum` feature as the model date. A valid value is
-formatted to one decimal place as `WATER 10.4 °C`; an unconfigured, missing,
-malformed, or otherwise invalid series displays the explicit fallback
-`WATER — °C`. The other five production stages do not show this label.
+Every production stage except Cottonwood Creek appends its measured value to
+the title, for example `Delta (20.5 °C)`. A configured but unavailable or
+invalid series uses the explicit in-title fallback `Delta (— °C)`. Turning
+`stage_temperature_visible` off removes the suffix and restores `Delta`.
+No `StageTitleLayer/WaterTemperature` node is created; temperature lives in
+`StageTitleLayer/StageTitle`, which is re-centered only when its one-decimal
+display text changes.
 
 Only `scene_7.tscn`, the Delta screen, enables the
 active-regime panel. It is a child of `StageTitleLayer`, reads at `-90`
@@ -374,7 +376,7 @@ world unit to native pixels, so the grid directly describes the 16 x 9 model
 coordinate system. The first and last boundary lines are omitted on both axes,
 so the grid does not form a frame around the screen. The explicit background is
 at absolute Z `-100`, the grid is
-at `-75`, the title, date, temperature, and regime panel are at `-50`, and
+at `-75`, the temperature-bearing title, date, and regime panel are at `-50`, and
 water/ecology are at `0` or higher.
 Active features can therefore pass visibly over both the grid and text. The grid
 and text remain outside `WaterOnlyViewport`, so their alpha never counts as
@@ -440,13 +442,13 @@ The production scene-to-data assignments are:
 
 | Scene | Display | Watershed data | Temperature series |
 |---|---|---|---|
-| `scene_1.tscn` | Mount Shasta | `shasta_720.txt` | Keswick release |
-| `scene_2.tscn` | McCloud-Pit Rivers | `mccloud_720.txt` | none |
+| `scene_1.tscn` | Mount Shasta | `shasta_720.txt` | `shasta_keswick_release_temp_c` |
+| `scene_2.tscn` | McCloud-Pit Rivers | `mccloud_720.txt` | `mccloud_above_shasta_lake_temp_c` |
 | `scene_3.tscn` | Cottonwood Creek | `cottonwood_720.txt` | none |
-| `scene_4.tscn` | Mill Creek | `mill_creek_720.txt` | none |
-| `scene_5.tscn` | Feather River | `feather_720.txt` | none |
-| `scene_6.tscn` | American River | `american_720.txt` | none |
-| `scene_7.tscn` | Delta | `delta_720.txt` | Freeport |
+| `scene_4.tscn` | Mill Creek | `mill_creek_720.txt` | `mill_creek_temp_c` |
+| `scene_5.tscn` | Feather River | `feather_720.txt` | `feather_below_thermalito_temp_c` |
+| `scene_6.tscn` | American River | `american_720.txt` | `american_fair_oaks_temp_c` |
+| `scene_7.tscn` | Delta | `delta_720.txt` | `delta_freeport_temp_c` |
 
 The combined McCloud-Pit display currently uses the McCloud series. The current
 Delta source is a short November 6, 2025–January 17, 2026 gauge-height window in
@@ -455,37 +457,27 @@ the stage stretches those rows across the display year, so its seasonality is
 provisional. Runtime APIs expose the pipeline's nominal `cfs` column under the
 unit-neutral name `raw_value`.
 
-Mount Shasta and Delta also share the comma-delimited project resource
-`res://flow/data/water_pipeline/water_temperature_kwk_freeport_720.txt`. It
-contains 720 evenly spaced half-open Pacific-time rows from July 1, 2025 through
-June 30, 2026 at 11:50, one every 730 model minutes, and all published values
-are degrees Celsius. Mount Shasta reads
-`shasta_keswick_release_temp_c`, based on hourly CDEC KWK sensor 25 water
-temperature observations from the Sacramento River about 0.8 miles below
-Keswick Dam. The source Fahrenheit values were converted to Celsius before
-averaging and interpolation. Delta reads `delta_freeport_temp_c`, based on
-15-minute USGS parameter 00010 observations at station 11447650, Sacramento
-River at Freeport, Right Bank Pump Stand; that source is natively Celsius.
+All configured stages share the comma-delimited project resource
+`res://flow/data/water_pipeline/water_temperature_all_rivers_720.txt`.
+Cottonwood Creek intentionally leaves temperature unconfigured. The shared
+table contains 720 evenly spaced, half-open Pacific-time rows across the
+July-to-June model year, with Celsius columns selected exactly as shown above.
 
-The pipeline calculates calendar-day means from the measured observations and
-linearly interpolates those daily means to the 720 file rows. At runtime the
-stage independently performs continuous linear interpolation between adjacent
-rows using the shared annual `ModelTimeline`. Thus the displayed temperature
-and date remain phase-aligned throughout the July-to-June cycle; no regime or
-flow value is used to estimate missing temperature. The mapping is half-open
-and cyclic, so row 719 interpolates toward row 0 at the annual wrap; the runtime
-names this mode `HALF_OPEN_ANNUAL_LINEAR_WRAP`. The loader requires exactly 720
-numeric rows with contiguous frame IDs `0…719`; it also accepts the earlier
-tab-delimited copy for provisioned installations. A missing file, absent
-selected column, malformed row, or non-finite result produces
-`WATER — °C` rather than a fabricated number. Freeport observations carrying
-USGS qualifier `P` are provisional and subject to revision, so the Delta series
-and its displayed values must be treated as provisional.
+At runtime each stage performs continuous linear interpolation between adjacent
+rows using the shared annual `ModelTimeline`. Thus every displayed
+temperature suffix and date remain phase-aligned; no regime or flow value is
+used to estimate missing temperature. The mapping is half-open and cyclic, so
+row 719 interpolates toward row 0 at the annual wrap; the runtime names this
+mode `HALF_OPEN_ANNUAL_LINEAR_WRAP`. The loader requires exactly 720 numeric
+rows with contiguous frame IDs `0…719` and also accepts tab-delimited pipeline
+exports. A missing file, absent selected column, malformed row, or non-finite
+result produces the `(— °C)` title fallback rather than a fabricated number.
 
 This milestone is text-only. Temperature does not alter the black background,
 water-trail palette or luminance, flow physics, salmon, leaves, or any regime
 feature. A future water-only tint can be evaluated separately without changing
-the measured numeric label or using color as the sole temperature encoding.
+the measured numeric title suffix or using color as the sole temperature
+encoding.
 
 ## Coordinate system
 
@@ -802,7 +794,7 @@ paths are:
 | `stage.grid_line_width_pixels` | `stage_grid_line_width_pixels` | Native width, clamped to `0.1…8` |
 | `stage.grid_color` | `stage_grid_color` | Grid color including alpha |
 | `stage.date_visible` | `stage_date_visible` | `MM/DD-HH:MM` visibility |
-| `stage.temperature_visible` or `temperature.visible` | `temperature_visible`, `stage_temperature_visible` | Water-temperature-label visibility |
+| `stage.temperature_visible` or `temperature.visible` | `temperature_visible`, `stage_temperature_visible` | Append/remove the measured-temperature suffix in `StageTitle` |
 | `temperature.data_path` or `stage.temperature_data_path` | `temperature_data_path` | Load the temperature table and align it to the current timeline |
 | `temperature.data_column` or `stage.temperature_data_column` | `temperature_data_column` | Select a Celsius series by exact header name |
 | `calendar.date` or `stage.date` | `model_date` | Set process-wide `MM/DD-HH:MM` (or date-only `MM/DD`); disables auto-advance |
@@ -877,9 +869,14 @@ and `regime_feature_controller_spare_capacity`. Together they expose the
 profile-derived counts, enabled regime-bank counts, the resident startup banks,
 and the remaining one interaction controller slot. Bank-field diagnostics add
 `regime_field_bank_layouts`, `regime_field_bank_counts`,
+`field_turn_mode`,
 `bank_field_suction_reach_pixels`, `bank_field_suction_crossflow_ratio`,
-`bank_field_suction_streamwise_ratio`, and `bank_field_capture_depth_pixels`
-plus their seven-layer uniform mirrors. `regime_geometry_mode` reports
+`bank_field_suction_streamwise_ratio`,
+`bank_field_min_withdrawal_speed_pixels`, and
+`bank_field_capture_depth_pixels` plus their seven-layer uniform mirrors.
+The bank-only path aims through the mouth, snaps to a zero-streamwise
+quarter-turn there, and preserves at least 540 pixels/second of withdrawal
+speed until it leaves the screen. `regime_geometry_mode` reports
 `GENERATION_SALTED_BOUNDED_SLOT_BANKS`. Reservoir diagnostics also expose
 `reservoir_center_pixels`, `reservoir_center_pixels_authored`,
 `reservoir_geometry_revision`, and `reservoir_geometry_revision_uniforms`.
@@ -1629,12 +1626,17 @@ Grid fields are `stage_grid_visible`, `stage_grid_spacing_pixels`,
 `stage_date_font_size`, `stage_date_font_resource`, `stage_date_z_index`,
 `stage_date_position_anchor`, `stage_date_rotation_degrees`,
 `stage_date_tabular_numerals`, and `stage_date_opentype_feature`.
-The complete water-temperature namespace is `water_temperature_visible`,
+The title namespace additionally exposes `stage_title_display_text`,
+`stage_title_font_instance_id`, `stage_title_tabular_numerals`,
+`stage_title_opentype_feature`, `stage_title_temperature_integrated`, and
+`stage_title_temperature_visible`. The complete water-temperature namespace
+is `water_temperature_visible`,
 `water_temperature_text`, `water_temperature_value_c`,
 `water_temperature_value_valid`, `water_temperature_position`,
 `water_temperature_position_anchor`, `water_temperature_rotation_degrees`,
 `water_temperature_color`, `water_temperature_font_size`,
 `water_temperature_font_resource`, `water_temperature_font_shared_with_date`,
+`water_temperature_font_shared_with_title`,
 `water_temperature_font_instance_id`,
 `water_temperature_tabular_numerals`,
 `water_temperature_opentype_feature`, `water_temperature_z_index`,
@@ -1645,14 +1647,19 @@ The complete water-temperature namespace is `water_temperature_visible`,
 `water_temperature_data_expected_row_count`,
 `water_temperature_data_row_count_matches_expected`,
 `water_temperature_data_row_index`, `water_temperature_data_row_fraction`,
-`water_temperature_interpolation_mode`, `water_temperature_node_path`, and
-`water_temperature_outside_water_viewport`. Presentation also has the
+`water_temperature_interpolation_mode`, `water_temperature_node_path`,
+`water_temperature_integrated_with_stage_title`, and
+`water_temperature_outside_water_viewport`. The node path resolves to
+`StageTitleLayer/StageTitle`; no separate temperature node is created.
+Presentation also has the
 stage-family aliases `stage_temperature_visible`, `stage_temperature_text`,
 `stage_temperature_value_c`, `stage_temperature_position`,
 `stage_temperature_position_anchor`, `stage_temperature_rotation_degrees`,
 `stage_temperature_color`, `stage_temperature_font_size`,
 `stage_temperature_font_resource`, `stage_temperature_tabular_numerals`,
-`stage_temperature_opentype_feature`, and `stage_temperature_z_index`.
+`stage_temperature_opentype_feature`,
+`stage_temperature_integrated_with_stage_title`, and
+`stage_temperature_z_index`.
 Clock fields are `model_day_index`, `model_day_of_year`,
 `model_minute_of_day`, `model_elapsed_seconds`, `model_year_progress`,
 `model_year_duration_seconds`, `model_year_frames_at_30_fps`,

@@ -14,3 +14,6 @@ stage_title = "American River"
 regime_profile_physics_enabled = true
 model_start_day_index = 181
 watershed_data_path = "res://flow/data/water_pipeline/american_720.txt"
+stage_temperature_visible = true
+temperature_data_path = "res://flow/data/water_pipeline/water_temperature_all_rivers_720.txt"
+temperature_data_column = "american_fair_oaks_temp_c"
