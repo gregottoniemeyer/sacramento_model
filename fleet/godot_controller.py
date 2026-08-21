@@ -59,6 +59,8 @@ OPERATORS = {
     "196.168.50.51": {"name": "studio", "local_target": None},
 }
 GODOT_BIN = "/Applications/Godot.app/Contents/MacOS/Godot"
+CAFFEINATE_BIN = "/usr/bin/caffeinate"
+CAFFEINATE_FLAGS = ("-d", "-i", "-s")
 SSH_TIMEOUT_SECONDS = 15
 DEPLOY_TIMEOUT_SECONDS = 300
 PROCESS_STOP_TIMEOUT_SECONDS = 6.0
@@ -209,13 +211,31 @@ def current_operator() -> dict:
     return CURRENT_OPERATOR
 
 
-def process_pattern(computer: dict) -> str:
-    # The bracket prevents pgrep/pkill from matching their own command line.
-    return f"[/]Applications/Godot.app/Contents/MacOS/Godot.*--path {computer['project']}"
-
-
 def all_godot_process_pattern() -> str:
-    return "[/]Applications/Godot.app/Contents/MacOS/Godot"
+    # Godot is launched as a caffeinate child. Anchor the executable so pgrep
+    # sees the child only, never the caffeinate parent whose arguments also
+    # contain GODOT_BIN.
+    return "^/Applications/Godot[.]app/Contents/MacOS/Godot( |$)"
+
+
+def godot_launch_command(
+    project_dir: str,
+    stage_argument: Optional[str] = None,
+    editor: bool = False,
+) -> list[str]:
+    """Build a lifetime-scoped macOS sleep guard around one Godot process."""
+    command = [
+        CAFFEINATE_BIN,
+        *CAFFEINATE_FLAGS,
+        GODOT_BIN,
+        "--path",
+        project_dir,
+    ]
+    if editor:
+        command.append("--editor")
+    elif stage_argument is not None:
+        command.extend(["--", stage_argument])
+    return command
 
 
 def stop_godot_processes(computer: dict) -> subprocess.CompletedProcess:
@@ -328,6 +348,8 @@ def check_computer(computer: dict) -> tuple[bool, str]:
         missing = []
         if not os.access(GODOT_BIN, os.X_OK):
             missing.append(f"Godot executable not found: {GODOT_BIN}")
+        if not os.access(CAFFEINATE_BIN, os.X_OK):
+            missing.append(f"caffeinate executable not found: {CAFFEINATE_BIN}")
         if not os.path.isdir(project_dir):
             missing.append(f"Project directory not found: {project_dir}")
         else:
@@ -357,11 +379,17 @@ def check_computer(computer: dict) -> tuple[bool, str]:
             font_cache = Path(project_dir) / FONT_CACHE_RELATIVE_PATH
             if not font_cache.is_file() or font_cache.stat().st_size <= 0:
                 missing.append("Godot Barlow font import cache is missing")
-        return not missing, "; ".join(missing) or "Godot, project, and import cache found"
+        return (
+            not missing,
+            "; ".join(missing)
+            or "Godot, caffeinate, project, and import cache found",
+        )
 
     command = (
         f"if test ! -x {shlex.quote(GODOT_BIN)}; then "
         f"echo {shlex.quote('Godot executable not found: ' + GODOT_BIN)}; exit 10; fi; "
+        f"if test ! -x {shlex.quote(CAFFEINATE_BIN)}; then "
+        f"echo {shlex.quote('caffeinate executable not found: ' + CAFFEINATE_BIN)}; exit 17; fi; "
         f"if test ! -d {shlex.quote(project_dir)}; then "
         f"echo {shlex.quote('Project directory not found: ' + project_dir)}; exit 11; fi; "
     )
@@ -381,7 +409,7 @@ def check_computer(computer: dict) -> tuple[bool, str]:
     result = ssh(computer, command)
     return (
         result.returncode == 0,
-        "Godot, project, and import cache found"
+        "Godot, caffeinate, project, and import cache found"
         if result.returncode == 0
         else error_message(result),
     )
@@ -473,11 +501,11 @@ def perform(target: str, action: str) -> tuple[str, bool, str]:
                 log_handle = open(log_file, "w", encoding="utf-8")
             except OSError as error:
                 return ip_address, False, f"could not open launch log: {error}"
-            command = [GODOT_BIN, "--path", project_dir]
-            if action == "editor":
-                command.append("--editor")
-            else:
-                command.extend(["--", stage_argument])
+            command = godot_launch_command(
+                project_dir,
+                stage_argument=stage_argument,
+                editor=action == "editor",
+            )
             try:
                 subprocess.Popen(
                     command,
@@ -492,12 +520,14 @@ def perform(target: str, action: str) -> tuple[str, bool, str]:
                 log_handle.close()
             return ip_address, True, f"launch requested for stages {computer['stages']}"
 
-        editor_flag = " --editor" if action == "editor" else ""
+        launch_command = godot_launch_command(
+            project_dir,
+            stage_argument=stage_argument,
+            editor=action == "editor",
+        )
         command = (
-            f"nohup {shlex.quote(GODOT_BIN)} --path {shlex.quote(project_dir)}"
-            f"{editor_flag}"
-            + ("" if action == "editor" else f" -- {shlex.quote(stage_argument)}")
-            + f" > {shlex.quote(log_file)} 2>&1 < /dev/null &"
+            f"nohup {shlex.join(launch_command)} "
+            f"> {shlex.quote(log_file)} 2>&1 < /dev/null &"
         )
         result = ssh(computer, command)
         return (

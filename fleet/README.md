@@ -162,6 +162,42 @@ not a complete successful start. Inspect the corresponding
 `code/godot-remote.log` before retrying a failed start. Each new launch truncates
 the active log, so copy a log that matters before `start` or `restart`.
 
+Every controller `start` or `editor` launch runs Godot as the child of
+`/usr/bin/caffeinate -d -i -s`. Those assertions prevent display sleep, idle
+system sleep, and system sleep on AC power for exactly the lifetime of Godot;
+they are released automatically when Godot exits. The controller matches the
+child executable at the start of its command line, so the caffeinate parent is
+not counted as a second Godot process and `status`/`stop` retain their exact
+one-process behavior.
+
+This runtime guard is not a substitute for fleet power configuration. Apple's
+power assertions are advisory: a repeating sleep event should ordinarily be
+deferred by `-s` while these Mac minis are on AC power, but an explicit
+shutdown/restart, power loss, or an OS thermal/power emergency can still take a
+node down. On 2026-08-21 the audit found a repeating 7:00 PM sleep / 10:00 AM
+wake schedule on `.11`, one-minute system sleep on `.31` and `.41`, a ten-minute
+display sleep on `.31`, and `autorestart 0` on all four nodes.
+
+For dedicated, continuously running render nodes, run these commands once in
+Terminal on **each** fleet Mac. They require an administrator password and are
+intentionally not executed by the controller:
+
+```bash
+sudo pmset repeat cancel
+sudo pmset -a sleep 0 displaysleep 0 autorestart 1
+pmset -g custom
+pmset -g sched
+```
+
+The first command clears the repeating schedule (only `.11` had one in this
+audit, but running it on all four makes the desired state explicit). The second
+disables idle system/display sleep and enables automatic restart after a power
+failure. The final two commands are read-only verification; their output should
+show `sleep 0`, `displaysleep 0`, `autorestart 1`, and no repeating sleep or
+shutdown event. Do not use `pmset schedule cancelall` merely to remove benign
+one-time wake entries created by macOS; use it only if `pmset -g sched` reveals
+an unwanted one-time **sleep** or **shutdown** event.
+
 ## Central regime state on `.11`
 
 The authoritative state file is

@@ -158,6 +158,7 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("import cache", message)
         command = remote.call_args.args[1]
+        self.assertIn(controller.CAFFEINATE_BIN, command)
         self.assertIn(controller.GLOBAL_CLASS_CACHE_RELATIVE_PATH, command)
         self.assertIn(controller.FONT_CACHE_RELATIVE_PATH, command)
         for class_name in controller.REQUIRED_GLOBAL_CLASSES:
@@ -175,6 +176,80 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("left running processes untouched", message)
         stop.assert_not_called()
+
+    def test_process_pattern_matches_godot_child_but_not_caffeinate_parent(self):
+        pattern = controller.all_godot_process_pattern()
+        child = (
+            f"{controller.GODOT_BIN} --path "
+            "/Users/gregniemeyer/Documents/watercouncil/code"
+        )
+        parent = (
+            f"{controller.CAFFEINATE_BIN} -d -i -s "
+            f"{child}"
+        )
+        self.assertIsNotNone(controller.re.search(pattern, child))
+        self.assertIsNone(controller.re.search(pattern, parent))
+
+    def test_remote_start_and_editor_use_lifetime_caffeinate_guard(self):
+        self.configure_studio()
+        for action in ("start", "editor"):
+            with self.subTest(action=action):
+                with mock.patch.object(
+                    controller,
+                    "check_computer",
+                    return_value=(True, "ready"),
+                ):
+                    with mock.patch.object(
+                        controller,
+                        "stop_godot_processes",
+                        return_value=completed(),
+                    ):
+                        with mock.patch.object(
+                            controller,
+                            "ssh",
+                            return_value=completed(),
+                        ) as remote:
+                            _ip, ok, _message = controller.perform("21", action)
+                self.assertTrue(ok)
+                launch = remote.call_args.args[1]
+                expected_prefix = "nohup " + " ".join(
+                    (
+                        controller.CAFFEINATE_BIN,
+                        *controller.CAFFEINATE_FLAGS,
+                        controller.GODOT_BIN,
+                    )
+                )
+                self.assertTrue(launch.startswith(expected_prefix), launch)
+                if action == "start":
+                    self.assertIn("-- --stages=1,2", launch)
+                    self.assertNotIn("--editor", launch)
+                else:
+                    self.assertIn("--editor", launch)
+                    self.assertNotIn("--stages=", launch)
+
+    def test_local_start_uses_same_lifetime_caffeinate_guard(self):
+        controller.configure_operator(
+            "en0: flags\n\tinet 196.168.50.11 netmask 0xffffff00\n"
+        )
+        with mock.patch.object(
+            controller,
+            "check_computer",
+            return_value=(True, "ready"),
+        ):
+            with mock.patch.object(
+                controller,
+                "stop_godot_processes",
+                return_value=completed(),
+            ):
+                with mock.patch("builtins.open", mock.mock_open()):
+                    with mock.patch.object(controller.subprocess, "Popen") as launch:
+                        _ip, ok, _message = controller.perform("11", "start")
+        self.assertTrue(ok)
+        command = launch.call_args.args[0]
+        self.assertEqual(controller.CAFFEINATE_BIN, command[0])
+        self.assertEqual(list(controller.CAFFEINATE_FLAGS), command[1:4])
+        self.assertEqual(controller.GODOT_BIN, command[4])
+        self.assertEqual(["--", "--stages=7"], command[-2:])
 
     def test_status_requires_exact_project_and_stage_arguments(self):
         self.configure_studio()
