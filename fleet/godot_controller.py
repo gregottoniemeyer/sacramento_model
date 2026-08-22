@@ -2,6 +2,7 @@
 """Control and deploy the Water Council Godot project across the four-Mac fleet."""
 
 import argparse
+import importlib.util
 import json
 import os
 import posixpath
@@ -98,10 +99,15 @@ REQUIRED_GLOBAL_CLASSES = (
 )
 PROJECT_SOURCE_DIR = Path(__file__).resolve().parents[1] / "godot_experiments"
 FLEET_SOURCE_DIR = Path(__file__).resolve().parent
+TELEMETRY_DIR = Path(__file__).resolve().parents[1] / "telemetry"
+CHAIR_SENSOR_MODULE_PATH = TELEMETRY_DIR / "controller.py"
+CHAIR_POLL_SECONDS = 0.05
 PROJECT_DEPLOY_EXCLUDES = (
     # fleet/ is synchronized and verified independently. Excluding it here
     # lets the project-root --delete remove every other retired file.
     "fleet/",
+    # Hardware telemetry is installed and updated independently on .11.
+    "telemetry/",
     ".godot/",
     ".DS_Store",
     "godot-remote.log",
@@ -847,6 +853,114 @@ def print_regime_catalog() -> None:
         print(f"{index}: {regime_id:<16} {display_name}")
 
 
+def load_chair_sensor_module(module_path: Path = CHAIR_SENSOR_MODULE_PATH):
+    """Load the validated occupancy model without starting its UDP publisher."""
+    if not module_path.is_file():
+        raise ValueError(
+            f"chair telemetry module not found: {module_path}; "
+            "install telemetry on the Governator first"
+        )
+    specification = importlib.util.spec_from_file_location(
+        "water_council_chair_sensor",
+        module_path,
+    )
+    if specification is None or specification.loader is None:
+        raise ValueError(f"could not load chair telemetry module: {module_path}")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    if getattr(module, "NUM_CHAIRS", None) != len(REGIMES):
+        raise ValueError(
+            f"chair telemetry defines {getattr(module, 'NUM_CHAIRS', None)!r} chairs; "
+            f"expected {len(REGIMES)}"
+        )
+    if not callable(getattr(module, "SensorSource", None)):
+        raise ValueError(f"chair telemetry has no SensorSource: {module_path}")
+    return module
+
+
+def chair_regime_ids(chairs) -> list[str]:
+    """Map absolute chair occupancy flags to the fixed artwork regime order."""
+    if not isinstance(chairs, (list, tuple)) or len(chairs) != len(REGIMES):
+        raise ValueError(f"chair state must contain exactly {len(REGIMES)} flags")
+    normalized = []
+    for index, occupied in enumerate(chairs, start=1):
+        if not isinstance(occupied, (bool, int)) or int(occupied) not in {0, 1}:
+            raise ValueError(f"chair {index} state must be 0 or 1, got {occupied!r}")
+        normalized.append(bool(occupied))
+    return [
+        regime_id
+        for occupied, (regime_id, _display_name) in zip(normalized, REGIMES)
+        if occupied
+    ]
+
+
+def run_chair_control() -> None:
+    """Continuously apply the Governator's raw chair telemetry to Godot."""
+    if current_operator()["name"] != "governator":
+        raise ValueError(
+            "chairs must run on the Governator at 196.168.50.11, "
+            "where the USB telemetry log is written"
+        )
+    telemetry = load_chair_sensor_module()
+    source = telemetry.SensorSource()
+    print(
+        "Chair control: "
+        + ", ".join(
+            f"{index}={display_name}"
+            for index, (_regime_id, display_name) in enumerate(REGIMES, start=1)
+        ),
+        flush=True,
+    )
+    print(f"Reading raw telemetry from {telemetry.LOG}", flush=True)
+
+    applied_state = None
+    waiting_announced = False
+    try:
+        while True:
+            source.poll()
+            last_seen = getattr(source, "last_seen", {})
+            has_live_history = isinstance(last_seen, dict) and any(
+                seen_at is not None for seen_at in last_seen.values()
+            )
+            if not has_live_history:
+                if not waiting_announced:
+                    print("Waiting for the first chair telemetry packet...", flush=True)
+                    waiting_announced = True
+                time.sleep(CHAIR_POLL_SECONDS)
+                continue
+
+            chair_state = tuple(int(bool(value)) for value in source.chairs)
+            if chair_state == applied_state:
+                time.sleep(CHAIR_POLL_SECONDS)
+                continue
+
+            regime_ids = chair_regime_ids(chair_state)
+            try:
+                _saved_regimes, geometry_visible = load_controller_state()
+                sends = send_fleet_regimes(
+                    regime_ids,
+                    "chairs",
+                    geometry_visible=geometry_visible,
+                )
+                save_controller_state(regime_ids, geometry_visible)
+            except (OSError, ValueError) as error:
+                print(f"ERROR chair state not applied: {error}", file=sys.stderr, flush=True)
+                time.sleep(1.0)
+                continue
+
+            applied_state = chair_state
+            waiting_announced = False
+            active = ", ".join(regime_ids) if regime_ids else "none"
+            stale = ",".join(str(chair) for chair in source.stale) or "none"
+            print(
+                f"APPLIED  chairs={''.join(str(value) for value in chair_state)}; "
+                f"active={active}; stale={stale}; {format_regime_send(sends)}",
+                flush=True,
+            )
+    except KeyboardInterrupt:
+        print("Chair control stopped.", flush=True)
+
+
 def run_regime_console() -> None:
     if not sys.stdin.isatty():
         raise ValueError("regime-console requires an interactive terminal")
@@ -1420,6 +1534,7 @@ def main() -> None:
             "set",
             "regime-clear",
             "regime-console",
+            "chairs",
         ],
     )
     parser.add_argument(
@@ -1462,7 +1577,7 @@ def main() -> None:
     if args.dry_run and args.action != "deploy":
         parser.error("--dry-run is accepted only by deploy")
 
-    regime_actions = {"list", "set", "regime-clear", "regime-console"}
+    regime_actions = {"list", "set", "regime-clear", "regime-console", "chairs"}
     if args.action in regime_actions:
         if args.targets:
             parser.error(f"{args.action} does not accept machine targets")
@@ -1482,6 +1597,9 @@ def main() -> None:
         try:
             if args.action == "regime-console":
                 run_regime_console()
+                return
+            if args.action == "chairs":
+                run_chair_control()
                 return
             require_saved_state = args.action == "set" and not args.regime
             saved_regime_ids, saved_geometry_visible = load_controller_state(
