@@ -3,6 +3,8 @@ poster.png
 __pycache__/
 .ipynb_checkpoints/
 *.py[cod]
+motion_log.txt
+drivers/
 
 # Rendered animation frames.
 img/

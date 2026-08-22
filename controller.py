@@ -2,7 +2,8 @@
 """Sacramento Model controller: chair occupancy to UDP state for the screens.
 
 Self-contained. Reads the receiver's serial capture, decides who is sitting
-where, and broadcasts the state on UDP 5005 at 60Hz.
+where, and broadcasts the diagnostic state on UDP 5006 at 60Hz. Godot control
+remains on UDP 5005 and reads the same raw telemetry log directly.
 
   python3 controller.py                      # the real chairs
   python3 controller.py --source keyboard    # press 1-7, no chairs needed
@@ -24,8 +25,9 @@ import time
 import tty
 from pathlib import Path
 
-LOG = Path.home() / "motion_log.txt"
-UDP_PORT = 5005
+INSTALL_DIR = Path(__file__).resolve().parent
+LOG = Path(os.environ.get("WATER_COUNCIL_CHAIR_LOG", INSTALL_DIR / "motion_log.txt"))
+UDP_PORT = 5006
 HZ = 60
 STALE_S = 3.0
 NUM_CHAIRS = 7

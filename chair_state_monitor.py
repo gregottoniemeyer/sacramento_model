@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Show what the controller is broadcasting: the test tool for the whole chain.
+"""Show the chair occupancy state published for diagnostics on UDP 5006.
 
 Run this to answer "are the chairs actually driving the piece?". It listens on
-the same UDP port the screens listen on, so it proves the chain end to end
-without a renderer or any of the sensor tooling.
+the diagnostic port emitted by controller.py. Godot uses UDP 5005 separately;
+its acknowledged regime application is reported by fleet/godot_controller.py.
 
 Per chair it shows three things: whether it reads OCCUPIED, its temperature,
 and the vote fraction, which is the number the model actually thresholds
@@ -32,7 +32,7 @@ import threading
 import time
 from collections import deque
 
-UDP_PORT = 5005
+UDP_PORT = 5006
 HISTORY_S = 60.0
 ENTER_FRAC = 0.50      # mirrors controller.py, drawn as threshold lines
 EXIT_FRAC = 0.15

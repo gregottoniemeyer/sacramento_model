@@ -99,7 +99,8 @@ and wait another minute.
 To check by hand whether data is arriving at all:
 
 ```bash
-wc -l ~/motion_log.txt; sleep 5; wc -l ~/motion_log.txt
+cd /path/to/sacramento_model
+wc -l motion_log.txt; sleep 5; wc -l motion_log.txt
 ```
 
 It should climb by about **280 every 5 seconds** (7 chairs x 8 per second).
@@ -142,7 +143,7 @@ If it reports `NO RECEIVER FOUND` it lists the ports it did see.
 ls /dev/cu.*                       # find the wchusbserial* one
 exec 3<>/dev/cu.wchusbserial10
 stty -f /dev/fd/3 921600 raw
-cat <&3 > ~/motion_log.txt &
+cat <&3 > /path/to/sacramento_model/motion_log.txt &
 disown
 ```
 
@@ -243,10 +244,11 @@ venv/bin/python development/tools/score_model.py data/dataset_20260730_122544.cs
 
 # Integration
 
-**This is already running.** `controller.py` broadcasts the occupancy state as
-JSON over **UDP port 5005, 60 times a second**, to `127.0.0.1` and the broadcast
-address, whether or not anything is listening. Consuming it needs no change on
-this side.
+**This is already running.** `controller.py` broadcasts the diagnostic
+occupancy state as JSON over **UDP port 5006, 60 times a second**, to
+`127.0.0.1` and the broadcast address, whether or not anything is listening.
+Water Council Godot control remains on UDP 5005 and reads `motion_log.txt`
+directly through the shared `SensorSource` model.
 
 The field that matters is `chairs`: seven flags, index 0 is chair 1, 1 means
 occupied.
@@ -285,7 +287,7 @@ A complete consumer:
 import json, socket
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("", 5005))
+s.bind(("", 5006))
 while True:
     state = json.loads(s.recv(4096).decode())
     occupied = state["chairs"]        # [0,1,0,0,0,0,0]

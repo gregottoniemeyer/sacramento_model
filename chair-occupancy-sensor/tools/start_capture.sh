@@ -19,7 +19,8 @@
 
 set -uo pipefail
 
-LOG="$HOME/motion_log.txt"
+TELEMETRY_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+LOG="${WATER_COUNCIL_CHAIR_LOG:-$TELEMETRY_DIR/motion_log.txt}"
 BAUD=921600          # must match Serial.begin() in firmware/receiver_esp_now.ino
 STALE_S=15
 

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.watercouncil.telemetry</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/francescospagnolo/.water_council/runtime/code/telemetry/chair-occupancy-sensor/tools/keep_alive.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/francescospagnolo/.water_council/runtime/code/telemetry/keep_alive.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/francescospagnolo/.water_council/runtime/code/telemetry/keep_alive.log</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
+</dict>
+</plist>
