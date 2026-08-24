@@ -21,6 +21,13 @@ Godot project. Run every command below from the repository root.
 The controller passes stage assignments such as `--stages=7` and
 `--stages=1,2` to `godot_experiments/startup_selector.gd`.
 
+On the Governator, `godot_controller.py chairs` maps the seven absolute chair
+flags to the seven regimes. Telemetry holds each major-motion detection for 60
+seconds and renews the interval when more major motion arrives. After every
+interval expires, the bridge performs an explicit hard reset to Kinship with
+debug/obstacle geometry hidden; it never sends an empty regime state. The next
+detected chair explicitly restores geometry for its active extractive regimes.
+
 ## Studio `.51` network setup
 
 The studio Mac uses two separate networks:
@@ -83,6 +90,12 @@ plus the return acknowledgement to the temporary controller UDP port.
 Deployment copies the contents of the controller-relative
 `../godot_experiments/` directory to each selected installed `code` directory,
 then mirrors the controller-relative `fleet/` directory into `code/fleet/`.
+Atomic staging imports and checksum-verifies the clean Godot project first,
+then copies the installed `telemetry/` and `watershed_ai/` trees into the stage
+before promotion. Copying them after import prevents virtualenv sample data from
+being mistaken for Godot resources. Those two runtime trees
+are excluded from project deletion and checksum comparison, so deployment
+preserves them byte-for-byte while still removing unprotected retired material.
 On the studio Mac the intended source is
 `/Volumes/Consulting/Water Council/code/godot_experiments`. Always review a dry
 run first:
@@ -113,7 +126,7 @@ separate, visible operator decision.
 Use a machine suffix only for a deliberate diagnostic or repair deployment:
 
 ```bash
-python3 fleet/godot_controller.py deploy --dry-run 21
+python3 fleet/godot_controller.py deploy 21 --dry-run
 python3 fleet/godot_controller.py deploy 21
 ```
 
@@ -125,11 +138,12 @@ Each target is staged in a sibling `.code.deploy-<12-hex-id>` directory.
 During promotion, the previous tree is moved to the matching
 `.code.backup-<12-hex-id>` path so an automatic rollback remains possible.
 After every promoted tree passes checksum verification, that release's old
-backup is deleted. The deployed mirror excludes `.godot/`, `.DS_Store`,
-`godot-remote.log`, `__pycache__/`, `*.pyc`, and `*.pyo`. `.godot/` is generated
-afresh on each target rather than copied across machines. The controller does
-not update a running project in place and never deletes a path that does not
-match the exact generated backup/staging pattern.
+backup is deleted. The deployed mirror preserves and excludes `telemetry/` and
+`watershed_ai/`; it also excludes `.godot/`, `.DS_Store`, `godot-remote.log`,
+`__pycache__/`, `*.pyc`, and `*.pyo`. `.godot/` is generated afresh on each
+target rather than copied across machines. The controller does not update a
+running project in place and never deletes a path that does not match the exact
+generated backup/staging pattern.
 
 ## Daily start, stop, and status
 
@@ -238,6 +252,7 @@ python3 fleet/godot_controller.py list
 python3 fleet/godot_controller.py regime-clear
 python3 fleet/godot_controller.py set --regime kinship
 python3 fleet/godot_controller.py set --regime kinship --regime tech
+python3 fleet/godot_controller.py set --regime watershed
 python3 fleet/godot_controller.py set --geo FALSE
 python3 fleet/godot_controller.py set --regime kinship --geo TRUE
 python3 fleet/godot_controller.py regime-console
@@ -249,15 +264,40 @@ without changing their physics; `TRUE` shows them. A geometry-only `set`
 preserves the saved regime set, while a combined command replaces the regime
 set and changes geometry visibility together. The geometry value is persisted
 and reapplied by `start` and `restart`. Values are case-insensitive, but must be
-`TRUE` or `FALSE`.
+`TRUE` or `FALSE`. When `set` supplies regimes without `--geo`, extractive
+regimes default to visible geometry while Kinship defaults to a clear basin.
 
-Inside `regime-console`, keys `1` through `7` toggle Kinship, Agriculture,
-Gold Rush, Water Projects, Hydropower, Tech, and Watershed. Press `c` to clear
-the active set, and `q` or Escape to leave the console. Exiting leaves the last
-sent regime state active. The controller persists the authoritative set on
-`.11` and resends that absolute state when the console opens. `start` and
-`restart` also reapply it automatically after launch, so reopening the console
-or relaunching the fleet does not accidentally discard an earlier command.
+Inside `regime-console`, keys `1` through `6` toggle the first six regimes.
+Key `7` cannot activate Watershed because doing so would bypass its one-shot AI
+decision; use `set --regime watershed` instead. Key `7` may still remove an
+already-active Watershed regime. Press `c` to clear the active set, and `q` or
+Escape to leave the console. Exiting leaves the last sent regime state active.
+The controller persists the authoritative set on `.11` and resends that
+absolute state when the console opens.
+
+An explicit transition into exclusive Watershed through
+`set --regime watershed` is a single-command operation from the studio `.51`
+Mac. Before changing the regime, the controller verifies that the local
+`watershed_ai/.venv` runtime exists. It then obtains all four regime ACKs, saves
+the central state, and invokes exactly one OpenAI proposal using the currently
+displayed fleet phase. Watershed is exclusive: a request or chair state that
+also contains other regimes is normalized to Watershed alone. A duplicate
+Watershed `set`, a geometry-only set, and UDP retries do not make another API
+call. Leave Watershed and activate it again to request one new setting. Every
+new proposal prints measured token usage and its estimated USD cost; saved
+startup decisions replay at zero new API cost.
+
+The live preflight requires all seven updated stage capabilities and uses
+Delta's 720-row phase as the reference. Other screens must be within two cyclic
+rows or the model call is refused. If the API fails after activation, Watershed
+remains active with its baseline appearance and the command exits nonzero; it
+does not silently retry or spend another credit. A partial application records
+an ignored local recovery decision that can be replayed without the API.
+
+`start` and `restart` never purchase a fresh decision. When the saved regime is
+Watershed, a studio launch reapplies `watershed_ai/runlogs/latest-decision.json`
+after startup synchronization. A missing saved decision is reported as an
+incomplete restore instead of silently generating one.
 
 Each change sends the same modern `ink-flow/1` absolute-state packet on UDP
 port `5005` once to every configured Godot process, with target `*`. A
@@ -318,8 +358,9 @@ The operator-level matrix is:
   but Cottonwood, reservoir/count zero on Cottonwood, drain `.25` everywhere,
   shoreline `.20` on McCloud/Cottonwood and `0` elsewhere.
 - Tech defines reservoir `.75`/count 2, drain `.75` at full power, and shoreline
-  zero on all seven. Watershed is reserved for the future AI model and is a
-  current no-op with no linked per-river file.
+  zero on all seven. Watershed's static profile remains a no-op; its one-shot,
+  host-validated AI overlay supplies bounded per-screen visual settings only
+  while exclusive Watershed is active.
 
 The reservoir, drain, and obstacle `*_area_fraction` values are deterministic
 particle admission/encounter budgets, not literal geometric coverage. An
@@ -353,9 +394,9 @@ Every real change to the absolute active set advances a layout generation on
 each stage. The five resident drain/field slots and two resident obstacle slots
 are reused but receive fresh per-screen positions; switching `Tech` to
 Agriculture therefore cannot leave the same layout in place. Re-sending the
-identical set does not reroll it. Active fields are newly sized trapezoids rooted
-at alternating top/bottom screen edges. Eligible water curves laterally through
-their river-facing mouths, continues toward the bank, and drains offscreen before
+identical set does not reroll it. Active fields are newly sized axis-aligned
+rectangles touching alternating top/bottom screen edges. Eligible water curves
+laterally into each bank-connected field, continues toward the bank, and drains offscreen before
 its fixed head slot is recycled. Obstacles likewise move on each real
 transition. No transition restarts water or grows a node, resource, texture, or
 particle pool.

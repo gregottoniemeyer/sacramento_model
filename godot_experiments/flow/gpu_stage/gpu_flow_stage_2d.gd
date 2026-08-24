@@ -22,6 +22,12 @@ signal regimes_changed(
 	active_indices: Array,
 	revision: int
 )
+signal basin_budget_changed(
+	screen_id: StringName,
+	input_rate: float,
+	extraction_fraction: float,
+	remaining_rate: float
+)
 signal model_date_changed(
 	screen_id: StringName,
 	date_mm_dd: String,
@@ -77,6 +83,10 @@ const SALMON_SCRIPT := preload(
 const LEAF_SCRIPT := preload(
 	"res://flow/gpu_stage/gpu_leaf_2d.gd"
 )
+const BasinBudgetModel := preload("res://flow/basin_budget.gd")
+const BASIN_BUDGET_OVERLAY_SCRIPT := preload(
+	"res://flow/gpu_stage/basin_budget_overlay.gd"
+)
 const GPUFlowInteractionPolygon = preload(
 	"res://flow/gpu_stage/gpu_flow_interaction_polygon.gd"
 )
@@ -88,6 +98,9 @@ const STAGE_SIZE := Vector2(1920.0, 1080.0)
 const WORLD_SIZE := Vector2(16.0, 9.0)
 const PIXELS_PER_WORLD_UNIT := STAGE_SIZE.x / WORLD_SIZE.x
 const PARTICLE_FIXED_FPS := 0
+const HEAD_EMISSION_CYCLE_SECONDS := 8.0
+const HEAD_PREPROCESS_SECONDS := 16.0
+const HEAD_EMISSION_RANDOMNESS := 0.0
 const TRAIL_SEGMENT_BUDGET_FPS := 30
 const TRAIL_SEGMENT_CAPACITY_MARGIN := 1.25
 const TRAIL_PREWARM_GUARD_FRAMES := 2
@@ -102,6 +115,52 @@ const FLOW_PALETTE := [
 	Color(0.118, 0.565, 1.0, 1.0),
 ]
 const MAX_PENDING_CONTROL_MESSAGES := 256
+const WATERSHED_AI_CONTROL_SCOPE := "watershed-ai/2"
+const WATERSHED_AI_STATE_PATH := "watershed.ai.state"
+const WATERSHED_AI_STATE_SCHEMA_VERSION := 2
+const WATERSHED_REGIME_INDEX := 6
+const WATERSHED_AI_TOP_LEVEL_FIELDS: Array[String] = [
+	"protocol",
+	"revision",
+	"target",
+	"changes",
+	"geometry_ops",
+	"actions",
+	"metadata",
+	"control_scope",
+]
+const WATERSHED_AI_STATE_FIELDS: Array[String] = [
+	"schema_version",
+	"decision_id",
+	"atmospheric_input_rate",
+	"reservoir_release_rate",
+	"available_supply_rate",
+	"extraction_fraction",
+	"remaining_rate",
+	"salmon_fraction",
+	"floodplain_fraction",
+	"agriculture_fraction",
+	"data_center_fraction",
+	"city_fraction",
+	"reservoir_storage_fraction",
+	"hydropower_fraction",
+	"water_project_fraction",
+]
+const WATERSHED_AI_FRACTION_FIELDS: Array[String] = [
+	"atmospheric_input_rate",
+	"reservoir_release_rate",
+	"available_supply_rate",
+	"extraction_fraction",
+	"remaining_rate",
+	"salmon_fraction",
+	"floodplain_fraction",
+	"agriculture_fraction",
+	"data_center_fraction",
+	"city_fraction",
+	"reservoir_storage_fraction",
+	"hydropower_fraction",
+	"water_project_fraction",
+]
 const RESERVOIR_ID := &"reservoir_main"
 const MIN_GATE_WIDTH := 0.0
 const MAX_GATE_WIDTH := 10.0
@@ -135,12 +194,11 @@ const REGIME_OBSTACLE_SLOT_CAPACITY := 2
 const REGIME_FIELD_X_RANGE := Vector2(1.50, 14.50)
 const REGIME_FIELD_LANE_PADDING_WORLD := 0.18
 const REGIME_FIELD_ROOT_WIDTH_RANGE := Vector2(0.90, 1.30)
-const REGIME_FIELD_MOUTH_WIDTH_RANGE := Vector2(0.65, 0.95)
 const REGIME_FIELD_DEPTH_RANGE := Vector2(1.55, 2.15)
-const BANK_FIELD_SUCTION_REACH_PIXELS := 300.0
-const BANK_FIELD_SUCTION_CROSSFLOW_RATIO := 1.60
+const BANK_FIELD_SUCTION_REACH_PIXELS := 720.0
+const BANK_FIELD_SUCTION_CROSSFLOW_RATIO := 3.0
 const BANK_FIELD_SUCTION_STREAMWISE_RATIO := 0.0
-const BANK_FIELD_MIN_WITHDRAWAL_SPEED_PIXELS := 540.0
+const BANK_FIELD_MIN_WITHDRAWAL_SPEED_PIXELS := 720.0
 const BANK_FIELD_CAPTURE_DEPTH_PIXELS := 18.0
 const INTERACTION_BANK_EDGE_EPSILON_PIXELS := 1.0
 const TYPE_ROTATION_RADIANS := -PI * 0.5
@@ -152,6 +210,13 @@ const MODEL_DATE_FONT_SIZE := 48
 const MODEL_DATE_OPENTYPE_FEATURE := "tnum"
 const MODEL_DATE_POSITION := Vector2(1860.0, 540.0)
 const WATER_TEMPERATURE_EXPECTED_ROW_COUNT := 720
+const DELTA_TIDE_EXPECTED_ROW_COUNT := 720
+const FLOW_DENSITY_LOW_RATE := 0.01
+const FLOW_DENSITY_LOW_LINE_COUNT := 20
+const FLOW_DENSITY_FULL_LINE_COUNT := 1000
+const DELTA_TIDE_DATA_PATH := (
+	"res://flow/data/tide/sf_bay_9414290_tide_720.txt"
+)
 const WATER_TEMPERATURE_INTERPOLATION_MODE := (
 	"HALF_OPEN_ANNUAL_LINEAR_WRAP"
 )
@@ -171,7 +236,21 @@ const MODEL_YEAR_FRAMES_AT_30_FPS := 21600
 const MODEL_MONTH_LENGTHS := [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 const BACKGROUND_Z_INDEX := -100
 const BACKGROUND_GRID_Z_INDEX := -75
+const TIDE_OVERLAY_Z_INDEX := -60
 const STAGE_TITLE_Z_INDEX := -50
+const GEOMETRY_OVERLAY_Z_INDEX := -1
+const WATER_DISPLAY_Z_INDEX := 0
+const MORNING_FOG_START_MINUTE := 3 * 60
+const MORNING_FOG_END_MINUTE := 10 * 60
+const BASIN_INPUT_RUNNING_AVERAGE_DAYS := 30.0
+const BASIN_INPUT_MINIMUM_RATE := 0.02
+const MORNING_FOG_WINDOW_MINUTES := (
+	MORNING_FOG_END_MINUTE - MORNING_FOG_START_MINUTE
+)
+const MORNING_FOG_PEAK_MULTIPLIER := (
+	PI * float(MODEL_MINUTES_PER_DAY)
+	/ (2.0 * float(MORNING_FOG_WINDOW_MINUTES))
+)
 const DEFAULT_GRID_COLOR := Color(
 	74.0 / 255.0,
 	176.0 / 255.0,
@@ -264,10 +343,10 @@ const DEFAULT_GRID_COLOR := Color(
 		_apply_debug_visibility()
 
 @export_group("Particles")
-@export_range(1, 2000, 1) var particle_slots: int = 300
+@export_range(1, 2000, 1) var particle_slots: int = 1000
 @export_range(0.0, 1.0, 0.01) var flow_rate: float = 0.5
 @export_range(1.0, 2400.0, 1.0) var flow_speed_pixels: float = DEFAULT_MAX_FLOW_SPEED_PIXELS
-@export_range(0.000001, 1.0, 0.000001) var min_active_flow: float = 0.001
+@export_range(0.000001, 1.0, 0.000001) var min_active_flow: float = 0.25
 @export_range(0.0, 1.0, 0.01) var speed_variation: float = 0.14
 @export_range(0.0, 30.0, 0.1) var velocity_response: float = 12.0
 @export_range(0.0, 300.0, 1.0) var noise_strength: float = 52.0
@@ -349,7 +428,7 @@ var _requested_gate_width: float = 0.25
 @export_range(0.1, 10.0, 0.1) var leaf_sway_period_max_seconds: float = 2.8
 @export_range(1.0, 480.0, 1.0) var leaf_free_water_search_radius_pixels: float = 120.0
 @export_range(0.0, 1.0, 0.01) var leaf_free_water_steering_strength: float = 0.35
-@export_range(1.0, 4096.0, 1.0) var leaf_free_search_max_distance_pixels: float = 256.0
+@export_range(1.0, 4096.0, 1.0) var leaf_free_search_max_distance_pixels: float = 540.0
 @export_range(0.05, 4.0, 0.05) var leaf_stopped_fade_seconds: float = 0.50
 @export_range(0.0, 1.0, 0.001) var leaf_water_alpha_threshold: float = 0.001
 @export_range(1.0, 120.0, 1.0) var leaf_contact_radius_pixels: float = 12.0
@@ -383,10 +462,17 @@ var _stage_title_font: FontVariation
 var _model_date_label: Label
 var _model_timeline: Node
 var _model_regimes: Node
+var _basin_budget_canvas: CanvasLayer
+var _basin_budget_overlay: Node2D
+var _delta_tide_overlay: Node2D
 var _regime_panel: Node2D
 var _regime_heading_label: Label
 var _regime_name_labels: Array[Label] = []
 var _regime_snapshot: Dictionary = {}
+var _regime_extractor_polygons: Array[GPUFlowInteractionPolygon] = []
+var _basin_input_rate: float = 0.5
+var _basin_extraction_fraction: float = 0.0
+var _basin_remaining_rate: float = 0.5
 var _water_viewport: SubViewport
 var _water_canvas: Node2D
 var _salmon_school: GPUSalmon2D
@@ -453,13 +539,19 @@ var _model_date_source: StringName = &"internal_clock"
 var _model_timeline_revision: int = 0
 var _watershed_raw_values := PackedFloat32Array()
 var _watershed_normalized_flow := PackedFloat32Array()
+var _watershed_running_average_flow := PackedFloat32Array()
 var _watershed_scaled_flow := PackedFloat32Array()
 var _watershed_high_variation := PackedByteArray()
 var _watershed_data_river: String = ""
 var _watershed_data_error: String = ""
+var _watershed_fog_baseline_mm_day: float = 0.0
+var _watershed_fog_baseline_normalized: float = 0.0
+var _morning_fog_pulse_multiplier: float = 0.0
 var _watershed_row_index: int = -1
 var _watershed_row_fraction: float = 0.0
 var _watershed_interpolated_flow_rate: float = 0.0
+var _watershed_buffered_flow_rate: float = 0.0
+var _watershed_running_average_sample_count: int = 0
 var _temperature_values := PackedFloat32Array()
 var _temperature_data_error: String = ""
 var _temperature_data_status: String = "NOT_CONFIGURED"
@@ -467,12 +559,35 @@ var _temperature_row_index: int = -1
 var _temperature_row_fraction: float = 0.0
 var _temperature_current_value_c: float = 0.0
 var _temperature_value_valid: bool = false
+var _delta_tide_heights := PackedFloat32Array()
+var _delta_tide_normalized_heights := PackedFloat32Array()
+var _delta_tide_normalized_velocities := PackedFloat32Array()
+var _delta_tide_data_error: String = ""
+var _delta_tide_data_status: String = "NOT_DELTA"
+var _delta_tide_row_index: int = -1
+var _delta_tide_row_fraction: float = 0.0
+var _delta_tide_current_height_m: float = 0.0
+var _delta_tide_current_normalized_height: float = 0.0
+var _delta_tide_current_normalized_velocity: float = 0.0
+var _watershed_ai_applied_state: Dictionary = {}
+var _watershed_ai_applied_decision_id: String = ""
+var _watershed_ai_applied_state_hash: String = ""
+var _watershed_ai_last_error: String = ""
+var _watershed_ai_apply_count: int = 0
+var _watershed_ai_deduplicated_count: int = 0
+var _watershed_ai_rejection_count: int = 0
+var _watershed_ai_baseline_captured: bool = false
+var _watershed_ai_baseline_flow_rate: float = 0.0
+var _watershed_ai_baseline_data_drives_flow_rate: bool = true
+var _watershed_ai_baseline_gate_open: bool = true
 
 
 func _ready() -> void:
 	add_to_group(&"flow_models")
 	_bind_model_timeline()
 	_bind_model_regimes()
+	_install_regime_extractor_polygons()
+	_recalculate_basin_budget(false)
 	_apply_regime_features_from_state(_regime_snapshot)
 	_install_default_interaction_polygons_if_needed()
 	_ensure_regime_feature_slot_banks()
@@ -480,6 +595,7 @@ func _ready() -> void:
 	_apply_regime_geometry_from_state()
 	_load_watershed_data()
 	_load_temperature_data()
+	_load_delta_tide_data()
 	_sync_from_model_timeline(false)
 	_build_background()
 	_build_background_grid()
@@ -488,6 +604,7 @@ func _ready() -> void:
 	_build_salmon()
 	_build_leaves()
 	_build_overlay()
+	_build_basin_budget_overlay()
 	_build_stage_title()
 	_bind_interaction_polygon_signals()
 	_apply_identity()
@@ -590,6 +707,309 @@ func get_native_size() -> Vector2:
 	return STAGE_SIZE
 
 
+func validate_watershed_ai_control_message(message: Dictionary) -> Dictionary:
+	if String(message.get("control_scope", "")) != WATERSHED_AI_CONTROL_SCOPE:
+		return {
+			"ok": false,
+			"error": "The message is not scoped to '%s'." % WATERSHED_AI_CONTROL_SCOPE,
+		}
+	for field_variant: Variant in message:
+		var field := String(field_variant)
+		if field not in WATERSHED_AI_TOP_LEVEL_FIELDS:
+			return {
+				"ok": false,
+				"error": (
+					"Watershed AI packets cannot contain top-level field '%s'."
+					% field
+				),
+			}
+	if String(message.get("protocol", "")) != "ink-flow/1":
+		return {
+			"ok": false,
+			"error": "Watershed AI packets require protocol 'ink-flow/1'.",
+		}
+	var target_variant: Variant = message.get("target", "")
+	if (
+		not (target_variant is String or target_variant is StringName)
+		or String(target_variant) != String(screen_id)
+	):
+		return {
+			"ok": false,
+			"error": (
+				"Watershed AI target must be this stage's exact screen ID '%s'."
+				% String(screen_id)
+			),
+		}
+	var geometry_variant: Variant = message.get("geometry_ops", [])
+	if not geometry_variant is Array or not Array(geometry_variant).is_empty():
+		return {
+			"ok": false,
+			"error": "Watershed AI packets cannot contain geometry operations.",
+		}
+	var actions_variant: Variant = message.get("actions", [])
+	if not actions_variant is Array or not Array(actions_variant).is_empty():
+		return {
+			"ok": false,
+			"error": "Watershed AI packets cannot contain actions.",
+		}
+	var metadata_variant: Variant = message.get("metadata", {})
+	if not metadata_variant is Dictionary:
+		return {
+			"ok": false,
+			"error": "Watershed AI metadata must be a dictionary.",
+		}
+	var request_id := String(Dictionary(metadata_variant).get(
+		"request_id",
+		"",
+	)).strip_edges()
+	if request_id.is_empty() or request_id.length() > 128:
+		return {
+			"ok": false,
+			"error": "Watershed AI metadata.request_id must contain 1..128 characters.",
+		}
+	if not _watershed_ai_regime_is_exclusive(_regime_snapshot):
+		return {
+			"ok": false,
+			"error": "Watershed AI control requires exclusive active_indices [6].",
+		}
+	var changes_variant: Variant = message.get("changes", {})
+	if not changes_variant is Dictionary:
+		return {
+			"ok": false,
+			"error": "Watershed AI changes must be a dictionary.",
+		}
+	var changes: Dictionary = changes_variant
+	if changes.size() != 1 or not changes.has(WATERSHED_AI_STATE_PATH):
+		return {
+			"ok": false,
+			"error": (
+				"Watershed AI packets require exactly one '%s' change."
+				% WATERSHED_AI_STATE_PATH
+			),
+		}
+	var state_result := _validated_watershed_ai_state(
+		changes[WATERSHED_AI_STATE_PATH]
+	)
+	if not bool(state_result.get("ok", false)):
+		return state_result
+	var canonical_state: Dictionary = state_result.get("state", {})
+	var state_hash := String(state_result.get("state_hash", ""))
+	var decision_id := String(canonical_state.get("decision_id", ""))
+	if (
+		decision_id == _watershed_ai_applied_decision_id
+		and not _watershed_ai_applied_decision_id.is_empty()
+		and state_hash != _watershed_ai_applied_state_hash
+	):
+		return {
+			"ok": false,
+			"error": (
+				"Watershed AI decision_id '%s' was reused with different state."
+				% decision_id
+			),
+		}
+	return {
+		"ok": true,
+		"state": canonical_state,
+		"state_hash": state_hash,
+	}
+
+
+func get_watershed_ai_ack_state() -> Dictionary:
+	return {
+		"eligible": _watershed_ai_regime_is_exclusive(_regime_snapshot),
+		"applied": not _watershed_ai_applied_decision_id.is_empty(),
+		"applied_decision_id": _watershed_ai_applied_decision_id,
+		"applied_state_hash": _watershed_ai_applied_state_hash,
+		"applied_state": _watershed_ai_applied_state.duplicate(true),
+		"last_error": _watershed_ai_last_error,
+		"apply_count": _watershed_ai_apply_count,
+		"deduplicated_count": _watershed_ai_deduplicated_count,
+		"rejection_count": _watershed_ai_rejection_count,
+		"fixed_bank_only": true,
+		"current_observation": _watershed_ai_current_observation(),
+	}
+
+
+func _validated_watershed_ai_state(state_variant: Variant) -> Dictionary:
+	if not state_variant is Dictionary:
+		return {
+			"ok": false,
+			"error": "Watershed AI state must be a dictionary.",
+		}
+	var state: Dictionary = state_variant
+	if state.size() != WATERSHED_AI_STATE_FIELDS.size():
+		return {
+			"ok": false,
+			"error": "Watershed AI state must contain the complete canonical field set.",
+		}
+	for field: String in WATERSHED_AI_STATE_FIELDS:
+		if not state.has(field):
+			return {
+				"ok": false,
+				"error": "Watershed AI state is missing field '%s'." % field,
+			}
+	for field_variant: Variant in state:
+		var field := String(field_variant)
+		if field not in WATERSHED_AI_STATE_FIELDS:
+			return {
+				"ok": false,
+				"error": "Watershed AI state has unknown field '%s'." % field,
+			}
+	var schema_version := _strict_nonnegative_int(state["schema_version"])
+	if schema_version != WATERSHED_AI_STATE_SCHEMA_VERSION:
+		return {
+			"ok": false,
+			"error": "Watershed AI state requires schema_version 2.",
+		}
+	if not (state["decision_id"] is String or state["decision_id"] is StringName):
+		return {
+			"ok": false,
+			"error": "Watershed AI decision_id must be a string.",
+		}
+	var decision_id := String(state["decision_id"]).strip_edges()
+	if decision_id.is_empty() or decision_id.length() > 128:
+		return {
+			"ok": false,
+			"error": "Watershed AI decision_id must contain 1..128 characters.",
+		}
+	var canonical_state: Dictionary = {
+		"schema_version": WATERSHED_AI_STATE_SCHEMA_VERSION,
+		"decision_id": decision_id,
+	}
+	for field: String in WATERSHED_AI_FRACTION_FIELDS:
+		var value_variant: Variant = state[field]
+		if (
+			typeof(value_variant) != TYPE_INT
+			and typeof(value_variant) != TYPE_FLOAT
+		):
+			return {
+				"ok": false,
+				"error": "Watershed AI %s must be numeric." % field,
+			}
+		var value := float(value_variant)
+		if not is_finite(value) or value < 0.0 or value > 1.0:
+			return {
+				"ok": false,
+				"error": "Watershed AI %s must be finite and within 0..1." % field,
+			}
+		canonical_state[field] = value
+	var allocation_sum := (
+		float(canonical_state["salmon_fraction"])
+		+ float(canonical_state["floodplain_fraction"])
+		+ float(canonical_state["agriculture_fraction"])
+		+ float(canonical_state["data_center_fraction"])
+		+ float(canonical_state["city_fraction"])
+	)
+	if absf(allocation_sum - 1.0) > 0.000001:
+		return {
+			"ok": false,
+			"error": "Watershed AI allocation fractions must sum to one.",
+		}
+	var extraction_sum := (
+		float(canonical_state["agriculture_fraction"])
+		+ float(canonical_state["data_center_fraction"])
+		+ float(canonical_state["city_fraction"])
+	)
+	if absf(
+		float(canonical_state["extraction_fraction"]) - extraction_sum
+	) > 0.000001:
+		return {
+			"ok": false,
+			"error": "Watershed AI extraction_fraction is not the consumptive sum.",
+		}
+	var expected_available := clampf(
+		float(canonical_state["atmospheric_input_rate"])
+		+ float(canonical_state["reservoir_release_rate"]),
+		0.0,
+		1.0,
+	)
+	if absf(
+		float(canonical_state["available_supply_rate"]) - expected_available
+	) > 0.000001:
+		return {
+			"ok": false,
+			"error": "Watershed AI available supply does not match input plus release.",
+		}
+	var expected_remaining := expected_available * (1.0 - extraction_sum)
+	if absf(
+		float(canonical_state["remaining_rate"]) - expected_remaining
+	) > 0.000001:
+		return {
+			"ok": false,
+			"error": "Watershed AI remaining rate does not close the water budget.",
+		}
+	if (
+		not is_zero_approx(float(canonical_state["hydropower_fraction"]))
+		or not is_zero_approx(float(canonical_state["water_project_fraction"]))
+	):
+		return {
+			"ok": false,
+			"error": "Watershed AI keeps hydropower and water-project extraction at zero.",
+		}
+	# Reinsert every field in the published canonical order. Dictionary insertion
+	# order then remains deterministic for diagnostics and cross-language clients.
+	var ordered_state: Dictionary = {}
+	for field: String in WATERSHED_AI_STATE_FIELDS:
+		ordered_state[field] = canonical_state[field]
+	return {
+		"ok": true,
+		"state": ordered_state,
+		"state_hash": _watershed_ai_state_hash(ordered_state),
+	}
+
+
+func _watershed_ai_state_hash(state: Dictionary) -> String:
+	# decision_id identifies a controller decision; the hash identifies only the
+	# complete visual state so a new ID with identical values can skip GPU work.
+	var parts := PackedStringArray([
+		"schema_version=%d" % int(state.get("schema_version", 0)),
+		"atmospheric_input_rate=%.9f" % float(state.get("atmospheric_input_rate", 0.0)),
+		"reservoir_release_rate=%.9f" % float(state.get("reservoir_release_rate", 0.0)),
+		"available_supply_rate=%.9f" % float(state.get("available_supply_rate", 0.0)),
+		"extraction_fraction=%.9f" % float(state.get("extraction_fraction", 0.0)),
+		"remaining_rate=%.9f" % float(state.get("remaining_rate", 0.0)),
+		"salmon_fraction=%.9f" % float(state.get("salmon_fraction", 0.0)),
+		"floodplain_fraction=%.9f" % float(state.get("floodplain_fraction", 0.0)),
+		"agriculture_fraction=%.9f" % float(state.get("agriculture_fraction", 0.0)),
+		"data_center_fraction=%.9f" % float(state.get("data_center_fraction", 0.0)),
+		"city_fraction=%.9f" % float(state.get("city_fraction", 0.0)),
+		"reservoir_storage_fraction=%.9f" % float(state.get("reservoir_storage_fraction", 0.0)),
+		"hydropower_fraction=%.9f" % float(state.get("hydropower_fraction", 0.0)),
+		"water_project_fraction=%.9f" % float(state.get("water_project_fraction", 0.0)),
+	])
+	return "\n".join(parts).sha256_text()
+
+
+func _watershed_ai_current_observation() -> Dictionary:
+	var temperature_value: Variant = (
+		_temperature_current_value_c if _temperature_value_valid else null
+	)
+	return {
+		"screen_id": String(screen_id),
+		"model_date_time": _format_model_date_time(
+			_model_day_index,
+			_model_minute_of_day,
+		),
+		"model_day_index": _model_day_index,
+		"model_minute_of_day": _model_minute_of_day,
+		"flow_rate": flow_rate,
+		"basin_input_rate": _basin_input_rate,
+		"basin_extraction_fraction": _basin_extraction_fraction,
+		"basin_remaining_rate": _basin_remaining_rate,
+		"watershed_data_drives_flow_rate": watershed_data_drives_flow_rate,
+		"watershed_row": get_current_watershed_data_row(),
+		"temperature_c": temperature_value,
+		"temperature_valid": _temperature_value_valid,
+		"gate_open": gate_open,
+		"effective_gate_open": _effective_gate_open(),
+		"gate_aperture_fraction": _effective_gate_aperture_fraction(),
+		"regime_active_indices": Array(
+			_regime_snapshot.get("active_indices", [])
+		).duplicate(),
+		"regime_revision": int(_regime_snapshot.get("revision", 0)),
+	}
+
+
 func queue_control_message(message: Dictionary) -> void:
 	if _pending_messages.size() >= MAX_PENDING_CONTROL_MESSAGES:
 		# Preserve recent control state under pathological packet bursts. The bus
@@ -606,15 +1026,53 @@ func set_gate_open(reservoir_or_value: Variant, value: Variant = null) -> void:
 
 
 func set_flow_rate(value: float) -> void:
-	# A direct keyboard/API rate is an intentional manual override. The data
-	# timeline can be resumed through `watershed.drives_flow_rate = true`.
+	# This compatibility setter now controls the model's one atmospheric input.
+	# The post-extraction remainder remains available as `flow_rate`.
 	watershed_data_drives_flow_rate = false
-	flow_rate = clampf(value, 0.0, 1.0)
+	_basin_input_rate = clampf(value, 0.0, 1.0)
+	_recalculate_basin_budget(false)
 	# Digit keys and direct water-rate calls must not rebuild or retune either
 	# ecology system. Salmon and leaves still react naturally to the resulting
 	# water-only occupancy image, but their release generations, speeds, and
 	# immutable segment pools remain untouched.
 	_apply_water_rate_parameters()
+
+
+func _recalculate_basin_budget(apply_water_parameters: bool = true) -> void:
+	if (
+		not _watershed_ai_applied_state.is_empty()
+		and _watershed_ai_regime_is_exclusive(_regime_snapshot)
+	):
+		_basin_input_rate = float(
+			_watershed_ai_applied_state["atmospheric_input_rate"]
+		)
+		_basin_extraction_fraction = float(
+			_watershed_ai_applied_state["extraction_fraction"]
+		)
+		_basin_remaining_rate = float(
+			_watershed_ai_applied_state["remaining_rate"]
+		)
+	else:
+		var active_states := Array(_regime_snapshot.get("active_states", []))
+		_basin_extraction_fraction = BasinBudgetModel.total_extraction_fraction(
+			active_states
+		)
+		_basin_remaining_rate = BasinBudgetModel.remaining_water(
+			_basin_input_rate,
+			active_states
+		)
+	# The particles visualize the sole output of the budget equation.
+	flow_rate = _basin_remaining_rate
+	_configure_basin_budget_overlay()
+	if apply_water_parameters and not _process_material_layers.is_empty():
+		_apply_water_rate_parameters()
+	if is_node_ready():
+		basin_budget_changed.emit(
+			screen_id,
+			_basin_input_rate,
+			_basin_extraction_fraction,
+			_basin_remaining_rate
+		)
 
 
 func set_gate_width(reservoir_or_width: Variant, value: Variant = null) -> void:
@@ -861,7 +1319,15 @@ func _on_model_regimes_changed(state: Dictionary) -> void:
 		_advance_reservoir_geometry_revision()
 	_applied_regime_state_revision = next_regime_revision
 	_regime_snapshot = state.duplicate(true)
+	if (
+		_watershed_ai_baseline_captured
+		and not _watershed_ai_regime_is_exclusive(_regime_snapshot)
+	):
+		_restore_watershed_ai_baseline()
 	_apply_regime_features_from_state(_regime_snapshot)
+	_install_regime_extractor_polygons()
+	_recalculate_basin_budget(false)
+	_apply_interaction_geometry()
 	_apply_regime_panel()
 	_apply_regime_ecology_schedule()
 	if is_node_ready():
@@ -884,8 +1350,133 @@ func _regime_active_signature(state: Dictionary) -> String:
 	return "|".join(parts)
 
 
+func _watershed_ai_regime_is_exclusive(state: Dictionary) -> bool:
+	var active_indices_variant: Variant = state.get("active_indices", [])
+	if not active_indices_variant is Array:
+		return false
+	var active_indices: Array = active_indices_variant
+	return (
+		active_indices.size() == 1
+		and int(active_indices[0]) == WATERSHED_REGIME_INDEX
+	)
+
+
+func _capture_watershed_ai_baseline() -> void:
+	if _watershed_ai_baseline_captured:
+		return
+	_watershed_ai_baseline_flow_rate = _basin_input_rate
+	_watershed_ai_baseline_data_drives_flow_rate = watershed_data_drives_flow_rate
+	_watershed_ai_baseline_gate_open = gate_open
+	_watershed_ai_baseline_captured = true
+
+
+func _restore_watershed_ai_baseline() -> void:
+	if not _watershed_ai_baseline_captured:
+		return
+	var restore_flow_rate := _watershed_ai_baseline_flow_rate
+	var restore_data_drive := _watershed_ai_baseline_data_drives_flow_rate
+	var restore_gate_open := _watershed_ai_baseline_gate_open
+	_watershed_ai_applied_state = {}
+	_watershed_ai_applied_decision_id = ""
+	_watershed_ai_applied_state_hash = ""
+	_watershed_ai_last_error = ""
+	_watershed_ai_baseline_captured = false
+	watershed_data_drives_flow_rate = restore_data_drive
+	_basin_input_rate = clampf(restore_flow_rate, 0.0, 1.0)
+	_recalculate_basin_budget(false)
+	gate_open = restore_gate_open
+	if restore_data_drive:
+		_update_model_data_timelines()
+	elif not _process_material_layers.is_empty():
+		_apply_water_rate_parameters()
+
+
+func _apply_watershed_ai_feature_overlay() -> void:
+	if (
+		_watershed_ai_applied_state.is_empty()
+		or not _watershed_ai_regime_is_exclusive(_regime_snapshot)
+	):
+		return
+	var storage := float(_watershed_ai_applied_state["reservoir_storage_fraction"])
+	var release := float(_watershed_ai_applied_state["reservoir_release_rate"])
+	var agriculture := float(_watershed_ai_applied_state["agriculture_fraction"])
+	var data_centers := float(_watershed_ai_applied_state["data_center_fraction"])
+	var city := float(_watershed_ai_applied_state["city_fraction"])
+	var derived_features := {
+		"reservoir_area_fraction": [storage, ["watershed_ai_reservoir"]],
+		"reservoir_count": [1 if storage > 0.000001 else 0, ["watershed_ai_reservoir"]],
+		"reservoir_gate_aperture_fraction": [clampf(release * 4.0, 0.0, 1.0), ["watershed_ai_reservoir"]],
+		"drain_area_fraction": [clampf(agriculture + data_centers, 0.0, 1.0), ["watershed_ai_agriculture", "watershed_ai_data_center"]],
+		"drain_power": [clampf(agriculture + data_centers, 0.0, 1.0), ["watershed_ai_agriculture", "watershed_ai_data_center"]],
+		"obstacle_area_fraction": [city, ["watershed_ai_city"]],
+		"obstacle_power": [city, ["watershed_ai_city"]],
+		"shoreline_randomness": [0.0, ["watershed_ai"]],
+	}
+	for feature_name: String in derived_features:
+		var feature: Array = derived_features[feature_name]
+		var contributors: Array = feature[1]
+		_regime_feature_state_for_screen[feature_name] = {
+			"defined": true,
+			"value": feature[0],
+			"contributor_count": contributors.size(),
+			"contributor_ids": contributors.duplicate(),
+		}
+
+
+func _apply_watershed_ai_control_message(message: Dictionary) -> bool:
+	var validation := validate_watershed_ai_control_message(message)
+	if not bool(validation.get("ok", false)):
+		_watershed_ai_last_error = String(validation.get(
+			"error",
+			"Watershed AI state was rejected.",
+		))
+		_watershed_ai_rejection_count += 1
+		return false
+	var next_state: Dictionary = Dictionary(validation.get(
+		"state",
+		{},
+	)).duplicate(true)
+	var next_hash := String(validation.get("state_hash", ""))
+	var next_decision_id := String(next_state.get("decision_id", ""))
+	if (
+		next_decision_id == _watershed_ai_applied_decision_id
+		and next_hash == _watershed_ai_applied_state_hash
+	):
+		_watershed_ai_last_error = ""
+		_watershed_ai_deduplicated_count += 1
+		return true
+	if (
+		not _watershed_ai_applied_state_hash.is_empty()
+		and next_hash == _watershed_ai_applied_state_hash
+	):
+		_watershed_ai_applied_decision_id = next_decision_id
+		_watershed_ai_applied_state["decision_id"] = next_decision_id
+		_watershed_ai_last_error = ""
+		_watershed_ai_deduplicated_count += 1
+		return true
+	_capture_watershed_ai_baseline()
+	_watershed_ai_applied_state = next_state
+	_watershed_ai_applied_decision_id = next_decision_id
+	_watershed_ai_applied_state_hash = next_hash
+	_watershed_ai_last_error = ""
+	watershed_data_drives_flow_rate = false
+	_basin_input_rate = float(next_state["atmospheric_input_rate"])
+	_recalculate_basin_budget(false)
+	_apply_regime_features_from_state(_regime_snapshot)
+	gate_open = float(next_state["reservoir_release_rate"]) > 0.000001
+	_install_regime_extractor_polygons()
+	_apply_interaction_geometry()
+	_configure_basin_budget_overlay()
+	_apply_regime_ecology_schedule()
+	if not _process_material_layers.is_empty():
+		_apply_water_rate_parameters()
+	_watershed_ai_apply_count += 1
+	return true
+
+
 func _apply_regime_features_from_state(state: Dictionary) -> void:
 	_regime_feature_state_for_screen = _regime_screen_feature_state(state)
+	_apply_watershed_ai_feature_overlay()
 	# The renderer remains opt-in so reusable/legacy stages preserve their authored
 	# physics. Production wrappers opt in and then consume only their own screen row.
 	if not regime_profile_physics_enabled:
@@ -1349,9 +1940,10 @@ func _regime_seeded_field_vertices_world(
 	slot_index: int,
 	active_count: int,
 ) -> PackedVector2Array:
-	## Each managed field is a stable trapezoid rooted in exactly one physical
-	## bank. Active slots are stratified across the river length, while a seeded
-	## phase alternates top/bottom so four Agriculture fields resolve to 2 + 2.
+	## Each managed field is an axis-aligned rectangle touching exactly one
+	## physical bank. Active slots are stratified across the river length, while
+	## a seeded phase alternates top/bottom so four Agriculture fields resolve
+	## to 2 + 2. Bank contact lets the drain shader pull water through the field.
 	var lane_count := maxi(active_count, 1)
 	var active_slot_index := clampi(slot_index, 0, lane_count - 1)
 	var lane_width := (
@@ -1361,22 +1953,17 @@ func _regime_seeded_field_vertices_world(
 		REGIME_FIELD_X_RANGE.x + lane_width * float(active_slot_index)
 	)
 	var lane_right := lane_left + lane_width
-	var root_width := lerpf(
+	var field_width := lerpf(
 		REGIME_FIELD_ROOT_WIDTH_RANGE.x,
 		REGIME_FIELD_ROOT_WIDTH_RANGE.y,
 		_regime_contributor_seed_average(contributors, slot_index, "root"),
-	)
-	var mouth_width := lerpf(
-		REGIME_FIELD_MOUTH_WIDTH_RANGE.x,
-		REGIME_FIELD_MOUTH_WIDTH_RANGE.y,
-		_regime_contributor_seed_average(contributors, slot_index, "mouth"),
 	)
 	var depth := lerpf(
 		REGIME_FIELD_DEPTH_RANGE.x,
 		REGIME_FIELD_DEPTH_RANGE.y,
 		_regime_contributor_seed_average(contributors, slot_index, "depth"),
 	)
-	var half_width := maxf(root_width, mouth_width) * 0.5
+	var half_width := field_width * 0.5
 	var center_minimum := lane_left + half_width + REGIME_FIELD_LANE_PADDING_WORLD
 	var center_maximum := lane_right - half_width - REGIME_FIELD_LANE_PADDING_WORLD
 	if center_maximum < center_minimum:
@@ -1387,23 +1974,21 @@ func _regime_seeded_field_vertices_world(
 		center_maximum,
 		_regime_contributor_seed_average(contributors, slot_index, "x"),
 	)
-	var root_half_width := root_width * 0.5
-	var mouth_half_width := mouth_width * 0.5
 	var top_bank := (
 		(slot_index + _regime_field_bank_phase(contributors)) % 2 == 0
 	)
 	if top_bank:
 		return PackedVector2Array([
-			Vector2(center_x - mouth_half_width, WORLD_SIZE.y - depth),
-			Vector2(center_x + mouth_half_width, WORLD_SIZE.y - depth),
-			Vector2(center_x + root_half_width, WORLD_SIZE.y),
-			Vector2(center_x - root_half_width, WORLD_SIZE.y),
+			Vector2(center_x - half_width, WORLD_SIZE.y - depth),
+			Vector2(center_x + half_width, WORLD_SIZE.y - depth),
+			Vector2(center_x + half_width, WORLD_SIZE.y),
+			Vector2(center_x - half_width, WORLD_SIZE.y),
 		])
 	return PackedVector2Array([
-		Vector2(center_x - root_half_width, 0.0),
-		Vector2(center_x + root_half_width, 0.0),
-		Vector2(center_x + mouth_half_width, depth),
-		Vector2(center_x - mouth_half_width, depth),
+		Vector2(center_x - half_width, 0.0),
+		Vector2(center_x + half_width, 0.0),
+		Vector2(center_x + half_width, depth),
+		Vector2(center_x - half_width, depth),
 	])
 
 
@@ -2059,6 +2644,13 @@ func get_current_watershed_data_row() -> Dictionary:
 			_watershed_high_variation[_watershed_row_index]
 		),
 		"interpolated_flow_rate": _watershed_interpolated_flow_rate,
+		"buffered_flow_rate": _watershed_buffered_flow_rate,
+		"running_average_flow": float(
+			_watershed_running_average_flow[_watershed_row_index]
+		),
+		"basin_input_rate": _basin_input_rate,
+		"basin_extraction_fraction": _basin_extraction_fraction,
+		"basin_remaining_rate": _basin_remaining_rate,
 		"row_fraction": _watershed_row_fraction,
 		"model_date_time": _format_model_date_time(
 			_model_day_index,
@@ -2220,7 +2812,8 @@ func set_runtime_parameter(
 	match path_string:
 		"flow_rate":
 			watershed_data_drives_flow_rate = false
-			flow_rate = clampf(float(value), 0.0, 1.0)
+			_basin_input_rate = clampf(float(value), 0.0, 1.0)
+			_recalculate_basin_budget(false)
 		"flow_speed_pixels", "base_speed":
 			flow_speed_pixels = maxf(float(value), 1.0)
 		"max_flow_speed":
@@ -2243,7 +2836,8 @@ func set_runtime_parameter(
 			trail_lifetime = clampf(float(value), 0.1, 8.0)
 		"active_ratio":
 			watershed_data_drives_flow_rate = false
-			flow_rate = clampf(float(value), 0.0, 1.0)
+			_basin_input_rate = clampf(float(value), 0.0, 1.0)
+			_recalculate_basin_budget(false)
 		"line_width_min":
 			line_width_min = clampf(float(value), 1.0, 5.0)
 		"line_width_max":
@@ -2537,7 +3131,13 @@ func runtime_summary() -> Dictionary:
 	var head_layer_z_indices: Array[int] = []
 	var head_layer_z_as_relative: Array[bool] = []
 	var head_layer_amount_ratios: Array[float] = []
+	var head_layer_logical_active_ratios: Array[float] = []
 	var head_layer_fixed_fps: Array[int] = []
+	var head_layer_preprocess_seconds: Array[float] = []
+	var head_layer_randomness: Array[float] = []
+	var head_layer_explosiveness: Array[float] = []
+	var head_layer_fixed_seed_enabled: Array[bool] = []
+	var head_layer_seeds: Array[int] = []
 	var trail_segment_capacities: Array[int] = []
 	var trail_segment_z_indices: Array[int] = []
 	var trail_segment_z_as_relative: Array[bool] = []
@@ -2573,6 +3173,8 @@ func runtime_summary() -> Dictionary:
 	var shoreline_count_uniforms: Array[int] = []
 	var shoreline_texture_bound_uniforms: Array[bool] = []
 	var shoreline_inlet_y_range_uniforms: Array[Vector2] = []
+	var active_particle_count_uniforms: Array[float] = []
+	var water_coverage_fraction_uniforms: Array[float] = []
 	var edge_turbulence_amount_uniforms: Array[float] = []
 	var edge_turbulence_band_uniforms: Array[float] = []
 	var edge_turbulence_wall_band_uniforms: Array[float] = []
@@ -2597,7 +3199,15 @@ func runtime_summary() -> Dictionary:
 		head_layer_z_indices.append(head_layer.z_index)
 		head_layer_z_as_relative.append(head_layer.z_as_relative)
 		head_layer_amount_ratios.append(head_layer.amount_ratio)
+		head_layer_logical_active_ratios.append(
+			_flow_line_layer_amount_ratio(layer_index, flow_rate)
+		)
 		head_layer_fixed_fps.append(head_layer.fixed_fps)
+		head_layer_preprocess_seconds.append(head_layer.preprocess)
+		head_layer_randomness.append(head_layer.randomness)
+		head_layer_explosiveness.append(head_layer.explosiveness)
+		head_layer_fixed_seed_enabled.append(head_layer.use_fixed_seed)
+		head_layer_seeds.append(head_layer.seed)
 		head_layer_speed_scales.append(head_layer.speed_scale)
 		trail_segment_capacities.append(segment_layer.amount)
 		trail_segment_z_indices.append(segment_layer.z_index)
@@ -2692,6 +3302,12 @@ func runtime_summary() -> Dictionary:
 		shoreline_texture_bound_uniforms.append(false)
 		shoreline_inlet_y_range_uniforms.append(Vector2(
 			process_material.get_shader_parameter(&"shoreline_inlet_y_range")
+		))
+		active_particle_count_uniforms.append(float(
+			process_material.get_shader_parameter(&"active_particle_count")
+		))
+		water_coverage_fraction_uniforms.append(float(
+			process_material.get_shader_parameter(&"water_coverage_fraction")
 		))
 		edge_turbulence_amount_uniforms.append(float(
 			process_material.get_shader_parameter(&"edge_turbulence_amount")
@@ -2798,6 +3414,15 @@ func runtime_summary() -> Dictionary:
 	var watershed_row := get_current_watershed_data_row()
 	var watershed_row_count := _watershed_normalized_flow.size()
 	var regime_state := get_regime_state()
+	var active_regime_extractor_count := 0
+	for extractor: GPUFlowInteractionPolygon in _regime_extractor_polygons:
+		if extractor != null and extractor.enabled:
+			active_regime_extractor_count += 1
+	var active_states := Array(regime_state.get("active_states", []))
+	var delta_tide_visible := screen_id == &"delta"
+	var kinship_delta_visible := (
+		delta_tide_visible and active_states.size() > 0 and bool(active_states[0])
+	)
 	var shoreline_definitions := _shoreline_runtime_definitions()
 	var shoreline_ids: Array[String] = []
 	for shoreline_definition: Dictionary in shoreline_definitions:
@@ -2842,6 +3467,111 @@ func runtime_summary() -> Dictionary:
 			regime_state.get("active_names", [])
 		).duplicate(),
 		"active_regime_count": int(regime_state.get("active_count", 0)),
+		"regime_extraction_breakdown": Array(
+			regime_state.get("extraction_breakdown", [])
+		).duplicate(true),
+		"basin_input_kind": "precipitation+snowmelt+humidity+fog",
+		"basin_input_rate": _basin_input_rate,
+		"basin_input_percent": _basin_input_rate * 100.0,
+		"total_extraction_fraction": _basin_extraction_fraction,
+		"total_extraction_percent": _basin_extraction_fraction * 100.0,
+		"basin_remaining_rate": _basin_remaining_rate,
+		"basin_remaining_percent": _basin_remaining_rate * 100.0,
+		"basin_budget_equation": "output=input*(1-extraction)",
+		"active_regime_extractor_count": active_regime_extractor_count,
+		"extractor_shape": "rectangle",
+		"field_shape": "rectangle",
+		"data_center_shape": "rectangle",
+		"extractor_hatch_angle_degrees": 45.0,
+		"extractor_hatch_line_width_pixels": 3.0,
+		"extractor_hatch_gap_pixels": 6.0,
+		"extractor_hatch_spacing_pixels": 6.0,
+		"extractor_hatch_max_alpha": 0.33,
+		"geometry_hatch_alpha": 0.33,
+		"geometry_hatch_alpha_mode": "FIXED_UNIFORM",
+		"geometry_label_background": "TRANSPARENT_HATCH_KNOCKOUT",
+		"geometry_label_hatch_clearance_pixels": 6.0,
+		"field_hatch_color": Color("6fbf73"),
+		"data_center_hatch_color": Color.WHITE,
+		"geometry_hatching_visible_when_active": debug_visible,
+		"geometry_outline_borders": false,
+		"geometry_hatch_line_caps": "ROUND",
+		"repeller_display_term": "CITY",
+		"geometry_overlay_z_index": GEOMETRY_OVERLAY_Z_INDEX,
+		"water_display_z_index": WATER_DISPLAY_Z_INDEX,
+		"geometry_below_water": GEOMETRY_OVERLAY_Z_INDEX < WATER_DISPLAY_Z_INDEX,
+		"delta_budget_panel_background": "TRANSPARENT",
+		"delta_budget_panel_background_alpha": 0.0,
+		"field_bank_connected": true,
+		"field_water_withdrawal_enabled": true,
+		"overlay_text_rotation_degrees": TYPE_ROTATION_DEGREES,
+		"kinship_delta_flood_visible": kinship_delta_visible,
+		"kinship_delta_floodplain_visible": kinship_delta_visible,
+		"kinship_delta_flood_render_style": "BORDERLESS_45_DEGREE_HATCH",
+		"kinship_delta_flood_solid_fill": false,
+		"kinship_delta_flood_hatch_color": Color("4ab0e1"),
+		"kinship_delta_flood_hatch_alpha": 0.33,
+		"kinship_delta_flood_hatch_angle_degrees": 45.0,
+		"kinship_delta_flood_hatch_line_width_pixels": 3.0,
+		"kinship_delta_flood_hatch_gap_pixels": 6.0,
+		"kinship_delta_flood_hatch_line_caps": "ROUND",
+		"kinship_delta_flood_label_hatch_clearance_pixels": 6.0,
+		"delta_tide_visible": delta_tide_visible,
+		"delta_tide_visible_in_all_regimes": delta_tide_visible,
+		"delta_tide_data_path": DELTA_TIDE_DATA_PATH,
+		"delta_tide_data_status": _delta_tide_data_status,
+		"delta_tide_data_error": _delta_tide_data_error,
+		"delta_tide_data_row_count": _delta_tide_heights.size(),
+		"delta_tide_data_row_index": _delta_tide_row_index,
+		"delta_tide_data_row_fraction": _delta_tide_row_fraction,
+		"delta_tide_station_id": "9414290",
+		"delta_tide_station_name": "San Francisco, CA",
+		"delta_tide_product": "NOAA CO-OPS hourly tide predictions",
+		"delta_tide_water_level_m_mllw": _delta_tide_current_height_m,
+		"delta_tide_normalized_height": _delta_tide_current_normalized_height,
+		"delta_tide_normalized_velocity": _delta_tide_current_normalized_velocity,
+		"delta_tide_phase": (
+			"FLOOD"
+			if _delta_tide_current_normalized_velocity >= 0.0
+			else "EBB"
+		),
+		"delta_tide_animation_direction": "BOTTOM_TO_TOP",
+		"delta_tide_origin_side": "RIGHT",
+		"delta_tide_render_style": "BOTTOM_TO_TOP_FIFO_TIMESERIES_BARS",
+		"delta_tide_area_shape": "RIGHT_ANCHORED_LENGTH_PROFILE",
+		"delta_tide_series_sample_count": _delta_tide_normalized_heights.size(),
+		"delta_tide_series_sample_position": (
+			float(_delta_tide_row_index) + _delta_tide_row_fraction
+		),
+		"delta_tide_visible_line_count": 35,
+		"delta_tide_first_line_y": 30.0,
+		"delta_tide_last_line_y": 1050.0,
+		"delta_tide_current_sample_screen_y": (
+			1050.0 - _delta_tide_row_fraction * 30.0
+		),
+		"delta_tide_current_sample_centered": false,
+		"delta_tide_history_capacity": 35,
+		"delta_tide_history_update_mode": "ARRAY_POP_FRONT_PUSH_BACK",
+		"delta_tide_history_order": "OLDEST_TOP_NEWEST_BOTTOM",
+		"delta_tide_migration_pixels_per_sample": 30.0,
+		"delta_tide_bar_value_dimension": "HORIZONTAL_LENGTH_FROM_TIDE_HEIGHT",
+		"delta_tide_line_length_range_pixels": Vector2(40.8, 306.0),
+		"delta_tide_line_length_scale": 0.34,
+		"delta_tide_line_length_reduction_percent": 66.0,
+		"delta_tide_length_source": "NORMALIZED_TIDE_HEIGHT",
+		"delta_tide_line_color": Color("1e90ff"),
+		"delta_tide_line_color_name": "DODGER_BLUE",
+		"delta_tide_fill_line_orientation": "HORIZONTAL",
+		"delta_tide_fill_line_width_pixels": 3.0,
+		"delta_tide_fill_line_gap_pixels": 27.0,
+		"delta_tide_fill_line_period_pixels": 30.0,
+		"delta_tide_skips_screen_boundary_gridlines": true,
+		"delta_tide_boundary_visible": false,
+		"delta_tide_label_visible": false,
+		"delta_tide_antialiasing_profile": "PIXEL_ALIGNED_HORIZONTAL_STRIPES",
+		"delta_tide_z_index": TIDE_OVERLAY_Z_INDEX,
+		"delta_tide_below_text": TIDE_OVERLAY_Z_INDEX < STAGE_TITLE_Z_INDEX,
+		"delta_tide_arrowheads": false,
 		"regime_revision": int(regime_state.get("revision", 0)),
 		"regime_profile_path": String(regime_state.get("profile_path", "")),
 		"regime_profiles_loaded": bool(
@@ -3098,6 +3828,26 @@ func runtime_summary() -> Dictionary:
 		"watershed_interpolate_flow_rate": watershed_interpolate_flow_rate,
 		"watershed_interpolated_flow_rate": _watershed_interpolated_flow_rate,
 		"watershed_flow_percent": _watershed_interpolated_flow_rate * 100.0,
+		"watershed_buffered_flow_rate": _watershed_buffered_flow_rate,
+		"watershed_buffered_flow_percent": _watershed_buffered_flow_rate * 100.0,
+		"basin_input_buffer_mode": "TRAILING_CYCLIC_RUNNING_AVERAGE",
+		"basin_input_running_average_days": BASIN_INPUT_RUNNING_AVERAGE_DAYS,
+		"basin_input_running_average_sample_count": (
+			_watershed_running_average_sample_count
+		),
+		"basin_input_minimum_rate": BASIN_INPUT_MINIMUM_RATE,
+		"basin_input_minimum_percent": BASIN_INPUT_MINIMUM_RATE * 100.0,
+		"basin_input_floor_applied_after_fog": true,
+		"fog_baseline_mm_day": _watershed_fog_baseline_mm_day,
+		"fog_baseline_normalized": _watershed_fog_baseline_normalized,
+		"fog_morning_window_minutes": Vector2i(
+			MORNING_FOG_START_MINUTE,
+			MORNING_FOG_END_MINUTE,
+		),
+		"fog_morning_window_local_time": "03:00-10:00",
+		"fog_morning_pulse_multiplier": _morning_fog_pulse_multiplier,
+		"fog_morning_active": _morning_fog_pulse_multiplier > 0.0,
+		"fog_daily_volume_preserved": true,
 		"watershed_row_duration_seconds": (
 			model_year_duration_seconds / float(watershed_row_count)
 			if watershed_row_count > 0
@@ -3109,6 +3859,22 @@ func runtime_summary() -> Dictionary:
 			else 0.0
 		),
 		"watershed_current_row": watershed_row,
+		"watershed_ai_control_scope": WATERSHED_AI_CONTROL_SCOPE,
+		"watershed_ai_state_path": WATERSHED_AI_STATE_PATH,
+		"watershed_ai_state_schema_version": WATERSHED_AI_STATE_SCHEMA_VERSION,
+		"watershed_ai_exclusive_active": _watershed_ai_regime_is_exclusive(
+			_regime_snapshot
+		),
+		"watershed_ai_applied": not _watershed_ai_applied_decision_id.is_empty(),
+		"watershed_ai_applied_decision_id": _watershed_ai_applied_decision_id,
+		"watershed_ai_applied_state_hash": _watershed_ai_applied_state_hash,
+		"watershed_ai_applied_state": _watershed_ai_applied_state.duplicate(true),
+		"watershed_ai_last_error": _watershed_ai_last_error,
+		"watershed_ai_apply_count": _watershed_ai_apply_count,
+		"watershed_ai_deduplicated_count": _watershed_ai_deduplicated_count,
+		"watershed_ai_rejection_count": _watershed_ai_rejection_count,
+		"watershed_ai_fixed_bank_only": true,
+		"watershed_ai_current_observation": _watershed_ai_current_observation(),
 		"stage_title_below_animated_features": true,
 		"stage_grid_above_background": true,
 		"stage_text_above_grid": true,
@@ -3133,11 +3899,13 @@ func runtime_summary() -> Dictionary:
 		"water_texture_excludes_stage_temperature": true,
 		"water_texture_excludes_regime_panel": true,
 		"amount": particle_slots,
-		"amount_ratio": particles.amount_ratio,
+		"amount_ratio": _flow_line_amount_ratio(flow_rate),
 		"flow_rate": flow_rate,
-		"active_heads_approx": ceili(
-			float(particle_slots) * clampf(flow_rate, 0.0, 1.0)
-		),
+		"active_heads_approx": _flow_line_target_count(flow_rate),
+		"water_line_density_low_rate": FLOW_DENSITY_LOW_RATE,
+		"water_line_density_low_count": FLOW_DENSITY_LOW_LINE_COUNT,
+		"water_line_density_full_count": FLOW_DENSITY_FULL_LINE_COUNT,
+		"water_line_density_mapping": "1_PERCENT_20__100_PERCENT_1000",
 		"palette_layer_count": PALETTE_LAYER_COUNT,
 		"head_layer_count": _head_layers.size(),
 		"trail_segment_layer_count": _trail_segment_layers.size(),
@@ -3145,7 +3913,18 @@ func runtime_summary() -> Dictionary:
 		"head_layer_allocated_amounts": head_layer_allocated_amounts,
 		"active_head_layer_counts": active_head_layer_counts,
 		"head_layer_amount_ratios": head_layer_amount_ratios,
+		"head_layer_logical_active_ratios": head_layer_logical_active_ratios,
 		"head_layer_fixed_fps": head_layer_fixed_fps,
+		"head_layer_preprocess_seconds": head_layer_preprocess_seconds,
+		"head_layer_randomness": head_layer_randomness,
+		"head_layer_explosiveness": head_layer_explosiveness,
+		"head_layer_fixed_seed_enabled": head_layer_fixed_seed_enabled,
+		"head_layer_seeds": head_layer_seeds,
+		"head_emission_timing": "EVENLY_PHASED_DIRECT_RECYCLE_CONTINUOUS",
+		"head_native_amount_ratio_strategy": "FULL_CYCLE_SHADER_GATED",
+		"head_emission_cycle_seconds": HEAD_EMISSION_CYCLE_SECONDS,
+		"head_preprocess_seconds": HEAD_PREPROCESS_SECONDS,
+		"head_reentry_waits_for_native_cycle": false,
 		"head_layer_speed_scales": head_layer_speed_scales,
 		"head_layer_z_indices": head_layer_z_indices,
 		"head_layer_z_as_relative": head_layer_z_as_relative,
@@ -3197,6 +3976,13 @@ func runtime_summary() -> Dictionary:
 		"shoreline_count_uniforms": shoreline_count_uniforms,
 		"shoreline_texture_bound_uniforms": shoreline_texture_bound_uniforms,
 		"shoreline_inlet_y_range_uniforms": shoreline_inlet_y_range_uniforms,
+		"active_particle_count_uniforms": active_particle_count_uniforms,
+		"water_coverage_fraction_uniforms": water_coverage_fraction_uniforms,
+		"water_coverage_model": "CENTER_BAND_SYMMETRIC_FLOW_PERCENT",
+		"water_inlet_band_y_range_pixels": _flow_inlet_band_y_range_pixels(
+			flow_rate
+		),
+		"water_inlet_band_center_y_pixels": STAGE_SIZE.y * 0.5,
 		"edge_turbulence_amount_uniforms": edge_turbulence_amount_uniforms,
 		"edge_turbulence_band_uniforms": edge_turbulence_band_uniforms,
 		"edge_turbulence_wall_band_uniforms": (
@@ -3442,6 +4228,9 @@ func runtime_summary() -> Dictionary:
 
 
 func _apply_control_message(message: Dictionary) -> void:
+	if String(message.get("control_scope", "")) == WATERSHED_AI_CONTROL_SCOPE:
+		_apply_watershed_ai_control_message(message)
+		return
 	var runtime_parameters_changed := false
 	var command := String(message.get("command", ""))
 	if command == "set_gate":
@@ -3800,6 +4589,83 @@ func _on_interaction_polygon_changed() -> void:
 
 
 
+func _install_regime_extractor_polygons() -> void:
+	_regime_extractor_polygons.clear()
+	var active_states := Array(_regime_snapshot.get("active_states", []))
+	var watershed_ai_active := (
+		not _watershed_ai_applied_state.is_empty()
+		and _watershed_ai_regime_is_exclusive(_regime_snapshot)
+	)
+	for definition: Dictionary in BasinBudgetModel.extractor_definitions():
+		var extractor := GPUFlowInteractionPolygon.new()
+		if extractor == null:
+			continue
+		var regime_index := int(definition["regime_index"])
+		var visual_kind := String(definition.get("kind", ""))
+		var allocation_fraction := 0.0
+		if watershed_ai_active:
+			if visual_kind == "field":
+				allocation_fraction = float(
+					_watershed_ai_applied_state["agriculture_fraction"]
+				)
+			elif visual_kind == "data_center":
+				allocation_fraction = float(
+					_watershed_ai_applied_state["data_center_fraction"]
+				)
+		var enabled := (
+			allocation_fraction > 0.000001
+			if watershed_ai_active
+			else (
+				regime_index >= 0
+				and regime_index < active_states.size()
+				and bool(active_states[regime_index])
+			)
+		)
+		var extractor_rectangle: Rect2 = definition["rect_world"]
+		if watershed_ai_active and enabled:
+			extractor_rectangle = _watershed_ai_scaled_extractor_rect(
+				extractor_rectangle,
+				allocation_fraction,
+			)
+		var valid := extractor.apply_dictionary({
+			"element_id": definition["element_id"],
+			"vertices": BasinBudgetModel.rect_vertices(extractor_rectangle),
+			"mode": "absorb",
+			"absorption_fraction": (
+				clampf(allocation_fraction * 0.5, 0.0, 1.0)
+				if watershed_ai_active
+				else definition["absorption_fraction"]
+			),
+			"repellent_force": 0.0,
+			"wave_strength": 0.0,
+			"influence": 0.0,
+			"enabled": enabled,
+		})
+		if valid:
+			_regime_extractor_polygons.append(extractor)
+
+
+func _watershed_ai_scaled_extractor_rect(
+	rectangle: Rect2,
+	allocation_fraction: float,
+) -> Rect2:
+	var width_scale := clampf(
+		sqrt(clampf(allocation_fraction, 0.0, 1.0) / 0.20),
+		0.45,
+		1.45,
+	)
+	var next_width := rectangle.size.x * width_scale
+	var next_x := clampf(
+		rectangle.get_center().x - next_width * 0.5,
+		0.0,
+		WORLD_SIZE.x - next_width,
+	)
+	return Rect2(
+		Vector2(next_x, rectangle.position.y),
+		Vector2(next_width, rectangle.size.y),
+	)
+
+
 func _install_default_interaction_polygons_if_needed() -> void:
 	if not install_default_interaction_examples or not interaction_polygons.is_empty():
 		return
@@ -3908,16 +4774,25 @@ func _apply_water_rate_parameters() -> void:
 	var effective_base_speed := (
 		flow_speed_pixels * maxf(flow_rate, min_active_flow)
 	)
+	var active_particle_count := _flow_line_target_count(flow_rate)
 	for process_material in _process_material_layers:
 		process_material.set_shader_parameter(&"base_speed", effective_base_speed)
-	var desired_ratio: float = clampf(flow_rate, 0.0, 1.0)
+		process_material.set_shader_parameter(
+			&"active_particle_count", float(active_particle_count)
+		)
+		process_material.set_shader_parameter(
+			&"water_coverage_fraction", clampf(flow_rate, 0.0, 1.0)
+		)
 	for layer_index in range(_head_layers.size()):
 		var head_layer: GPUParticles2D = _head_layers[layer_index]
 		var desired_amount: int = maxi(_layer_slot_count(layer_index), 1)
 		if head_layer.amount != desired_amount:
 			head_layer.amount = desired_amount
-		if not is_equal_approx(head_layer.amount_ratio, desired_ratio):
-			head_layer.amount_ratio = desired_ratio
+		# Keep Godot's complete native emission cycle active. Logical selection is
+		# evenly phased in the head shader; a reduced native amount_ratio is the
+		# source of low-flow batch emission and blank intervals.
+		if not is_equal_approx(head_layer.amount_ratio, 1.0):
+			head_layer.amount_ratio = 1.0
 
 
 func _apply_runtime_parameters() -> void:
@@ -4025,6 +4900,7 @@ func _apply_runtime_parameters() -> void:
 			reservoir_center_pixels,
 			reservoir_radius_pixels
 		)
+	_configure_basin_budget_overlay()
 	_apply_water_rate_parameters()
 	_apply_salmon_parameters()
 	_apply_leaf_parameters()
@@ -4171,18 +5047,95 @@ func _layer_slot_count(layer_index: int) -> int:
 
 
 func _active_layer_slot_count(layer_index: int) -> int:
-	var enabled_slot_count: int = ceili(
-		float(maxi(particle_slots, 1)) * clampf(flow_rate, 0.0, 1.0)
-	)
-	if enabled_slot_count <= layer_index:
-		return 0
+	var enabled_slot_count := _flow_line_target_count(flow_rate)
+	var active_count := 0
+	for local_slot_index in range(_layer_slot_count(layer_index)):
+		var global_slot_index := (
+			local_slot_index * PALETTE_LAYER_COUNT + layer_index
+		)
+		if _flow_line_global_slot_enabled(global_slot_index, enabled_slot_count):
+			active_count += 1
+	return active_count
+
+
+func _flow_line_global_slot_enabled(
+	global_slot_index: int,
+	enabled_slot_count: int
+) -> bool:
+	var capacity := maxi(particle_slots, 1)
+	var enabled_count := clampi(enabled_slot_count, 0, capacity)
+	if (
+		enabled_count <= 0
+		or global_slot_index < 0
+		or global_slot_index >= capacity
+	):
+		return false
 	return (
 		floori(
-			float(enabled_slot_count - 1 - layer_index)
-			/ float(PALETTE_LAYER_COUNT)
+			float(global_slot_index + 1) * float(enabled_count)
+			/ float(capacity)
 		)
-		+ 1
+		> floori(
+			float(global_slot_index) * float(enabled_count)
+			/ float(capacity)
+		)
 	)
+
+
+func _flow_line_target_count(normalized_rate: float) -> int:
+	var capacity := maxi(particle_slots, 1)
+	var low_count := mini(FLOW_DENSITY_LOW_LINE_COUNT, capacity)
+	var rate := clampf(normalized_rate, 0.0, 1.0)
+	if rate <= 0.0:
+		return 0
+	if rate <= FLOW_DENSITY_LOW_RATE:
+		return clampi(
+			roundi(float(low_count) * rate / FLOW_DENSITY_LOW_RATE),
+			0,
+			capacity,
+		)
+	return clampi(
+		roundi(
+			lerpf(
+				float(low_count),
+				float(capacity),
+				(rate - FLOW_DENSITY_LOW_RATE)
+				/ (1.0 - FLOW_DENSITY_LOW_RATE),
+			)
+		),
+		0,
+		capacity,
+	)
+
+
+func _flow_line_amount_ratio(normalized_rate: float) -> float:
+	return float(_flow_line_target_count(normalized_rate)) / float(maxi(particle_slots, 1))
+
+
+func _flow_line_layer_amount_ratio(layer_index: int, normalized_rate: float) -> float:
+	var layer_capacity := _layer_slot_count(layer_index)
+	if layer_capacity <= 0:
+		return 0.0
+	var enabled_slot_count := _flow_line_target_count(normalized_rate)
+	var enabled_layer_count := 0
+	for local_slot_index in range(layer_capacity):
+		var global_slot_index := (
+			local_slot_index * PALETTE_LAYER_COUNT + layer_index
+		)
+		if _flow_line_global_slot_enabled(global_slot_index, enabled_slot_count):
+			enabled_layer_count += 1
+	return float(enabled_layer_count) / float(layer_capacity)
+
+
+func _flow_inlet_band_y_range_pixels(normalized_rate: float) -> Vector2:
+	var full_range := _shoreline_inlet_y_range_pixels()
+	var center_y := (full_range.x + full_range.y) * 0.5
+	var half_height := (
+		(full_range.y - full_range.x)
+		* clampf(normalized_rate, 0.0, 1.0)
+		* 0.5
+	)
+	return Vector2(center_y - half_height, center_y + half_height)
 
 
 func _apply_gate() -> void:
@@ -4397,11 +5350,32 @@ func _shoreline_runtime_definitions() -> Array[Dictionary]:
 
 func _apply_interaction_geometry() -> void:
 	var active_polygons: Array[GPUFlowInteractionPolygon] = []
+	# The explicit budget extractors are the physical withdrawal geometry for
+	# Agriculture, Gold Rush, Water Projects, and Tech. Put them first so their
+	# visible bank rectangles and the water simulation use the same shapes.
+	for extractor: GPUFlowInteractionPolygon in _regime_extractor_polygons:
+		if extractor != null and extractor.enabled:
+			active_polygons.append(extractor)
+	var explicit_extractors_active := not active_polygons.is_empty()
 	for polygon: GPUFlowInteractionPolygon in _gpu_interaction_polygons():
+		var regime_managed := _is_regime_managed_interaction_polygon(polygon)
+		# Keep controller-owned disabled records packed. Their enabled flag stays
+		# zero in the texture, preserving fixed slot addressing without making
+		# them visible or interactive. Disabled regime-managed slots can be
+		# omitted because their slot bank is reconstructed from the active state.
+		if not polygon.enabled and regime_managed:
+			continue
+		# Regime-owned drain slots are the retained fallback for regimes such as
+		# Hydropower that have no explicit budget rectangle. When explicit
+		# extractors are active, omitting those generic drains prevents double
+		# withdrawal and keeps the bounded eight-polygon GPU contract.
 		if (
-			polygon.enabled
-			or not _is_regime_managed_interaction_polygon(polygon)
+			explicit_extractors_active
+			and polygon.mode == GPUFlowInteractionPolygon.Mode.ABSORB
+			and regime_managed
 		):
+			continue
+		if active_polygons.size() < MAX_INTERACTION_POLYGONS:
 			active_polygons.append(polygon)
 	var data_image := Image.create(
 		INTERACTION_TEXTURE_WIDTH,
@@ -4420,6 +5394,17 @@ func _apply_interaction_geometry() -> void:
 			1.0 if _native_polygon_signed_area(native_vertices) >= 0.0 else -1.0
 		)
 		var bank_drain_sign := _native_bank_drain_sign(polygon.mode, bounds)
+		var extractor_metadata := _basin_extractor_definition(
+			String(polygon.element_id),
+		)
+		var visual_kind := String(extractor_metadata.get(
+			"kind",
+			"field" if polygon.mode == GPUFlowInteractionPolygon.Mode.ABSORB else "obstacle",
+		))
+		var geometry_label := String(extractor_metadata.get(
+			"label",
+			"FIELD" if polygon.mode == GPUFlowInteractionPolygon.Mode.ABSORB else "CITY",
+		))
 		var record_start := polygon_index * INTERACTION_TEXELS_PER_POLYGON
 		data_image.set_pixel(
 			record_start,
@@ -4471,6 +5456,8 @@ func _apply_interaction_geometry() -> void:
 			"bank_connected": absf(bank_drain_sign) > 0.5,
 			"bank_side": _bank_side_name(bank_drain_sign),
 			"intake_direction_pixels": Vector2(0.0, bank_drain_sign),
+			"visual_kind": visual_kind,
+			"label": geometry_label,
 		})
 	if _interaction_data_texture == null:
 		_interaction_data_texture = ImageTexture.create_from_image(data_image)
@@ -4489,6 +5476,13 @@ func _apply_interaction_geometry() -> void:
 		_overlay.call(&"set_interaction_polygons", overlay_definitions)
 	if is_node_ready():
 		interaction_geometry_changed.emit(screen_id, active_polygons.size())
+
+
+func _basin_extractor_definition(element_id: String) -> Dictionary:
+	for definition: Dictionary in BasinBudgetModel.extractor_definitions():
+		if String(definition.get("element_id", "")) == element_id:
+			return definition
+	return {}
 
 
 
@@ -4590,7 +5584,8 @@ func _apply_debug_visibility() -> void:
 
 
 func _defer_trail_recording_until_after_preprocess() -> void:
-	# The head emitter prewarms eight seconds so screens open already populated.
+	# The head emitter prewarms sixteen seconds so low-speed, center-originating
+	# flow opens in a steady spatial distribution rather than an inlet packet.
 	# A child sub-emitter does not age those prewarm emissions in lockstep; if
 	# recording is left on, its pool initially fills with disconnected samples.
 	# Keep storing the head's completed position during prewarm, then begin
@@ -4605,7 +5600,8 @@ func _defer_trail_recording_until_after_preprocess() -> void:
 func _build_particles() -> void:
 	# Each palette color owns one immutable segment pool. Global particle IDs are
 	# interleaved across the seven head emitters, preserving an exact total slot
-	# count and exact amount-ratio threshold while giving every color stable Z.
+	# count while giving every color stable Z. The native emitters always run a
+	# complete cycle; the shader selects evenly phased logical slots.
 	_head_layers.clear()
 	_trail_segment_layers.clear()
 	_process_material_layers.clear()
@@ -4622,7 +5618,6 @@ func _build_particles() -> void:
 	interaction_image.fill(Color(0.0, 0.0, 0.0, 0.0))
 	_interaction_data_texture = ImageTexture.create_from_image(interaction_image)
 	var desired_lifetime: float = clampf(trail_lifetime, 0.1, 8.0)
-	var desired_ratio: float = clampf(flow_rate, 0.0, 1.0)
 	for layer_index in range(PALETTE_LAYER_COUNT):
 		# The child emitter owns immutable, fading motion samples. It must exist
 		# before its head emitter so the parent can address it as a sub-emitter.
@@ -4686,6 +5681,16 @@ func _build_particles() -> void:
 		process_material.set_shader_parameter(
 			&"particle_index_offset", float(layer_index)
 		)
+		process_material.set_shader_parameter(
+			&"particle_slot_count", float(maxi(particle_slots, 1))
+		)
+		process_material.set_shader_parameter(
+			&"active_particle_count",
+			float(_flow_line_target_count(flow_rate))
+		)
+		process_material.set_shader_parameter(
+			&"water_coverage_fraction", clampf(flow_rate, 0.0, 1.0)
+		)
 		process_material.set_shader_parameter(&"force_palette_color", true)
 		process_material.set_shader_parameter(
 			&"forced_palette_color", FLOW_PALETTE[layer_index]
@@ -4697,13 +5702,24 @@ func _build_particles() -> void:
 			else "FlowLineHeads%d" % (layer_index + 1)
 		)
 		head_layer.amount = maxi(_layer_slot_count(layer_index), 1)
-		head_layer.amount_ratio = desired_ratio
-		head_layer.lifetime = 8.0
-		head_layer.preprocess = 8.0
+		# Native amount ratio must remain full. Godot's reduced amount-ratio path
+		# is unsuitable for a continuous low-count source; shader gating selects
+		# the logical population at evenly spaced global phases instead.
+		head_layer.amount_ratio = 1.0
+		head_layer.lifetime = HEAD_EMISSION_CYCLE_SECONDS
+		head_layer.preprocess = (
+			HEAD_PREPROCESS_SECONDS
+			+ float(layer_index)
+			* HEAD_EMISSION_CYCLE_SECONDS
+			/ float(maxi(particle_slots, 1))
+		)
 		head_layer.fixed_fps = PARTICLE_FIXED_FPS
 		head_layer.interpolate = true
 		head_layer.fract_delta = false
-		head_layer.randomness = 0.0
+		# The global slot selector and small per-layer pre-process phase offset
+		# provide an exact deterministic schedule; lifetime randomness would turn
+		# that schedule back into uneven bursts.
+		head_layer.randomness = HEAD_EMISSION_RANDOMNESS
 		head_layer.explosiveness = 0.0
 		head_layer.local_coords = true
 		head_layer.use_fixed_seed = true
@@ -4837,7 +5853,7 @@ func _build_water_render_surface() -> void:
 	var composite_material := ShaderMaterial.new()
 	composite_material.shader = WATER_COMPOSITE_SHADER
 	water_display.material = composite_material
-	water_display.z_index = 0
+	water_display.z_index = WATER_DISPLAY_Z_INDEX
 	water_display.z_as_relative = false
 	add_child(water_display)
 
@@ -4905,7 +5921,8 @@ func _on_leaves_released(
 func _build_overlay() -> void:
 	_overlay = OVERLAY_SCRIPT.new() as Node2D
 	_overlay.name = "ReservoirAndStatusOverlay"
-	_overlay.z_index = 100
+	# Extraction geometry is land infrastructure beneath the visible river.
+	_overlay.z_index = GEOMETRY_OVERLAY_Z_INDEX
 	_overlay.z_as_relative = false
 	_overlay.set(&"stage_index", stage_index)
 	_overlay.set(&"show_status_label", false)
@@ -4915,6 +5932,49 @@ func _build_overlay() -> void:
 		reservoir_radius_pixels
 	)
 	add_child(_overlay)
+
+
+func _build_basin_budget_overlay() -> void:
+	_delta_tide_overlay = BASIN_BUDGET_OVERLAY_SCRIPT.new() as Node2D
+	_delta_tide_overlay.name = "DeltaTideOverlay"
+	_delta_tide_overlay.z_index = TIDE_OVERLAY_Z_INDEX
+	_delta_tide_overlay.z_as_relative = false
+	_delta_tide_overlay.call(&"set_render_roles", true, false, false)
+	add_child(_delta_tide_overlay)
+
+	_basin_budget_canvas = CanvasLayer.new()
+	_basin_budget_canvas.name = "BasinBudgetCanvas"
+	_basin_budget_canvas.layer = 10
+	add_child(_basin_budget_canvas)
+	_basin_budget_overlay = BASIN_BUDGET_OVERLAY_SCRIPT.new() as Node2D
+	_basin_budget_overlay.name = "BasinBudgetOverlay"
+	_basin_budget_overlay.z_index = 0
+	_basin_budget_overlay.z_as_relative = false
+	_basin_budget_overlay.call(&"set_render_roles", false, true, true)
+	_basin_budget_canvas.add_child(_basin_budget_overlay)
+	_configure_basin_budget_overlay()
+
+
+func _configure_basin_budget_overlay() -> void:
+	if _basin_budget_overlay == null and _delta_tide_overlay == null:
+		return
+	var tide_sample_position := (
+		float(_delta_tide_row_index) + _delta_tide_row_fraction
+	)
+	for budget_overlay: Node2D in [_delta_tide_overlay, _basin_budget_overlay]:
+		if budget_overlay == null:
+			continue
+		budget_overlay.call(
+			&"configure",
+			screen_id,
+			_basin_input_rate,
+			_basin_extraction_fraction,
+			_basin_remaining_rate,
+			Array(_regime_snapshot.get("active_states", [])),
+			_delta_tide_normalized_heights,
+			tide_sample_position,
+			_watershed_ai_applied_state,
+		)
 
 
 func _build_stage_title() -> void:
@@ -5206,6 +6266,7 @@ func _fail_temperature_data_load(status: String, message: String) -> bool:
 func _update_model_data_timelines() -> void:
 	_update_watershed_timeline()
 	_update_temperature_timeline()
+	_update_delta_tide_timeline()
 
 
 func _update_temperature_timeline() -> void:
@@ -5238,16 +6299,158 @@ func _update_temperature_timeline() -> void:
 	_apply_water_temperature()
 
 
+func _load_delta_tide_data() -> bool:
+	_delta_tide_heights = PackedFloat32Array()
+	_delta_tide_normalized_heights = PackedFloat32Array()
+	_delta_tide_normalized_velocities = PackedFloat32Array()
+	_delta_tide_data_error = ""
+	_delta_tide_data_status = "NOT_DELTA"
+	_delta_tide_row_index = -1
+	_delta_tide_row_fraction = 0.0
+	_delta_tide_current_height_m = 0.0
+	_delta_tide_current_normalized_height = 0.0
+	_delta_tide_current_normalized_velocity = 0.0
+	if screen_id != &"delta":
+		return false
+	if not FileAccess.file_exists(DELTA_TIDE_DATA_PATH):
+		_delta_tide_data_status = "FILE_NOT_FOUND"
+		_delta_tide_data_error = (
+			"Delta tide data file not found: %s" % DELTA_TIDE_DATA_PATH
+		)
+		push_warning(_delta_tide_data_error)
+		return false
+	var line_number := 0
+	for raw_line in FileAccess.get_file_as_string(
+		DELTA_TIDE_DATA_PATH
+	).split("\n", false):
+		line_number += 1
+		var line := String(raw_line).strip_edges()
+		if line.is_empty() or line.begins_with("#") or line.begins_with("frame"):
+			continue
+		var columns := line.split("\t", false)
+		if columns.size() < 5:
+			return _fail_delta_tide_data_load(
+				"INVALID_ROW",
+				"Delta tide row %d has fewer than five columns." % line_number,
+			)
+		if (
+			not String(columns[0]).is_valid_int()
+			or not String(columns[2]).is_valid_float()
+			or not String(columns[3]).is_valid_float()
+			or not String(columns[4]).is_valid_float()
+		):
+			return _fail_delta_tide_data_load(
+				"INVALID_ROW",
+				"Delta tide row %d has invalid numeric data." % line_number,
+			)
+		var frame_index := int(columns[0])
+		if frame_index != _delta_tide_heights.size():
+			return _fail_delta_tide_data_load(
+				"INVALID_FRAME_SEQUENCE",
+				"Delta tide frame %d should be %d." % [
+					frame_index,
+					_delta_tide_heights.size(),
+				],
+			)
+		var height := float(columns[2])
+		var normalized_height := float(columns[3])
+		var normalized_velocity := float(columns[4])
+		if (
+			not is_finite(height)
+			or not is_finite(normalized_height)
+			or not is_finite(normalized_velocity)
+		):
+			return _fail_delta_tide_data_load(
+				"INVALID_ROW",
+				"Delta tide row %d contains a non-finite value." % line_number,
+			)
+		_delta_tide_heights.append(height)
+		_delta_tide_normalized_heights.append(clampf(normalized_height, 0.0, 1.0))
+		_delta_tide_normalized_velocities.append(clampf(normalized_velocity, -1.0, 1.0))
+	if _delta_tide_heights.size() != DELTA_TIDE_EXPECTED_ROW_COUNT:
+		return _fail_delta_tide_data_load(
+			"INVALID_ROW_COUNT",
+			"Delta tide data has %d rows; expected %d." % [
+				_delta_tide_heights.size(),
+				DELTA_TIDE_EXPECTED_ROW_COUNT,
+			],
+		)
+	_delta_tide_data_status = "READY"
+	_delta_tide_current_height_m = float(_delta_tide_heights[0])
+	_delta_tide_current_normalized_height = float(
+		_delta_tide_normalized_heights[0]
+	)
+	_delta_tide_current_normalized_velocity = float(
+		_delta_tide_normalized_velocities[0]
+	)
+	return true
+
+
+func _fail_delta_tide_data_load(status: String, message: String) -> bool:
+	_delta_tide_heights = PackedFloat32Array()
+	_delta_tide_normalized_heights = PackedFloat32Array()
+	_delta_tide_normalized_velocities = PackedFloat32Array()
+	_delta_tide_data_status = status
+	_delta_tide_data_error = message
+	_delta_tide_row_index = -1
+	_delta_tide_row_fraction = 0.0
+	_delta_tide_current_height_m = 0.0
+	_delta_tide_current_normalized_height = 0.0
+	_delta_tide_current_normalized_velocity = 0.0
+	push_warning(message)
+	return false
+
+
+func _update_delta_tide_timeline() -> void:
+	var row_count := _delta_tide_heights.size()
+	if row_count <= 0:
+		return
+	var year_seconds := maxf(model_year_duration_seconds, 0.001)
+	var year_progress := clampf(
+		_model_year_elapsed_seconds / year_seconds,
+		0.0,
+		0.999999,
+	)
+	var row_position := year_progress * float(row_count)
+	var row_index := mini(floori(row_position), row_count - 1)
+	var following_index := (row_index + 1) % row_count
+	var row_fraction := row_position - floorf(row_position)
+	_delta_tide_row_index = row_index
+	_delta_tide_row_fraction = row_fraction
+	_delta_tide_current_height_m = lerpf(
+		float(_delta_tide_heights[row_index]),
+		float(_delta_tide_heights[following_index]),
+		row_fraction,
+	)
+	_delta_tide_current_normalized_height = lerpf(
+		float(_delta_tide_normalized_heights[row_index]),
+		float(_delta_tide_normalized_heights[following_index]),
+		row_fraction,
+	)
+	_delta_tide_current_normalized_velocity = lerpf(
+		float(_delta_tide_normalized_velocities[row_index]),
+		float(_delta_tide_normalized_velocities[following_index]),
+		row_fraction,
+	)
+	_configure_basin_budget_overlay()
+
+
 func _load_watershed_data() -> bool:
 	_watershed_raw_values = PackedFloat32Array()
 	_watershed_normalized_flow = PackedFloat32Array()
+	_watershed_running_average_flow = PackedFloat32Array()
 	_watershed_scaled_flow = PackedFloat32Array()
 	_watershed_high_variation = PackedByteArray()
 	_watershed_data_river = ""
 	_watershed_data_error = ""
+	_watershed_fog_baseline_mm_day = 0.0
+	_watershed_fog_baseline_normalized = 0.0
+	_morning_fog_pulse_multiplier = 0.0
 	_watershed_row_index = -1
 	_watershed_row_fraction = 0.0
 	_watershed_interpolated_flow_rate = 0.0
+	_watershed_buffered_flow_rate = 0.0
+	_watershed_running_average_sample_count = 0
 
 	if watershed_data_path.is_empty():
 		return false
@@ -5266,6 +6469,16 @@ func _load_watershed_data() -> bool:
 				var token := String(metadata_token)
 				if token.begins_with("river="):
 					_watershed_data_river = token.trim_prefix("river=")
+				elif token.begins_with("fog_baseline_mm_day="):
+					var raw_fog_mm := token.trim_prefix("fog_baseline_mm_day=")
+					if raw_fog_mm.is_valid_float():
+						_watershed_fog_baseline_mm_day = maxf(float(raw_fog_mm), 0.0)
+				elif token.begins_with("fog_baseline_norm="):
+					var raw_fog_norm := token.trim_prefix("fog_baseline_norm=")
+					if raw_fog_norm.is_valid_float():
+						_watershed_fog_baseline_normalized = clampf(
+							float(raw_fog_norm), 0.0, 1.0
+						)
 			continue
 		if line.begins_with("frame"):
 			continue
@@ -5280,8 +6493,8 @@ func _load_watershed_data() -> bool:
 			or not String(columns[4]).is_valid_int()
 		):
 			continue
-		# The pipeline calls this column `cfs`, but Delta currently contains
-		# gauge height in feet. Keep the runtime field unit-neutral.
+		# Column two is atmospheric basin arrival in mm/day. Keep this retained
+		# API field unit-neutral so older controllers can still read raw_value.
 		_watershed_raw_values.append(float(columns[1]))
 		_watershed_normalized_flow.append(
 			clampf(float(columns[2]), 0.0, 1.0)
@@ -5293,8 +6506,18 @@ func _load_watershed_data() -> bool:
 		_watershed_data_error = "Watershed data file has no valid rows: %s" % watershed_data_path
 		push_warning(_watershed_data_error)
 		return false
+	_rebuild_watershed_running_average()
 	if watershed_data_drives_flow_rate:
-		flow_rate = float(_watershed_normalized_flow[0])
+		_morning_fog_pulse_multiplier = _morning_fog_multiplier(
+			_model_minute_of_day
+		)
+		_watershed_buffered_flow_rate = float(
+			_watershed_running_average_flow[0]
+		)
+		_basin_input_rate = _atmospheric_input_with_morning_fog(
+			_watershed_buffered_flow_rate
+		)
+		_recalculate_basin_budget(false)
 	return true
 
 
@@ -5323,12 +6546,29 @@ func _update_watershed_timeline() -> void:
 		if watershed_interpolate_flow_rate
 		else current_normalized
 	)
+	var current_buffered := float(
+		_watershed_running_average_flow[next_row_index]
+	)
+	var following_buffered := float(
+		_watershed_running_average_flow[following_row_index]
+	)
+	_watershed_buffered_flow_rate = (
+		lerpf(current_buffered, following_buffered, row_fraction)
+		if watershed_interpolate_flow_rate
+		else current_buffered
+	)
 	_watershed_row_fraction = row_fraction
 	var row_changed := next_row_index != _watershed_row_index
 	_watershed_row_index = next_row_index
 
 	if watershed_data_drives_flow_rate:
-		flow_rate = clampf(_watershed_interpolated_flow_rate, 0.0, 1.0)
+		_morning_fog_pulse_multiplier = _morning_fog_multiplier(
+			_model_minute_of_day
+		)
+		_basin_input_rate = _atmospheric_input_with_morning_fog(
+			_watershed_buffered_flow_rate
+		)
+		_recalculate_basin_budget(false)
 		if not _process_material_layers.is_empty():
 			_apply_water_rate_parameters()
 
@@ -5343,6 +6583,63 @@ func _update_watershed_timeline() -> void:
 			bool(_watershed_high_variation[_watershed_row_index]),
 			_format_model_date_time(_model_day_index, _model_minute_of_day)
 		)
+
+
+func _morning_fog_multiplier(minute_of_day: int) -> float:
+	if (
+		minute_of_day < MORNING_FOG_START_MINUTE
+		or minute_of_day > MORNING_FOG_END_MINUTE
+	):
+		return 0.0
+	var window_progress := clampf(
+		float(minute_of_day - MORNING_FOG_START_MINUTE)
+		/ float(MORNING_FOG_WINDOW_MINUTES),
+		0.0,
+		1.0,
+	)
+	return sin(window_progress * PI) * MORNING_FOG_PEAK_MULTIPLIER
+
+
+func _rebuild_watershed_running_average() -> void:
+	_watershed_running_average_flow = PackedFloat32Array()
+	var row_count := _watershed_normalized_flow.size()
+	if row_count <= 0:
+		_watershed_running_average_sample_count = 0
+		return
+	_watershed_running_average_sample_count = clampi(
+		roundi(
+			float(row_count)
+			* BASIN_INPUT_RUNNING_AVERAGE_DAYS
+			/ float(MODEL_CALENDAR_DAY_COUNT)
+		),
+		1,
+		row_count,
+	)
+	for row_index in range(row_count):
+		var total := 0.0
+		for sample_offset in range(_watershed_running_average_sample_count):
+			var sample_index := posmod(
+				row_index - sample_offset,
+				row_count,
+			)
+			total += float(_watershed_normalized_flow[sample_index])
+		_watershed_running_average_flow.append(
+			total / float(_watershed_running_average_sample_count)
+		)
+
+
+func _atmospheric_input_with_morning_fog(base_rate: float) -> float:
+	# The 720-point series contains the daily-average fog volume. Replace that
+	# constant component with a smooth dawn pulse whose 24-hour integral is the
+	# same, so the model gains timing without inventing extra annual water.
+	var fog_adjustment := _watershed_fog_baseline_normalized * (
+		_morning_fog_pulse_multiplier - 1.0
+	)
+	return clampf(
+		maxf(base_rate + fog_adjustment, BASIN_INPUT_MINIMUM_RATE),
+		0.0,
+		1.0,
+	)
 
 
 func _advance_model_calendar(delta: float) -> void:

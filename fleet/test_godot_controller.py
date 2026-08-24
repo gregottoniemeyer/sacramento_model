@@ -14,6 +14,41 @@ def completed(returncode=0, stdout="", stderr=""):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_chair_regime_ids_map_absolute_occupancy(self):
+        self.assertEqual(
+            ["ranch", "gold_rush", "tech"],
+            controller.chair_regime_ids([0, 1, 1, 0, 0, 1, 0]),
+        )
+
+    def test_chair_release_restores_kinship(self):
+        self.assertEqual(
+            ["kinship"],
+            controller.chair_regime_ids([0, 0, 0, 0, 0, 0, 0]),
+        )
+
+    def test_watershed_chair_overrides_every_simultaneous_regime(self):
+        self.assertEqual(
+            ["watershed"],
+            controller.chair_regime_ids([1, 1, 1, 1, 1, 1, 1]),
+        )
+        self.assertEqual(
+            ["watershed"],
+            controller.enforce_watershed_exclusivity(["tech", "watershed"]),
+        )
+
+    def test_extractive_regimes_show_geometry_by_default(self):
+        self.assertFalse(controller.default_geometry_visibility(["kinship"]))
+        self.assertTrue(controller.default_geometry_visibility(["ranch"]))
+        self.assertTrue(
+            controller.default_geometry_visibility(["kinship", "tech"])
+        )
+
+    def test_chair_regime_ids_validate_shape_and_binary_values(self):
+        with self.assertRaisesRegex(ValueError, "exactly 7"):
+            controller.chair_regime_ids([0, 0])
+        with self.assertRaisesRegex(ValueError, "must be 0 or 1"):
+            controller.chair_regime_ids([0, 0, 0, 2, 0, 0, 0])
+
     def setUp(self):
         self.original_operator = controller.CURRENT_OPERATOR
         self.original_locality = {
@@ -349,6 +384,85 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(0, exit_context.exception.code)
         perform.assert_called_once_with("21", "start")
 
+    def test_start_replays_latest_watershed_decision_without_new_ai(self):
+        self.configure_studio()
+        argv = ["godot_controller.py", "start", "21"]
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(
+                controller,
+                "configure_operator",
+                return_value={
+                    "name": "studio",
+                    "ip": "196.168.50.51",
+                    "local_target": None,
+                },
+            ):
+                with mock.patch.object(
+                    controller,
+                    "load_controller_state",
+                    return_value=({"watershed"}, False),
+                ):
+                    with mock.patch.object(
+                        controller,
+                        "perform",
+                        return_value=("196.168.50.21", True, "started"),
+                    ):
+                        with mock.patch.object(
+                            controller,
+                            "send_fleet_regimes",
+                            return_value=[("196.168.50.21", 20, 2)],
+                        ):
+                            with mock.patch.object(
+                                controller,
+                                "run_watershed_ai_once",
+                                return_value="APPLIED replay",
+                            ) as replay:
+                                with mock.patch("builtins.print"):
+                                    with self.assertRaises(SystemExit) as raised:
+                                        controller.main()
+        self.assertEqual(raised.exception.code, 0)
+        replay.assert_called_once_with(controller.WATERSHED_AI_LATEST_DECISION)
+
+    def test_missing_saved_watershed_decision_marks_start_incomplete(self):
+        self.configure_studio()
+        argv = ["godot_controller.py", "start", "21"]
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(
+                controller,
+                "configure_operator",
+                return_value={
+                    "name": "studio",
+                    "ip": "196.168.50.51",
+                    "local_target": None,
+                },
+            ):
+                with mock.patch.object(
+                    controller,
+                    "load_controller_state",
+                    return_value=({"watershed"}, False),
+                ):
+                    with mock.patch.object(
+                        controller,
+                        "perform",
+                        return_value=("196.168.50.21", True, "started"),
+                    ):
+                        with mock.patch.object(
+                            controller,
+                            "send_fleet_regimes",
+                            return_value=[("196.168.50.21", 20, 2)],
+                        ):
+                            with mock.patch.object(
+                                controller,
+                                "run_watershed_ai_once",
+                                side_effect=ValueError("saved decision not found"),
+                            ):
+                                with mock.patch("builtins.print") as output:
+                                    with self.assertRaises(SystemExit) as raised:
+                                        controller.main()
+        self.assertEqual(raised.exception.code, 1)
+        rendered = " ".join(str(call) for call in output.call_args_list)
+        self.assertIn("Watershed replay verification", rendered)
+
     def test_rsync_commands_exactly_cover_project_root_and_fleet_subtree(self):
         self.configure_studio()
         computer = controller.COMPUTERS["21"]
@@ -363,6 +477,8 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("-rlcin", project_command)
         self.assertIn("--delete", project_command)
         self.assertIn("fleet/", project_command)
+        for path in controller.PRESERVED_RUNTIME_PATHS:
+            self.assertIn(f"/{path}/", project_command)
         self.assertTrue(project_command[-2].endswith("/"))
         self.assertTrue(project_command[-1].endswith("/code/"))
         fleet_command = controller._rsync_command(
@@ -398,6 +514,28 @@ class ControllerTests(unittest.TestCase):
             (fleet / "README.md").unlink()
             with self.assertRaisesRegex(ValueError, "fleet tools are incomplete"):
                 controller.validate_deploy_source(["11"])
+
+    def test_required_project_files_cover_basin_budget_runtime(self):
+        required = set(
+            controller.required_project_files(
+                {"stages": tuple(controller.STAGE_SCREEN_IDS)}
+            )
+        )
+        self.assertTrue(
+            {
+                "flow/basin_budget.gd",
+                "flow/flow_rectangle_obstacle.gd",
+                "flow/gpu_stage/basin_budget_overlay.gd",
+                "flow/data/water_pipeline/shasta_720.txt",
+                "flow/data/water_pipeline/mccloud_720.txt",
+                "flow/data/water_pipeline/cottonwood_720.txt",
+                "flow/data/water_pipeline/mill_creek_720.txt",
+                "flow/data/water_pipeline/feather_720.txt",
+                "flow/data/water_pipeline/american_720.txt",
+                "flow/data/water_pipeline/delta_720.txt",
+                "flow/data/tide/sf_bay_9414290_tide_720.txt",
+            }.issubset(required)
+        )
 
     def test_dry_run_distinguishes_difference_from_transport_error(self):
         self.configure_studio()
@@ -492,6 +630,163 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(2, exit_context.exception.code)
         load.assert_called_once_with(require_exists=True)
         send.assert_not_called()
+
+    def test_exclusive_watershed_transition_matrix(self):
+        cases = (
+            (set(), ["watershed"], True),
+            ({"tech"}, ["watershed"], True),
+            ({"tech", "watershed"}, ["watershed"], True),
+            ({"watershed"}, ["watershed"], False),
+            ({"tech"}, ["tech", "watershed"], False),
+            ({"watershed"}, [], False),
+        )
+        for previous, next_ids, expected in cases:
+            with self.subTest(previous=previous, next_ids=next_ids):
+                self.assertEqual(
+                    expected,
+                    controller.is_exclusive_watershed_activation(previous, next_ids),
+                )
+
+    def test_fresh_watershed_activation_orders_send_save_then_one_ai_call(self):
+        self.configure_studio()
+        events = []
+        argv = ["godot_controller.py", "set", "--regime", "watershed"]
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(
+                controller,
+                "configure_operator",
+                return_value={
+                    "name": "studio",
+                    "ip": "196.168.50.51",
+                    "local_target": None,
+                },
+            ):
+                with mock.patch.object(
+                    controller,
+                    "load_controller_state",
+                    return_value=({"tech"}, False),
+                ):
+                    with mock.patch.object(
+                        controller,
+                        "validate_watershed_ai_runtime",
+                        side_effect=lambda: events.append("ready"),
+                    ):
+                        with mock.patch.object(
+                            controller,
+                            "send_fleet_regimes",
+                            side_effect=lambda *_args, **_kwargs: (
+                                events.append("send")
+                                or [("196.168.50.11", 10, 1)]
+                            ),
+                        ):
+                            with mock.patch.object(
+                                controller,
+                                "save_controller_state",
+                                side_effect=lambda *_args: events.append("save"),
+                            ):
+                                with mock.patch.object(
+                                    controller,
+                                    "run_watershed_ai_once",
+                                    side_effect=lambda: events.append("ai") or "APPLIED AI",
+                                ) as run_ai:
+                                    with mock.patch("builtins.print"):
+                                        controller.main()
+        self.assertEqual(events, ["ready", "send", "save", "ai"])
+        run_ai.assert_called_once_with()
+
+    def test_duplicate_watershed_set_spends_no_ai_call(self):
+        self.configure_studio()
+        argv = ["godot_controller.py", "set", "--regime", "watershed"]
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(
+                controller,
+                "configure_operator",
+                return_value={
+                    "name": "studio",
+                    "ip": "196.168.50.51",
+                    "local_target": None,
+                },
+            ):
+                with mock.patch.object(
+                    controller,
+                    "load_controller_state",
+                    return_value=({"watershed"}, False),
+                ):
+                    with mock.patch.object(
+                        controller,
+                        "send_fleet_regimes",
+                        return_value=[("196.168.50.11", 10, 1)],
+                    ):
+                        with mock.patch.object(controller, "save_controller_state"):
+                            with mock.patch.object(
+                                controller,
+                                "run_watershed_ai_once",
+                            ) as run_ai:
+                                with mock.patch("builtins.print"):
+                                    controller.main()
+        run_ai.assert_not_called()
+
+    def test_ai_failure_leaves_watershed_saved_and_returns_nonzero(self):
+        self.configure_studio()
+        argv = ["godot_controller.py", "set", "--regime", "watershed"]
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(
+                controller,
+                "configure_operator",
+                return_value={
+                    "name": "studio",
+                    "ip": "196.168.50.51",
+                    "local_target": None,
+                },
+            ):
+                with mock.patch.object(
+                    controller,
+                    "load_controller_state",
+                    return_value=({"tech"}, False),
+                ):
+                    with mock.patch.object(controller, "validate_watershed_ai_runtime"):
+                        with mock.patch.object(
+                            controller,
+                            "send_fleet_regimes",
+                            return_value=[("196.168.50.11", 10, 1)],
+                        ) as send:
+                            with mock.patch.object(
+                                controller,
+                                "save_controller_state",
+                            ) as save:
+                                with mock.patch.object(
+                                    controller,
+                                    "run_watershed_ai_once",
+                                    side_effect=OSError("model unavailable"),
+                                ):
+                                    with mock.patch("builtins.print") as output:
+                                        with self.assertRaises(SystemExit) as raised:
+                                            controller.main()
+        self.assertEqual(raised.exception.code, 1)
+        send.assert_called_once()
+        save.assert_called_once_with(["watershed"], True)
+        rendered = " ".join(str(call) for call in output.call_args_list)
+        self.assertIn("Watershed is active and saved", rendered)
+
+    def test_watershed_ai_subprocess_uses_current_phase_without_shell(self):
+        self.configure_studio()
+        with mock.patch.object(controller, "validate_watershed_ai_runtime"):
+            with mock.patch.object(
+                controller,
+                "run_local",
+                return_value=completed(stdout="APPLIED one decision\n"),
+            ) as run:
+                message = controller.run_watershed_ai_once()
+        self.assertEqual(message, "APPLIED one decision")
+        command = run.call_args.args[0]
+        self.assertEqual(str(controller.WATERSHED_AI_EXECUTABLE), command[0])
+        self.assertIn("--current", command)
+        self.assertIn("--live", command)
+        self.assertNotIn("--frame", command)
+        self.assertEqual(
+            controller.WATERSHED_AI_TIMEOUT_SECONDS,
+            run.call_args.kwargs["timeout"],
+        )
 
     def test_deploy_rejects_duplicate_targets_defensively(self):
         self.configure_studio()
@@ -611,14 +906,18 @@ class ControllerTests(unittest.TestCase):
         self.assertIn(controller.COMPUTERS["11"]["project"], remote.call_args.args[1])
         copy.assert_not_called()
 
-    def test_prepare_stage_imports_before_success(self):
+    def test_prepare_stage_imports_before_preserving_runtime_trees(self):
         self.configure_studio()
         source = Path("/source/project")
         stage, backup = controller.deployment_paths(
             controller.COMPUTERS["11"],
             "0123456789ab",
         )
-        with mock.patch.object(controller, "ssh", return_value=completed()):
+        with mock.patch.object(
+            controller,
+            "ssh",
+            return_value=completed(),
+        ) as remote:
             with mock.patch.object(controller, "_rsync_project", return_value=completed()):
                 with mock.patch.object(
                     controller,
@@ -631,6 +930,23 @@ class ControllerTests(unittest.TestCase):
                         return_value=(True, "cache ready"),
                     ) as imported:
                         ok, message = controller._prepare_stage("11", source, stage, backup)
+        prepare_command = remote.call_args_list[0].args[1]
+        preserve_command = remote.call_args_list[1].args[1]
+        self.assertNotIn("cp -a", prepare_command)
+        for path in controller.PRESERVED_RUNTIME_PATHS:
+            self.assertIn(
+                controller.posixpath.join(
+                    controller.COMPUTERS["11"]["project"],
+                    path,
+                ),
+                preserve_command,
+            )
+            self.assertIn(controller.posixpath.join(stage, path), preserve_command)
+        self.assertEqual(
+            len(controller.PRESERVED_RUNTIME_PATHS),
+            preserve_command.count("cp -a"),
+        )
+        self.assertEqual(2, remote.call_count)
         self.assertTrue(ok)
         self.assertIn("cache ready", message)
         imported.assert_called_once_with("11", stage)

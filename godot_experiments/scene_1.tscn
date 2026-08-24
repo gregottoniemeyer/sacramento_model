@@ -31,6 +31,7 @@ script = ExtResource("1_stage")
 model_id = &"mount_shasta_flow"
 screen_id = &"mount_shasta"
 stage_title = "Mount Shasta"
+debug_visible = true
 regime_profile_physics_enabled = true
 model_start_day_index = 181
 watershed_data_path = "res://flow/data/water_pipeline/shasta_720.txt"

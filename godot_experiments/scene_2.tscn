@@ -11,6 +11,7 @@ stage_index = 1
 model_id = &"mccloud_pit_flow"
 screen_id = &"mccloud_pit"
 stage_title = "McCloud-Pit Rivers"
+debug_visible = true
 regime_profile_physics_enabled = true
 model_start_day_index = 181
 watershed_data_path = "res://flow/data/water_pipeline/mccloud_720.txt"

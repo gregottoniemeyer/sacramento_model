@@ -5,6 +5,13 @@ render_mode keep_data, disable_force;
 // Positions are native 1920 x 1080 stage pixels, with Godot's Y-down axis.
 uniform vec2 stage_size = vec2(1920.0, 1080.0);
 uniform float particle_slot_count = 300.0;
+// Native amount_ratio remains one so Godot schedules the whole emission cycle.
+// This logical count selects evenly phased global slots in the shader instead
+// of accepting Godot's batch-prone low-count amount-ratio selection.
+uniform float active_particle_count = 300.0;
+// The source band begins at the vertical center and expands symmetrically as
+// basin input rises. This affects only initial/recycled head placement.
+uniform float water_coverage_fraction = 0.5;
 // A production stage can split the global head population across several
 // independent draw layers. Defaults preserve the prototype's one-pool INDEX.
 uniform float particle_index_stride = 1.0;
@@ -82,10 +89,10 @@ uniform float edge_turbulence_inward_ratio = 0.75;
 // A bank-connected ABSORB polygon is a lateral field intake. Eligible heads
 // bend toward its river-facing mouth, then continue through the field and leave
 // the viewport vertically instead of teleporting or stopping in the channel.
-uniform float bank_field_suction_reach_pixels = 300.0;
-uniform float bank_field_suction_crossflow_ratio = 1.60;
+uniform float bank_field_suction_reach_pixels = 720.0;
+uniform float bank_field_suction_crossflow_ratio = 3.0;
 uniform float bank_field_suction_streamwise_ratio = 0.0;
-uniform float bank_field_min_withdrawal_speed_pixels = 540.0;
+uniform float bank_field_min_withdrawal_speed_pixels = 720.0;
 uniform float bank_field_capture_depth_pixels = 18.0;
 
 const float STATE_FLOWING = 0.0;
@@ -267,62 +274,91 @@ vec4 line_color(float selector) {
 	return vec4(0.118, 0.565, 1.0, particle_alpha);
 }
 
+bool flow_slot_enabled(float particle_index) {
+	float slot_count = max(floor(particle_slot_count + 0.5), 1.0);
+	float active_count = clamp(
+		floor(active_particle_count + 0.5),
+		0.0,
+		slot_count
+	);
+	if (active_count <= 0.0 || particle_index >= slot_count) {
+		return false;
+	}
+	// Pick exactly active_count slots, distributed across the complete global
+	// identity range. Since native emission phase follows local INDEX, this
+	// converts the seven color pools into one evenly interleaved time sequence.
+	float interval_before = floor(
+		particle_index * active_count / slot_count
+	);
+	float interval_after = floor(
+		(particle_index + 1.0) * active_count / slot_count
+	);
+	return interval_after > interval_before;
+}
+
+vec2 centered_inlet_y_range() {
+	float full_min_y = clamp(
+		min(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
+		0.0,
+		stage_size.y
+	);
+	float full_max_y = clamp(
+		max(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
+		full_min_y,
+		stage_size.y
+	);
+	float center_y = (full_min_y + full_max_y) * 0.5;
+	float half_height = (
+		(full_max_y - full_min_y)
+		* clamp(water_coverage_fraction, 0.0, 1.0)
+		* 0.5
+	);
+	return vec2(center_y - half_height, center_y + half_height);
+}
+
 void start() {
 	float particle_index = (
 		float(INDEX) * particle_index_stride + particle_index_offset
 	);
-	float lane_seed = hash11(particle_index + stage_phase * 19.0);
-	float style_seed = hash11(particle_index * 1.913 + stage_phase * 31.0);
-	float enabled_slot_count = ceil(
-		max(particle_slot_count, 1.0) * clamp(AMOUNT_RATIO, 0.0, 1.0)
-	);
 
-	// Custom particle shaders must apply GPUParticles2D.amount_ratio themselves.
 	// Clear rejected slots so a later runtime increase starts them cleanly at the
-	// inlet instead of reconnecting an old head position.
-	bool slot_enabled = (
-		AMOUNT_RATIO > 0.0 && particle_index < enabled_slot_count
-	);
+	// inlet instead of reconnecting an old head position. Enabled cold starts are
+	// initialized in process(), which is also the direct logical recycle path.
+	bool slot_enabled = flow_slot_enabled(particle_index);
 	if (!slot_enabled) {
 		CUSTOM = vec4(0.0);
 		VELOCITY = vec3(0.0);
 		ACTIVE = false;
 	}
+}
 
+void process() {
+	float particle_index = (
+		float(INDEX) * particle_index_stride + particle_index_offset
+	);
 	// keep_data lets a head survive the emitter's normal lifetime boundary.
-	// CUSTOM.x is positive after first initialization, so later lifetime
-	// restarts retain its simulation state; visible segments live independently.
-	if (slot_enabled && CUSTOM.x <= 0.0) {
-		// TRANSFORM[2].w is invisible in the 2D renderer and survives logical
-		// recycling. It varies the inlet lane per lifecycle without CPU readback.
+	// Cold starts and completed logical recycles share this one initialization
+	// path, so a head returns immediately after its old trail has faded instead
+	// of waiting for—and batching on—the next native emission cycle.
+	if (CUSTOM.x <= 0.0) {
 		float lifecycle_generation = max(TRANSFORM[2].w, 0.0);
-		// Ordinary left-edge inlets vary their Y lane after each completed
-		// lifecycle too. A reservoir-held head still owns its slot until release,
-		// but once any other head recycles it can refill a formerly starved band
-		// instead of returning forever to one fixed horizontal channel.
-		lane_seed = hash11(
+		float lane_seed = hash11(
 			particle_index
 			+ stage_phase * 19.0
 			+ lifecycle_generation * 53.137
+		);
+		float style_seed = hash11(
+			particle_index * 1.913 + stage_phase * 31.0
 		);
 		TRANSFORM = mat4(1.0);
 		// This invisible basis component owns the reservoir layout generation.
 		// It survives normal 2D transform updates and is refreshed on admission.
 		TRANSFORM[1].z = reservoir_geometry_revision;
 		vec2 initial_direction = vec2(1.0, 0.0);
-		float inlet_min_y = clamp(
-			min(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
-			0.0,
-			stage_size.y
-		);
-		float inlet_max_y = clamp(
-			max(shoreline_inlet_y_range.x, shoreline_inlet_y_range.y),
-			inlet_min_y,
-			stage_size.y
-		);
+		vec2 inlet_y_range = centered_inlet_y_range();
 		TRANSFORM[3].xy = vec2(
 			-18.0,
-			mix(inlet_min_y, inlet_max_y, lane_seed)
+			mix(inlet_y_range.x, inlet_y_range.y, lane_seed)
 		);
 		// TRANSFORM[2].xy is unused by 2D drawing. Keep the previous completed
 		// head position there so a segment also covers Godot's pre-process
@@ -346,12 +382,6 @@ void start() {
 			STATE_FLOWING
 		);
 	}
-}
-
-void process() {
-	float particle_index = (
-		float(INDEX) * particle_index_stride + particle_index_offset
-	);
 	CUSTOM.y += DELTA;
 	float style_seed = hash11(particle_index * 1.913 + stage_phase * 31.0);
 	// Orbit placement must be independent of the inlet-lane seed in CUSTOM.z.
@@ -378,13 +408,16 @@ void process() {
 		float trail_duration = max(trail_lifetime_seconds, 0.01);
 		float recycle_age = -CUSTOM.w;
 		if (recycle_age >= trail_duration + RECYCLE_SAFETY_SECONDS) {
-			// This slot's previous segment set has now faded. Clearing CUSTOM.x
-			// makes start() initialize it despite keep_data on its next emission.
+			// This slot's previous segment set has now faded. Clear its state but
+			// keep it active: process() initializes the next inlet lifecycle on the
+			// following frame without waiting for a native emitter cycle.
 			float next_lifecycle_generation = TRANSFORM[2].w + 1.0;
 			CUSTOM = vec4(0.0);
 			TRANSFORM[2].w = next_lifecycle_generation;
 			VELOCITY = vec3(0.0);
-			ACTIVE = false;
+			if (!flow_slot_enabled(particle_index)) {
+				ACTIVE = false;
+			}
 		} else {
 			vec2 exit_point = TRANSFORM[3].xy;
 			float exit_speed = base_speed * mix(
@@ -431,7 +464,10 @@ void process() {
 			float next_lifecycle_generation = TRANSFORM[2].w + 1.0;
 			CUSTOM = vec4(0.0);
 			TRANSFORM[2].w = next_lifecycle_generation;
-			ACTIVE = false;
+			VELOCITY = vec3(0.0);
+			if (!flow_slot_enabled(particle_index)) {
+				ACTIVE = false;
+			}
 		}
 	}
 

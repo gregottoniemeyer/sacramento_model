@@ -2,11 +2,12 @@ extends Node
 ## Process-persistent authority for the seven historical water regimes.
 ##
 ## The active set survives current-scene replacement and is intentionally
-## independent of river identity. Keyboard testing and future controller code
-## both mutate this one shared state so several regimes may be active at once.
+## independent of river identity. Several historical regimes may be active at
+## once; Watershed is the exclusive optimize-or-bust state and clears the rest.
 
 signal regimes_changed(state: Dictionary)
 
+const BasinBudgetModel := preload("res://flow/basin_budget.gd")
 const PROFILE_TEXT_PATH := "res://regime_feature_profiles.txt"
 const PROFILE_SCHEMA_VERSION := "2"
 const RIVER_PROFILE_SCHEMA_VERSION := "2"
@@ -113,8 +114,11 @@ const REGIME_IDS: Array[StringName] = [
 	&"tech",
 	&"watershed",
 ]
+const WATERSHED_REGIME_INDEX := 6
 
-var _active := PackedByteArray([0, 0, 0, 0, 0, 0, 0])
+# Open in the non-extractive Kinship state. A valid chair packet replaces this
+# with an absolute seven-regime state as soon as the hardware reports.
+var _active := PackedByteArray([1, 0, 0, 0, 0, 0, 0])
 var _revision: int = 0
 var _profiles_by_id: Dictionary = {}
 var _profile_diagnostics: Array[String] = []
@@ -152,7 +156,12 @@ func reload_profiles(publish_snapshot: bool = true) -> bool:
 func toggle_regime(index: int) -> bool:
 	if not _valid_index(index):
 		return false
-	_active[index] = 0 if _active[index] != 0 else 1
+	var activating := _active[index] == 0
+	if activating and index == WATERSHED_REGIME_INDEX:
+		_active.fill(0)
+	elif activating and _active[WATERSHED_REGIME_INDEX] != 0:
+		_active[WATERSHED_REGIME_INDEX] = 0
+	_active[index] = 1 if activating else 0
 	_publish_change()
 	return true
 
@@ -161,9 +170,14 @@ func set_regime_active(index: int, active: bool) -> bool:
 	if not _valid_index(index):
 		return false
 	var next_value := 1 if active else 0
-	if _active[index] == next_value:
-		return true
+	var before := _active.duplicate()
+	if active and index == WATERSHED_REGIME_INDEX:
+		_active.fill(0)
+	elif active and _active[WATERSHED_REGIME_INDEX] != 0:
+		_active[WATERSHED_REGIME_INDEX] = 0
 	_active[index] = next_value
+	if _active == before:
+		return true
 	_publish_change()
 	return true
 
@@ -180,6 +194,9 @@ func set_active_names(names: Array) -> bool:
 		if index < 0:
 			return false
 		next_active[index] = 1
+	if next_active[WATERSHED_REGIME_INDEX] != 0:
+		next_active.fill(0)
+		next_active[WATERSHED_REGIME_INDEX] = 1
 	if next_active == _active:
 		return true
 	_active = next_active
@@ -197,6 +214,9 @@ func set_active_indices(indices: Array) -> bool:
 		if not _valid_index(index):
 			return false
 		next_active[index] = 1
+	if next_active[WATERSHED_REGIME_INDEX] != 0:
+		next_active.fill(0)
+		next_active[WATERSHED_REGIME_INDEX] = 1
 	if next_active == _active:
 		return true
 	_active = next_active
@@ -237,6 +257,10 @@ func snapshot() -> Dictionary:
 					profile.get("schedule", {})
 				).duplicate(true)
 				active_profiles[String(regime_id)] = _profile_snapshot(profile)
+	var extraction_breakdown := BasinBudgetModel.extraction_breakdown(active_states)
+	var total_extraction_fraction := BasinBudgetModel.total_extraction_fraction(
+		active_states
+	)
 	return {
 		"regime_names": REGIME_NAMES.duplicate(),
 		"regime_ids": REGIME_IDS.duplicate(),
@@ -245,6 +269,9 @@ func snapshot() -> Dictionary:
 		"active_names": active_names,
 		"active_ids": active_ids,
 		"active_count": active_indices.size(),
+		"extraction_breakdown": extraction_breakdown,
+		"total_extraction_fraction": total_extraction_fraction,
+		"total_extraction_percent": total_extraction_fraction * 100.0,
 		"revision": _revision,
 		"scope": "GODOT_PROCESS",
 		"profile_path": PROFILE_TEXT_PATH,

@@ -125,6 +125,18 @@ func _run() -> void:
 				Array(regime_snapshot.get("active_indices", [])) == [0],
 				"The bus must apply Kinship directly to persistent ModelRegimes.",
 			)
+			model_regimes.call(&"set_active_indices", [1, 6])
+			regime_snapshot = model_regimes.call(&"snapshot")
+			_expect(
+				Array(regime_snapshot.get("active_indices", [])) == [6],
+				"Watershed must clear every simultaneously requested regime.",
+			)
+			model_regimes.call(&"set_regime_active", 1, true)
+			regime_snapshot = model_regimes.call(&"snapshot")
+			_expect(
+				Array(regime_snapshot.get("active_indices", [])) == [1],
+				"Leaving Watershed must clear it before activating another regime.",
+			)
 			model_regimes.call(&"clear_regimes")
 		var submitted: bool = bool(bus.call(
 			&"submit_packet",

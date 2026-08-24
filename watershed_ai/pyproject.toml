@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "watercouncil-watershed-ai"
+version = "0.2.0"
+description = "Seasonal OpenAI Agents SDK water-budget optimizer for the Water Council"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openai-agents==0.22.0",
+  "pydantic==2.13.4",
+]
+
+[project.scripts]
+watercouncil-ai = "watercouncil_ai.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

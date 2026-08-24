@@ -2,6 +2,7 @@
 """Control and deploy the Water Council Godot project across the four-Mac fleet."""
 
 import argparse
+import importlib.util
 import json
 import os
 import posixpath
@@ -89,19 +90,39 @@ FONT_CACHE_RELATIVE_PATH = (
     "BarlowCondensed-Medium.ttf-55fe546e141a6200e28c93d92a23a9e8.fontdata"
 )
 REQUIRED_GLOBAL_CLASSES = (
+    "BasinBudget",
+    "BasinBudgetOverlay",
     "FlowMath",
+    "FlowRectangleObstacle",
     "FlowReservoir",
     "GPUFlowInteractionPolygon",
     "GPUFlowStage2D",
     "GPULeaf2D",
     "GPUSalmon2D",
 )
-PROJECT_SOURCE_DIR = Path(__file__).resolve().parents[1] / "godot_experiments"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_SOURCE_DIR = REPOSITORY_ROOT / "godot_experiments"
 FLEET_SOURCE_DIR = Path(__file__).resolve().parent
+WATERSHED_AI_EXECUTABLE = (
+    REPOSITORY_ROOT / "watershed_ai/.venv/bin/watercouncil-ai"
+)
+WATERSHED_AI_LATEST_DECISION = (
+    REPOSITORY_ROOT / "watershed_ai/runlogs/latest-decision.json"
+)
+WATERSHED_AI_TIMEOUT_SECONDS = 300
+TELEMETRY_DIR = REPOSITORY_ROOT / "telemetry"
+CHAIR_SENSOR_MODULE_PATH = TELEMETRY_DIR / "controller.py"
+CHAIR_POLL_SECONDS = 0.05
+PRESERVED_RUNTIME_PATHS = (
+    "telemetry",
+    "watershed_ai",
+)
 PROJECT_DEPLOY_EXCLUDES = (
-    # fleet/ is synchronized and verified independently. Excluding it here
-    # lets the project-root --delete remove every other retired file.
+    # fleet/ is synchronized and verified independently. The runtime paths are
+    # copied from the installed tree into each atomic stage before this mirror
+    # runs, then excluded so project cleanup cannot remove or modify them.
     "fleet/",
+    *(f"/{path}/" for path in PRESERVED_RUNTIME_PATHS),
     ".godot/",
     ".DS_Store",
     "godot-remote.log",
@@ -309,6 +330,9 @@ def required_project_files(computer: dict) -> list[str]:
         "dual_stage_host.tscn",
         "regime_feature_profiles.txt",
         "flow/flow_control_bus.gd",
+        "flow/basin_budget.gd",
+        "flow/flow_rectangle_obstacle.gd",
+        "flow/gpu_stage/basin_budget_overlay.gd",
         "flow/model_regimes.gd",
         "flow/model_timeline.gd",
         "flow/data/regimes/kinship.txt",
@@ -317,7 +341,15 @@ def required_project_files(computer: dict) -> list[str]:
         "flow/data/regimes/water_projects.txt",
         "flow/data/regimes/hydropower.txt",
         "flow/data/regimes/tech.txt",
+        "flow/data/water_pipeline/shasta_720.txt",
+        "flow/data/water_pipeline/mccloud_720.txt",
+        "flow/data/water_pipeline/cottonwood_720.txt",
+        "flow/data/water_pipeline/mill_creek_720.txt",
+        "flow/data/water_pipeline/feather_720.txt",
+        "flow/data/water_pipeline/american_720.txt",
+        "flow/data/water_pipeline/delta_720.txt",
         "flow/data/water_pipeline/water_temperature_all_rivers_720.txt",
+        "flow/data/tide/sf_bay_9414290_tide_720.txt",
         *(f"scene_{stage}.tscn" for stage in computer["stages"]),
     ]
 
@@ -575,7 +607,13 @@ def regime_destinations() -> list[str]:
     return [destination for destination, _screens in regime_destination_specs()]
 
 
+def enforce_watershed_exclusivity(regime_ids: list[str]) -> list[str]:
+    """Watershed is an optimize-or-bust state and replaces every other regime."""
+    return ["watershed"] if "watershed" in regime_ids else list(regime_ids)
+
+
 def regime_indices(regime_ids: list[str]) -> list[int]:
+    regime_ids = enforce_watershed_exclusivity(regime_ids)
     if len(set(regime_ids)) != len(regime_ids):
         raise ValueError("duplicate --regime values are not allowed")
     known_ids = [regime_id for regime_id, _display_name in REGIMES]
@@ -583,6 +621,54 @@ def regime_indices(regime_ids: list[str]) -> list[int]:
     if unknown:
         raise ValueError(f"unknown regime(s): {', '.join(unknown)}")
     return sorted(known_ids.index(regime_id) for regime_id in regime_ids)
+
+
+def is_exclusive_watershed_activation(
+    previous_regime_ids: set[str],
+    next_regime_ids: list[str],
+) -> bool:
+    return set(next_regime_ids) == {"watershed"} and previous_regime_ids != {
+        "watershed"
+    }
+
+
+def validate_watershed_ai_runtime(decision_path: Optional[Path] = None) -> None:
+    if current_operator()["name"] != "studio":
+        raise ValueError(
+            "automatic Watershed AI activation is available only from the "
+            "studio controller at 196.168.50.51"
+        )
+    if not WATERSHED_AI_EXECUTABLE.is_file() or not os.access(
+        WATERSHED_AI_EXECUTABLE,
+        os.X_OK,
+    ):
+        raise ValueError(
+            "Watershed AI environment is not installed; complete the one-time "
+            "setup in watershed_ai/.venv before activating Watershed"
+        )
+    if decision_path is not None and not decision_path.is_file():
+        raise ValueError(
+            f"saved Watershed AI decision not found: {decision_path}"
+        )
+
+
+def run_watershed_ai_once(decision_path: Optional[Path] = None) -> str:
+    """Run one studio-side decision, or replay one without buying a new turn."""
+    validate_watershed_ai_runtime(decision_path)
+    command = [
+        str(WATERSHED_AI_EXECUTABLE),
+        "--project-root",
+        str(REPOSITORY_ROOT),
+        "--live",
+    ]
+    if decision_path is None:
+        command.append("--current")
+    else:
+        command.extend(["--decision", str(decision_path)])
+    result = run_local(command, timeout=WATERSHED_AI_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        raise OSError(error_message(result))
+    return result.stdout.strip()
 
 
 def cli_boolean(value: str) -> bool:
@@ -600,6 +686,7 @@ def send_fleet_regimes(
     target_names=None,
     geometry_visible: Optional[bool] = None,
 ) -> list[tuple[str, int, int]]:
+    regime_ids = enforce_watershed_exclusivity(regime_ids)
     indices = regime_indices(regime_ids)
     request_id = uuid.uuid4().hex
     changes = {"regimes.active_indices": indices}
@@ -749,6 +836,7 @@ def _state_document(
     regime_ids: list[str],
     geometry_visible: Optional[bool],
 ) -> dict:
+    regime_ids = enforce_watershed_exclusivity(regime_ids)
     regime_indices(regime_ids)
     requested_ids = set(regime_ids)
     ordered_ids = [
@@ -785,7 +873,7 @@ def load_controller_state(
         geometry_visible = document.get("debug_geometry_visible")
         if geometry_visible is not None and not isinstance(geometry_visible, bool):
             raise ValueError("debug_geometry_visible must be true or false")
-        return set(regime_ids), geometry_visible
+        return set(enforce_watershed_exclusivity(regime_ids)), geometry_visible
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise ValueError(f"invalid controller state {REGIME_STATE_PATH}: {error}") from error
 
@@ -847,6 +935,129 @@ def print_regime_catalog() -> None:
         print(f"{index}: {regime_id:<16} {display_name}")
 
 
+def load_chair_sensor_module(module_path: Path = CHAIR_SENSOR_MODULE_PATH):
+    """Load the occupancy model without starting its UDP publisher."""
+    if not module_path.is_file():
+        raise ValueError(
+            f"chair telemetry module not found: {module_path}; "
+            "install telemetry on the Governator first"
+        )
+    specification = importlib.util.spec_from_file_location(
+        "water_council_chair_sensor",
+        module_path,
+    )
+    if specification is None or specification.loader is None:
+        raise ValueError(f"could not load chair telemetry module: {module_path}")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    if getattr(module, "NUM_CHAIRS", None) != len(REGIMES):
+        raise ValueError(
+            f"chair telemetry defines {getattr(module, 'NUM_CHAIRS', None)!r} "
+            f"chairs; expected {len(REGIMES)}"
+        )
+    if not callable(getattr(module, "SensorSource", None)):
+        raise ValueError(f"chair telemetry has no SensorSource: {module_path}")
+    return module
+
+
+def chair_regime_ids(chairs) -> list[str]:
+    """Map absolute chair flags to regimes; release always restores Kinship."""
+    if not isinstance(chairs, (list, tuple)) or len(chairs) != len(REGIMES):
+        raise ValueError(f"chair state must contain exactly {len(REGIMES)} flags")
+    normalized = []
+    for index, occupied in enumerate(chairs, start=1):
+        if not isinstance(occupied, (bool, int)) or int(occupied) not in {0, 1}:
+            raise ValueError(f"chair {index} state must be 0 or 1, got {occupied!r}")
+        normalized.append(bool(occupied))
+    active = [
+        regime_id
+        for occupied, (regime_id, _display_name) in zip(normalized, REGIMES)
+        if occupied
+    ]
+    return enforce_watershed_exclusivity(active) if active else ["kinship"]
+
+
+def default_geometry_visibility(regime_ids) -> bool:
+    """Show active extractive-regime geometry; Kinship keeps a clear basin."""
+    return any(regime_id != "kinship" for regime_id in regime_ids)
+
+
+def run_chair_control() -> None:
+    """Continuously apply the Governator's raw chair telemetry to Godot."""
+    if current_operator()["name"] != "governator":
+        raise ValueError(
+            "chairs must run on the Governator at 196.168.50.11, "
+            "where the USB telemetry log is written"
+        )
+    telemetry = load_chair_sensor_module()
+    source = telemetry.SensorSource()
+    print(
+        "Chair control: "
+        + ", ".join(
+            f"{index}={display_name}"
+            for index, (_regime_id, display_name) in enumerate(REGIMES, start=1)
+        ),
+        flush=True,
+    )
+    print(f"Reading raw telemetry from {telemetry.LOG}", flush=True)
+
+    applied_state = None
+    waiting_announced = False
+    try:
+        while True:
+            source.poll()
+            last_seen = getattr(source, "last_seen", {})
+            has_live_history = isinstance(last_seen, dict) and any(
+                seen_at is not None for seen_at in last_seen.values()
+            )
+            if not has_live_history:
+                if not waiting_announced:
+                    print("Waiting for the first chair telemetry packet...", flush=True)
+                    waiting_announced = True
+                time.sleep(CHAIR_POLL_SECONDS)
+                continue
+
+            chair_state = tuple(int(bool(value)) for value in source.chairs)
+            if chair_state == applied_state:
+                time.sleep(CHAIR_POLL_SECONDS)
+                continue
+
+            regime_ids = chair_regime_ids(chair_state)
+            released = regime_ids == ["kinship"] and not any(chair_state)
+            try:
+                # A complete release is a hard baseline reset: Kinship plus no
+                # geometry. Any occupied chair explicitly restores the active
+                # regimes' geometry instead of inheriting that cleared state.
+                geometry_visible = not released
+                sends = send_fleet_regimes(
+                    regime_ids,
+                    "chairs",
+                    geometry_visible=geometry_visible,
+                )
+                save_controller_state(regime_ids, geometry_visible)
+            except (OSError, ValueError) as error:
+                print(
+                    f"ERROR chair state not applied: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(1.0)
+                continue
+
+            applied_state = chair_state
+            waiting_announced = False
+            active = ", ".join(regime_ids)
+            stale = ",".join(str(chair) for chair in source.stale) or "none"
+            print(
+                f"APPLIED  chairs={''.join(str(value) for value in chair_state)}; "
+                f"active={active}; geo={str(geometry_visible).lower()}; "
+                f"stale={stale}; {format_regime_send(sends)}",
+                flush=True,
+            )
+    except KeyboardInterrupt:
+        print("Chair control stopped.", flush=True)
+
+
 def run_regime_console() -> None:
     if not sys.stdin.isatty():
         raise ValueError("regime-console requires an interactive terminal")
@@ -878,6 +1089,7 @@ def run_regime_console() -> None:
                 return
             if character in {"c", "C"}:
                 active_ids.clear()
+                geometry_visible = False
                 sends = send_fleet_regimes(
                     [],
                     "regime-clear",
@@ -885,10 +1097,17 @@ def run_regime_console() -> None:
                 )
             elif character in "1234567":
                 regime_id = REGIMES[int(character) - 1][0]
+                if regime_id == "watershed" and regime_id not in active_ids:
+                    print(
+                        "\nUse `godot_controller.py set --regime watershed` "
+                        "to activate Watershed with one AI decision."
+                    )
+                    continue
                 if regime_id in active_ids:
                     active_ids.remove(regime_id)
                 else:
                     active_ids.add(regime_id)
+                geometry_visible = default_geometry_visibility(active_ids)
                 sends = send_fleet_regimes(
                     list(active_ids),
                     "regime-console",
@@ -1107,9 +1326,9 @@ def _prepare_stage(
         f"{{ echo {shlex.quote('Stage path already exists: ' + stage_path)}; exit 12; }}; "
         f"test ! -e {shlex.quote(backup_path)} || "
         f"{{ echo {shlex.quote('Backup path already exists: ' + backup_path)}; exit 13; }}; "
-        f"mkdir {shlex.quote(stage_path)}"
+        f"mkdir {shlex.quote(stage_path)} || exit 15; "
     )
-    prepared = ssh(computer, command)
+    prepared = ssh(computer, command, timeout=DEPLOY_TIMEOUT_SECONDS)
     if prepared.returncode != 0:
         return False, error_message(prepared)
     copied = _rsync_project(
@@ -1139,6 +1358,22 @@ def _prepare_stage(
     verified, verification_message = _verify_tree(source, computer, stage_path)
     if not verified:
         return False, "post-import source verification failed: " + verification_message
+    # Runtime trees can contain virtualenv assets that Godot mistakes for
+    # importable project resources (for example Matplotlib sample CSV files).
+    # Copy them only after the clean project import and checksum validation.
+    preserve_command = "".join(
+        (
+            f"if test -e {shlex.quote(posixpath.join(computer['project'], path))}; then "
+            f"cp -a {shlex.quote(posixpath.join(computer['project'], path))} "
+            f"{shlex.quote(posixpath.join(stage_path, path))} || "
+            f"{{ echo {shlex.quote('Could not preserve runtime path: ' + path)}; "
+            "exit 18; }; fi; "
+        )
+        for path in PRESERVED_RUNTIME_PATHS
+    )
+    preserved = ssh(computer, preserve_command, timeout=DEPLOY_TIMEOUT_SECONDS)
+    if preserved.returncode != 0:
+        return False, error_message(preserved)
     return True, "checksum match; " + import_message
 
 
@@ -1420,6 +1655,7 @@ def main() -> None:
             "set",
             "regime-clear",
             "regime-console",
+            "chairs",
         ],
     )
     parser.add_argument(
@@ -1462,7 +1698,7 @@ def main() -> None:
     if args.dry_run and args.action != "deploy":
         parser.error("--dry-run is accepted only by deploy")
 
-    regime_actions = {"list", "set", "regime-clear", "regime-console"}
+    regime_actions = {"list", "set", "regime-clear", "regime-console", "chairs"}
     if args.action in regime_actions:
         if args.targets:
             parser.error(f"{args.action} does not accept machine targets")
@@ -1483,6 +1719,9 @@ def main() -> None:
             if args.action == "regime-console":
                 run_regime_console()
                 return
+            if args.action == "chairs":
+                run_chair_control()
+                return
             require_saved_state = args.action == "set" and not args.regime
             saved_regime_ids, saved_geometry_visible = load_controller_state(
                 require_exists=require_saved_state,
@@ -1498,13 +1737,27 @@ def main() -> None:
                     ]
                 )
                 geometry_visible = (
-                    args.geo if args.geo is not None else saved_geometry_visible
+                    args.geo
+                    if args.geo is not None
+                    else (
+                        default_geometry_visibility(regime_ids)
+                        if args.regime
+                        else saved_geometry_visible
+                    )
                 )
                 command = "set"
             else:
                 regime_ids = []
                 geometry_visible = saved_geometry_visible
                 command = "regime-clear"
+            regime_ids = enforce_watershed_exclusivity(regime_ids)
+            activate_watershed_ai = is_exclusive_watershed_activation(
+                saved_regime_ids,
+                regime_ids,
+            )
+            if activate_watershed_ai:
+                # Fail before changing the fleet when the studio runtime is absent.
+                validate_watershed_ai_runtime()
             sends = send_fleet_regimes(
                 regime_ids,
                 command,
@@ -1521,6 +1774,18 @@ def main() -> None:
                 f"APPLIED  {format_regime_send(sends)}; "
                 f"active={active}; geo={geometry_state}"
             )
+            if activate_watershed_ai:
+                try:
+                    ai_result = run_watershed_ai_once()
+                except (OSError, ValueError) as error:
+                    print(
+                        "ERROR Watershed is active and saved, but its one-shot "
+                        f"AI setting failed: {error}",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
+                if ai_result:
+                    print(ai_result)
             return
         except (OSError, ValueError) as error:
             parser.error(str(error))
@@ -1598,8 +1863,17 @@ def main() -> None:
                     f"APPLIED  {format_regime_send(sends)}; "
                     f"startup active={active}; geo={geometry_state}"
                 )
+                if ordered_active == ["watershed"]:
+                    replay_result = run_watershed_ai_once(
+                        WATERSHED_AI_LATEST_DECISION
+                    )
+                    if replay_result:
+                        print("RESTORED " + replay_result)
             except (OSError, ValueError) as error:
-                print(f"ERROR startup regime verification: {error}")
+                print(
+                    "ERROR startup regime/Watershed replay verification: "
+                    f"{error}"
+                )
                 failed = True
     raise SystemExit(1 if failed else 0)
 

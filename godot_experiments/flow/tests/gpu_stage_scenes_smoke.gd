@@ -9,8 +9,8 @@ extends Node
 ##       --scene res://flow/tests/gpu_stage_scenes_smoke.tscn
 
 const EXPECTED_VIEWPORT_SIZE := Vector2i(1920, 1080)
-const EXPECTED_LAYER_SLOTS := [43, 43, 43, 43, 43, 43, 42]
-const EXPECTED_LAYER_CAPACITIES := [3225, 3225, 3225, 3225, 3225, 3225, 3150]
+const EXPECTED_LAYER_SLOTS := [143, 143, 143, 143, 143, 143, 142]
+const EXPECTED_LAYER_CAPACITIES := [10725, 10725, 10725, 10725, 10725, 10725, 10650]
 const EXPECTED_LAYER_Z := [0, 1, 2, 3, 4, 5, 6]
 const EXPECTED_TITLE_FONT_PATH := (
 	"res://flow/assets/fonts/BarlowCondensed-Medium.ttf"
@@ -678,6 +678,7 @@ func _check_scene(scene_spec: Dictionary) -> void:
 		_check_water_temperature(stage, expected_id, scene_path)
 		_check_regime_panel(stage, expected_id == &"delta", scene_path)
 		_check_shoreline(stage, expected_id, scene_path)
+		await _check_delta_tide_exclusivity(stage, expected_id, scene_path)
 		_check_shared_timeline_state(stage, scene_path)
 		_check_palette_layers(stage, scene_path)
 		_check_ecology(stage, scene_path)
@@ -685,6 +686,37 @@ func _check_scene(scene_spec: Dictionary) -> void:
 		await _check_control_route(stage, expected_id, scene_path)
 
 	scene_root.queue_free()
+	await get_tree().process_frame
+
+
+func _check_delta_tide_exclusivity(
+	stage: Node,
+	expected_id: StringName,
+	scene_path: String,
+) -> void:
+	stage.call(&"set_active_regime_names", ["Kinship"])
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var summary: Dictionary = stage.call(&"runtime_summary")
+	var is_delta := expected_id == &"delta"
+	_expect(
+		bool(summary.get("delta_tide_visible", false)) == is_delta,
+		"%s must %s the Kinship tide."
+			% [scene_path, "show" if is_delta else "never show"],
+	)
+	_expect(
+		(
+			String(summary.get("delta_tide_data_status", "")) == "READY"
+			and int(summary.get("delta_tide_data_row_count", 0)) == 720
+		) if is_delta else (
+			String(summary.get("delta_tide_data_status", "")) == "NOT_DELTA"
+			and int(summary.get("delta_tide_data_row_count", -1)) == 0
+		),
+		"%s must %s Delta-only tide data."
+			% [scene_path, "load" if is_delta else "not load"],
+	)
+	stage.call(&"set_active_regime_names", ["Agriculture", "Tech"])
+	await get_tree().process_frame
 	await get_tree().process_frame
 
 
@@ -823,11 +855,33 @@ func _check_palette_layers(stage: Node, scene_path: String) -> void:
 	)
 	_expect(
 		Array(summary.get("head_layer_slot_counts", [])) == EXPECTED_LAYER_SLOTS,
-		"%s must distribute 300 global heads as 43x6 + 42." % scene_path
+		"%s must distribute 1,000 global heads as 143x6 + 142." % scene_path
 	)
 	_expect(
-		int(summary.get("trail_segment_capacity", 0)) == 22500,
-		"%s must retain the full 22,500-segment capacity." % scene_path
+		String(summary.get("head_emission_timing", ""))
+		== "EVENLY_PHASED_DIRECT_RECYCLE_CONTINUOUS"
+		and String(summary.get("head_native_amount_ratio_strategy", ""))
+		== "FULL_CYCLE_SHADER_GATED"
+		and not bool(summary.get("head_reentry_waits_for_native_cycle", true)),
+		"%s must use continuous, evenly phased direct head recycling." % scene_path
+	)
+	_expect(
+		String(summary.get("water_coverage_model", ""))
+		== "CENTER_BAND_SYMMETRIC_FLOW_PERCENT"
+		and is_equal_approx(
+			float(summary.get("water_inlet_band_center_y_pixels", 0.0)),
+			540.0,
+		),
+		"%s water must widen symmetrically from screen center." % scene_path
+	)
+	for native_ratio: Variant in Array(summary.get("head_layer_amount_ratios", [])):
+		_expect(
+			is_equal_approx(float(native_ratio), 1.0),
+			"%s native head emitters must keep complete cycles." % scene_path
+		)
+	_expect(
+		int(summary.get("trail_segment_capacity", 0)) == 75000,
+		"%s must retain the full 75,000-segment capacity." % scene_path
 	)
 	_expect(
 		Array(summary.get("trail_segment_capacities", []))
@@ -1312,7 +1366,7 @@ func _check_ecology(stage: Node, scene_path: String) -> void:
 		and String(leaf_summary.get("latched_retirement", ""))
 			== "RIGHT_EDGE_AFTER_DISK"
 		and String(leaf_summary.get("miss_behavior", ""))
-			== "STOP_AT_INWARD_Y_DISTANCE_THEN_FADE",
+			== "REACH_SCREEN_MIDLINE_THEN_FADE",
 		"%s must preserve top/bottom leaf motion and downstream attachment."
 			% scene_path
 	)
@@ -1355,7 +1409,7 @@ func _check_ecology(stage: Node, scene_path: String) -> void:
 		)
 		and is_equal_approx(
 			float(leaf_summary.get("free_search_max_distance_pixels", 0.0)),
-			256.0
+			540.0
 		)
 		and is_equal_approx(
 			float(leaf_summary.get("stopped_fade_seconds", 0.0)),
@@ -1791,9 +1845,17 @@ func _check_control_route(
 	)
 	await get_tree().process_frame
 	var summary: Dictionary = stage.call(&"runtime_summary")
+	var expected_remaining := 0.60 * (
+		1.0 - float(summary.get("total_extraction_fraction", 0.0))
+	)
 	_expect(
-		is_equal_approx(float(summary.get("flow_rate", 0.0)), 0.60),
-		"%s routed flow_rate must reach the GPU stage." % scene_path
+		is_equal_approx(float(summary.get("basin_input_rate", 0.0)), 0.60)
+		and is_equal_approx(
+			float(summary.get("basin_remaining_rate", 0.0)),
+			expected_remaining
+		),
+		"%s routed input must pass through the active extraction budget."
+			% scene_path
 	)
 	stage.call(&"set_flow_rate", 0.50)
 

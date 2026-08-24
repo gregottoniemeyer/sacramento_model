@@ -40,12 +40,16 @@ a visible two-screen hardware benchmark after renderer changes before treating
 
 `gpu_flow_stage_2d.tscn` is one native 1920 x 1080 screen of GPU flow. It owns
 seven fixed palette layers. Each layer is a paired head `GPUParticles2D` emitter
-and child `GPUParticles2D` pool of immutable trail segments. Together they still
-contain exactly 300 head slots and 22,500 segment slots—the layers divide that
-population rather than multiplying it by seven. The default active ratio is
-`0.5` (exactly 150 moving heads). Particle simulation is render-paced while the
-project caps rendering at 30 FPS; this prevents a fixed-step catch-up frame from
-overwriting an earlier sub-emitter batch. Each head emits one stationary segment
+and child `GPUParticles2D` pool of immutable trail segments. Together they
+contain exactly 1,000 head slots and 75,000 segment slots—the layers divide that
+population rather than multiplying it by seven. Density is piecewise linear:
+1% water shows 20 lines and 100% water shows all 1,000. Native emitters always
+run a complete eight-second cycle; an evenly spaced global-slot selector controls
+the logical population without Godot's low-count `amount_ratio` batching. A head
+re-enters directly after its previous trail fades instead of waiting for another
+native cycle. Particle simulation is render-paced while the project caps
+rendering at 30 FPS; this prevents a fixed-step catch-up frame from overwriting
+an earlier sub-emitter batch. Each head emits one stationary segment
 between consecutive completed positions. Native particle trails are disabled
 on every layer. Line cores vary from 1–5 native pixels with a one-pixel alpha
 feather.
@@ -186,7 +190,7 @@ count and `p` is interaction power.
 | Water Projects | S/Mc/F/A/D: `R .33/c1`, `Dr .50`; C/Mi: explicit `R 0/c0`, `Dr 0`. Five of seven whole-river stages is the nearest discrete allocation to 75%. All seven define `Sh 0` and leaves `0`; other fields and gate schedules are blank. |
 | Hydropower | S/Mc/Mi/F/A/D: `R .50/c2`, aperture `.33`, gate open `01/01–12/31`; C: `R 0/c0` with no gate. All seven inherit `Dr .25`; `Sh .20` on Mc/C and `0` elsewhere. |
 | Tech | All seven: `R .75/c2`, `Dr .75/p1`, and `Sh 0`; gate, obstacle, salmon, and leaf fields remain blank. |
-| Watershed | Reserved for the future AI watershed model. It has no linked per-river file and currently contributes no runtime effects. |
+| Watershed | The authored profile remains a no-op until a valid `watershed-ai/2` seasonal allocation is applied. Watershed is exclusive: selecting it clears every other regime. |
 
 The three `*_area_fraction` physics values are deterministic admission or
 encounter budgets over particle lifecycles. They do not resize geometry or
@@ -215,14 +219,14 @@ later `A -> B -> A`; they are not reused merely because an earlier active set
 returns. A repeated absolute set is idempotent, publishes no new regime change,
 and does not advance or re-upload a layout. Fields remain stratified along X,
 swap top/bottom bank assignment on adjacent generations, and use newly seeded
-width, mouth, depth, and lane position. Obstacles retain their captured authored
+width, depth, and lane position. Obstacles retain their captured authored
 shape but move to newly seeded positions. Explicit zero is different from
 undefined: it activates no constraint or debug guide for that feature.
 
-Each active regime field is a trapezoid rooted exactly at the top or bottom
-screen edge, with its mouth extending into the channel. Eligible water bends
-laterally from as far as 300 pixels toward a target just beyond the strongest
-nearby mouth. The target guarantees a real river-facing-edge crossing instead
+Each active regime field is an axis-aligned rectangle touching exactly the top
+or bottom screen edge. Eligible water bends laterally from as far as 300 pixels
+toward a target inside the strongest nearby field. The target guarantees a real
+river-facing-edge crossing instead
 of pulling a trail vertically past the field. At that crossing, streamwise
 motion drops to zero and the accepted head makes a sharp top/bottom quarter-turn
 at no less than 540 pixels/second. It continues through the complete field and
@@ -258,9 +262,11 @@ and bottom edges. Most of that band adds deterministic, zero-mean cross-stream
 turbulence with a smaller streamwise component; the outermost 40 pixels add an
 inward confinement force so heads stay on screen. Zero disables the complete
 effect and `1.0` applies full turbulence. There is no shoreline collision
-geometry, debug polygon, data texture, or narrowed channel, and the ordinary
-left-edge inlet remains the full `y = 28…1052` range at every setting. Existing
-immutable water history stays in place while the live heads respond, so a
+geometry, debug polygon, data texture, or narrowed channel. `y = 28…1052`
+remains the available left-edge inlet; the active water source occupies a
+flow-scaled band inside it. At 1% the band is centered at `y = 540`, then widens
+symmetrically toward the top and bottom until 100% uses the complete range.
+Existing immutable water history stays in place while the live heads respond, so a
 regime transition remains visibly continuous without restarting particles.
 The uniform edge field is also cheaper than the former polygon force and
 swept-crossing searches.
@@ -387,12 +393,56 @@ identity and may change without changing the stable `screen_id` or `model_id`.
 | `scene_7.tscn` | `delta` | Delta | `delta_720.txt` | Freeport |
 
 All seven files are project resources under
-`res://flow/data/water_pipeline/`. The combined McCloud-Pit screen currently
-uses the McCloud series. The current Delta pipeline input is a short
-November 6, 2025–January 17, 2026 gauge-height window measured in feet, not a
-full-year CFS series; its 720 normalized rows are nevertheless stretched over
-the display year. For that reason the runtime calls the pipeline's nominal
-`cfs` column `raw_value`, and Delta seasonality should be treated as provisional.
+`res://flow/data/water_pipeline/`. They cover July 1, 2025 through June 30,
+2026, with exactly 720 samples of normalized atmospheric water arrival built
+from NOAA precipitation, temperature, snowfall, and snow-depth fields. The
+combined McCloud-Pit screen uses the McCloud station proxy. The Delta combines
+all seven signals using the documented conceptual weights in
+`flow/data/basin_input/build_basin_input_720.py`. The runtime keeps the name
+`raw_value` for compatibility, but its source column is now `input_mm_day`.
+
+The stage applies one equation after interpolation:
+
+`Delta remainder = basin input × (1 − total extraction fraction)`
+
+Before extraction, the 720-point atmospheric series passes through a trailing,
+cyclic 30-day running average (59 samples). This represents catchment storage
+and baseflow rather than treating each dry precipitation interval as an
+instantaneously dry river. The existing daily fog volume is then redistributed
+into its morning pulse, and the resulting data-driven basin input is floored at
+2%. Raw and interpolated atmospheric values remain available in runtime
+telemetry; only the buffered value drives the one input to the budget.
+
+Regime fractions are Kinship 0%, Agriculture 45%, Gold Rush 30%, Water
+Projects/export 40%, Hydropower/reservoir loss 15%, Tech/data-center cooling
+25%, and Watershed 0%, capped at 100%. The Delta panel displays input, total
+extraction, and remainder. Kinship floods the Delta with borderless 45-degree
+blue hatching: 3-pixel round-capped lines, 6-pixel gaps, fixed 33% alpha, and a
+6-pixel label knockout. Every regime draws the
+incoming tide from the Bay at screen-right. The tide uses 720 samples of
+NOAA CO-OPS hourly predictions for San Francisco station `9414290` over the same
+July 1, 2025–June 30, 2026 window. In every regime, 35 right-anchored,
+pixel-aligned horizontal bars form a FIFO history. The oldest value is at the
+top and the current value enters at the bottom. During each sample interval the
+whole array migrates upward by 30 pixels; at the boundary, the top value is
+popped and the next data value is pushed onto the bottom. Tide height maps to
+each bar's 41–306 pixel horizontal length, a 66% reach reduction. Every bar is
+solid Dodger Blue and 3 pixels wide. The tide has no label, boundary, or
+arrowheads and renders at Z=-60 below all text.
+The seven water-color head emitters keep native `amount_ratio = 1`, zero timing
+randomness, and zero explosiveness. The shader selects the requested logical
+population at evenly spaced global phases, while small deterministic layer
+offsets interleave the colors. Completed heads recycle directly after their
+two-second immutable tails fade. This removes both synchronized color packets
+and the low-flow blank interval without changing trail, velocity, reservoir,
+gate, extractor, city, or turbulence physics.
+Agriculture fields and Tech data centers are bank-connected `Rect2` extractors.
+All active geometry uses borderless,
+unclipped 45-degree hatching with 3-pixel round-capped lines, 6-pixel gaps, and
+fixed 33% alpha. Repelling geometry is labeled City in the artwork while
+retaining `obstacle` as its protocol-compatible internal physics name. Hatches
+split around measured label bounds, leaving a transparent six-pixel clearance.
+Fields use green and data centers use white. All overlay labels are rotated -90°.
 
 Six production stages read the shared table
 `res://flow/data/water_pipeline/water_temperature_all_rivers_720.txt`;
@@ -485,6 +535,69 @@ date-only value when the day changes. Each data-row transition emits
 `watershed_data_row_changed` with row index/count, `raw_value`, `normalized_flow`,
 `scaled_flow`, `high_variation`, and canonical `model_date_time`.
 
+### Watershed AI visual state
+
+The `watershed-ai/2` scope is a visual simulator boundary, not a real-world
+control interface. It cannot operate dams, gates, pumps, diversions, or other
+infrastructure. It accepts one explicit canonical `screen_id` at a time and
+only when the process-wide active regime set is exactly `[6]`; both the shared
+bus and the addressed GPU stage validate that condition before application.
+The named screen must resolve to exactly one loaded GPU stage.
+
+The packet contains exactly one `watershed.ai.state` change, empty `actions`
+and `geometry_ops`, and the complete state fields below:
+
+```text
+schema_version, decision_id,
+atmospheric_input_rate, reservoir_release_rate, available_supply_rate,
+extraction_fraction, remaining_rate, salmon_fraction, floodplain_fraction,
+agriculture_fraction, data_center_fraction, city_fraction,
+reservoir_storage_fraction, hydropower_fraction, water_project_fraction
+```
+
+`schema_version` must be `2`, `decision_id` must contain 1–128 characters, and
+all other values must be finite numbers in `0..1`. Allocation shares must sum
+to one; extraction must equal agriculture + data centers + city; available and
+remaining rates must close the budget; hydropower and water projects must both
+be zero. Missing, extra, invalid, or non-finite values reject the state atomically. The scoped envelope accepts no
+top-level fields beyond `protocol`, optional `revision`, `control_scope`,
+`target`, `changes`, `geometry_ops`, `actions`, and `metadata`, and requires a
+nonempty `metadata.request_id` of at most 128 characters.
+
+For convergence, compute the lowercase SHA-256 digest of these exact UTF-8
+lines joined by `\n`, with no trailing newline and exactly nine fractional
+digits; `decision_id` is not part of the hash:
+
+```text
+schema_version=%d
+atmospheric_input_rate=%.9f
+reservoir_release_rate=%.9f
+available_supply_rate=%.9f
+extraction_fraction=%.9f
+remaining_rate=%.9f
+salmon_fraction=%.9f
+floodplain_fraction=%.9f
+agriculture_fraction=%.9f
+data_center_fraction=%.9f
+city_fraction=%.9f
+reservoir_storage_fraction=%.9f
+hydropower_fraction=%.9f
+water_project_fraction=%.9f
+```
+
+Retry the same absolute state until
+`recipient_watershed_ai_state[screen].applied_decision_id` and
+`.applied_state_hash` match the decision and locally computed digest. The
+per-screen ACK also includes `current_observation` with flow, model time,
+watershed row, temperature, gate, and regime state. Identical ID/hash retries
+are no-ops; an ID reused with different state is rejected; a new ID with the
+same state updates acknowledgement without repeating GPU work.
+
+Applied values derive the reservoir, bounded drain/obstacle banks, explicit
+field/data-center rectangles, and Delta floodplain area. Exiting exclusive Watershed mode removes the overlay and
+restores captured data-drive, flow, authored gate, and the newly active
+authored/profile/timeline behavior.
+
 ### Regime-switch runtime cost
 
 A regime switch mutates the resident stage in place; it does not instantiate a
@@ -565,6 +678,9 @@ diagnostics additionally include `regime_field_bank_layouts`,
 `bank_field_suction_crossflow_ratio`, `bank_field_suction_streamwise_ratio`, and
 `bank_field_min_withdrawal_speed_pixels`, and
 `bank_field_capture_depth_pixels` plus their seven-layer uniform mirrors.
+Bank extractors use a 720 px reach, a 3.0 lateral-flow multiplier, and a
+720 px/s minimum withdrawal speed, so an active intake pulls visibly from the
+river centerline before turning captured trails through its bank mouth.
 `regime_geometry_mode` reports `GENERATION_SALTED_BOUNDED_SLOT_BANKS`.
 Reservoir placement fields are
 `reservoir_center_pixels`, `reservoir_center_pixels_authored`,
@@ -769,9 +885,9 @@ Mutable fields can also be set through `changes` as
 }
 ```
 
-Regime-owned drain/field polygons are bank-connected trapezoids, not interior
-absorbers. Their root lies on the top or bottom screen edge and their horizontal
-river-facing mouth lies inside the channel. The shader makes one deterministic
+Regime-owned drain/field polygons are bank-connected rectangles, not interior
+absorbers. One horizontal edge coincides with the top or bottom screen edge and
+the opposite river-facing edge lies inside the channel. The shader makes one deterministic
 accept/reject choice for the complete drain/field feature cohort and global
 particle lifecycle, so adding more field polygons does not compound the
 regime-wide fraction. An accepted nearby head is pulled toward a point inside
@@ -779,7 +895,7 @@ the strongest mouth; probability chooses the cohort and does not weaken the
 motion of heads already accepted. After a swept mouth crossing, the shader
 removes the remaining downstream component and records a sharp 90-degree turn
 toward the top or bottom bank at a minimum 540-pixel/second withdrawal speed.
-The trail runs through the trapezoid and off the corresponding screen edge,
+The trail runs through the rectangle and off the corresponding screen edge,
 then recycles only after its immutable history has faded. Root and side edges
 never admit water, and no head teleports to a field center.
 
@@ -977,7 +1093,7 @@ Production leaf paths and defaults are:
 | `leaves.contact_radius_pixels` | `12` | Radius of the one-way contact test |
 | `leaves.free_water_search_radius_pixels` | `120` | Radius of the free leaf's 17 x 17 forward/inward 2D water search |
 | `leaves.free_water_steering_strength` | `0.35` | Blend from inward fall toward nearby water |
-| `leaves.free_search_max_distance_pixels` | `256` | Inward bank distance searched before a miss freezes and fades |
+| `leaves.free_search_max_distance_pixels` | `540` | Minimum inward bank distance before a miss can fade; never less than the screen midline |
 | `leaves.stopped_fade_seconds` | `0.50` | Retirement fade after a missed leaf disk stops moving |
 | `leaves.follow_probe_min_pixels` | `8` | Nearest cached-local-heading probe radius |
 | `leaves.follow_probe_max_pixels` | `56` | Farthest multi-radius center/flank probe radius |
@@ -1018,7 +1134,7 @@ Segment-pool capacity is calculated as:
 ceil(particle_slots * 30 updates/second * trail_lifetime * 1.25)
 ```
 
-At the defaults, `ceil(300 * 30 * 2.0 * 1.25)` is 22,500 slots per stage.
+At the defaults, `ceil(1000 * 30 * 2.0 * 1.25)` is 75,000 slots per stage.
 Changing flow rate does not resize the pool while visible segments are using
 it; changing particle-slot count or trail lifetime updates the required capacity.
 
@@ -1034,10 +1150,9 @@ and the darkest blue is the front layer, so different colors now have a fixed
 stacking order for their full lifetime.
 
 The global particle identity is interleaved across those layers. At the default
-300 slots, head allocations are `[43, 43, 43, 43, 43, 43, 42]`; at 50% flow,
-the active counts are `[22, 22, 22, 21, 21, 21, 21]`, totaling exactly 150.
-Segment capacities are `[3225, 3225, 3225, 3225, 3225, 3225, 3150]`, totaling
-22,500. Runtime flow changes use the same global threshold, so splitting the
+1,000 slots, head allocations are `[143, 143, 143, 143, 143, 143, 142]`.
+Segment capacities are `[10725, 10725, 10725, 10725, 10725, 10725, 10650]`,
+totaling 75,000. Runtime flow changes use the same global threshold, so splitting the
 renderer does not change the requested population or the deterministic path
 seeds. Segments within one layer share the same RGB color; their alpha blending
 is visually order-independent, so they do not need one node per trail.
@@ -1061,9 +1176,10 @@ motion, but they cannot rewrite, pull, reconnect, or disconnect trail segments
 that were already emitted. Existing tail history remains fixed even if runtime
 wave or reservoir parameters change.
 
-The head positions still use an eight-second startup prewarm so a scene opens
-with water distributed across the screen. Both reservoir admission and segment
-recording are held off during that prewarm. Heads which pass the reservoir are
+The head positions use a sixteen-second startup prewarm so even the slowest
+center-originating flow opens with water distributed across the screen.
+Both reservoir admission and segment recording are held off during that
+prewarm. Heads which pass the reservoir are
 latched as bypasses, so turning admission on after prewarm cannot reconsider
 them and cannot begin with a prefilled reservoir. The river therefore opens
 distributed while the reservoir opens empty. Segment recording remains off
@@ -1140,7 +1256,7 @@ newly admitted heads replace those leaving. The hard-drain state is reserved
 for the diameter-wide setting.
 
 The production GPU reservoir does not have a separate retention pool. Every
-retained head continues to occupy one of the stage's fixed 300 active
+retained head continues to occupy one of the stage's fixed 1,000 active
 water-head slots until it exits. A closed or high-capture reservoir can
 therefore temporarily thin ordinary inlet lanes. If every active slot is
 retained, no new ordinary inlet lifecycle can begin until a head is released
@@ -1193,9 +1309,9 @@ write-only release-control texture. None of these paths reads live water or
 particle state back to the CPU.
 
 For controller compatibility, `changes.flow_rate` controls both population and
-core speed: `0.0` emits no heads, `0.5` activates about 150 slots at 300 px/s,
-and `1.0` activates all 300 slots at 600 px/s. `flow_speed_pixels` is the
-maximum speed at a flow rate of `1.0`.
+core speed: `0.0` emits no heads, `0.01` activates 20 slots, and `1.0` activates
+all 1,000 slots. Positive water has a 25%-of-maximum speed floor so sparse water
+still forms long lines; `flow_speed_pixels` is the maximum speed at `1.0`.
 
 ## Local keyboard controls
 
@@ -1266,6 +1382,18 @@ loss fade and full 2D contact-field steering, continuous UV-interpolated segment
 the leaves' nearby-water search, stopped-fade miss state, one-way water latch,
 periodically cached local path following, and head-only disk rendering.
 
+The real-renderer continuity test must run without `--headless`, whose dummy
+backend cannot read a `ViewportTexture`:
+
+```bash
+/Applications/Godot.app/Contents/MacOS/Godot --path . \
+  --rendering-method mobile \
+  --scene res://flow/tests/water_emission_continuity_smoke.tscn
+```
+
+It samples 24 seconds of 2% water. The test fails on any blank sample or if the
+steady visible-pixel average leaves the calibrated 1–4% band.
+
 ```sh
 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . \
   --rendering-method mobile \
@@ -1309,8 +1437,8 @@ Barlow Condensed Medium resource. The grid, date-time, and watershed timeline
 described above are runtime contracts; the existing smoke scenes do not assert
 their complete behavior.
 
-The retained validation set contains five suites: the reusable GPU stage,
-salmon, leaf, seven-scene integration, and the transport/runtime suite
+The retained validation set contains six suites: basin budget, reusable GPU
+stage, salmon, leaf, seven-scene integration, and the transport/runtime suite
 at `res://flow/tests/flow_runtime_smoke.tscn`. The last suite retains unique
 localhost UDP normalization and routing coverage for the shared controller
 protocol; it is not a production rendering path.

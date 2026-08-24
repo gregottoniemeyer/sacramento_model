@@ -1,0 +1,20 @@
+{
+  "status": "PROTOTYPE_ART_MODEL_NOT_REVIEWED",
+  "allocation_floors": {
+    "salmon_base": 0.35,
+    "salmon_cap": 0.61,
+    "floodplain_default": 0.08,
+    "floodplain_winter_spring": 0.15,
+    "agriculture_default": 0.04,
+    "agriculture_summer": 0.08,
+    "data_centers_default": 0.07,
+    "data_centers_winter": 0.10,
+    "city": 0.10
+  },
+  "fixed_zero_extraction": ["hydropower", "water_projects"],
+  "notes": [
+    "These values are conceptual installation parameters, not reviewed stakeholder requirements.",
+    "Reservoir carryover is an internal seasonal time shift and not a second annual water source.",
+    "Replace every floor and seasonal coefficient with reviewed targets before describing any result as sufficient or operational."
+  ]
+}

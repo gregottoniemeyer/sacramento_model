@@ -20,7 +20,7 @@ uniform float free_sway_period_min_seconds = 1.2;
 uniform float free_sway_period_max_seconds = 2.8;
 uniform float free_water_search_radius_pixels = 120.0;
 uniform float free_water_steering_strength = 0.35;
-uniform float free_search_max_distance_pixels = 256.0;
+uniform float free_search_max_distance_pixels = 540.0;
 uniform float stopped_fade_seconds = 0.5;
 
 uniform float water_alpha_threshold = 0.001;
@@ -402,10 +402,13 @@ void process() {
 						? max(point.y, 0.0)
 						: max(stage_size.y - point.y, 0.0)
 				);
-				float search_distance_limit = max(
-					free_search_max_distance_pixels,
-					1.0
-				);
+					// Missing leaves must cross from their bank to the screen's true
+					// horizontal midline before they can stop and fade. A larger configured
+					// search distance is still honored for deliberate future variants.
+					float search_distance_limit = max(
+						max(free_search_max_distance_pixels, stage_size.y * 0.5),
+						1.0
+					);
 				if (inward_distance >= search_distance_limit) {
 					// A miss freezes at its bounded bank-to-center search point. The
 					// visible disk then fades in place without any motion-history trail.

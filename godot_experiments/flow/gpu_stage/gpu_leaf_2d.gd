@@ -66,8 +66,10 @@ const LEAF_COLORS: Array[Color] = [
 ## gently bias their inward fall toward the nearest water sample.
 @export_range(1.0, 480.0, 1.0) var free_water_search_radius_pixels: float = 120.0
 @export_range(0.0, 1.0, 0.01) var free_water_steering_strength: float = 0.35
-## Measured only along inward Y travel from the originating bank.
-@export_range(1.0, 4096.0, 1.0) var free_search_max_distance_pixels: float = 256.0
+## Measured only along inward Y travel from the originating bank. The effective
+## value is never less than half the stage height, so a leaf that misses water
+## remains visible until it reaches the screen's horizontal midline.
+@export_range(1.0, 4096.0, 1.0) var free_search_max_distance_pixels: float = 540.0
 @export_range(0.05, 4.0, 0.05) var stopped_fade_seconds: float = 0.50
 
 @export_group("Water Contact")
@@ -196,6 +198,10 @@ func configure(values: Dictionary) -> bool:
 	free_sway_period_max_seconds = maxf(
 		free_sway_period_max_seconds,
 		free_sway_period_min_seconds
+	)
+	free_search_max_distance_pixels = maxf(
+		free_search_max_distance_pixels,
+		stage_size.y * 0.5
 	)
 	_apply_parameters()
 	set_paused(_paused)
@@ -429,8 +435,9 @@ func runtime_summary() -> Dictionary:
 		"free_water_search_radius_pixels": free_water_search_radius_pixels,
 		"free_water_steering_strength": free_water_steering_strength,
 		"free_search_max_distance_pixels": free_search_max_distance_pixels,
-		"free_search_distance_measure": "INWARD_Y_FROM_ORIGIN_BANK",
-		"free_search_policy": "NEARBY_2D_WATER_STEERING_UNTIL_DISTANCE_BOUND",
+		"free_search_distance_measure": "INWARD_Y_FROM_ORIGIN_BANK_TO_MIDLINE",
+		"free_search_policy": "NEARBY_2D_WATER_STEERING_UNTIL_SCREEN_MIDLINE",
+		"minimum_fade_inward_distance_pixels": stage_size.y * 0.5,
 		"free_search_backward_samples": "REJECTED",
 		"free_search_axis_samples": 17,
 		"stopped_fade_seconds": stopped_fade_seconds,
@@ -469,7 +476,7 @@ func runtime_summary() -> Dictionary:
 		"latched_follow_resampling": "PERIODIC_DETERMINISTIC_PHASE",
 		"latched_follow_support": "MULTI_RADIUS_CENTER_AND_FLANK_WATER_SUPPORT",
 		"latched_retirement": "RIGHT_EDGE_AFTER_DISK",
-		"miss_behavior": "STOP_AT_INWARD_Y_DISTANCE_THEN_FADE",
+		"miss_behavior": "REACH_SCREEN_MIDLINE_THEN_FADE",
 		"miss_state": "STOPPED_FADING",
 		"miss_retirement": "FREEZE_FADE_THEN_INACTIVE",
 		"head_process_gpu": true,

@@ -8,6 +8,12 @@ __pycache__/
 *.py[cod]
 *.dmg
 *.pck
+.env.local
+.venv/
+/watershed_ai/runlogs/
+/watershed_ai/build/
+/watershed_ai/src/*.egg-info/
+/godot_experiments/fleet/
 
 # Retired flow-line versions and generated speed-check frames
 /ink_flow_lines.py

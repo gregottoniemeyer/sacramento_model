@@ -1,0 +1,12 @@
+{
+  "policy_summary": "Protect salmon and floodplain continuity while shifting productive use seasonally between winter data centers and summer food production.",
+  "rivers": [
+    {"screen_id":"mount_shasta","salmon_priority":0.9,"floodplain_priority":0.6,"agriculture_priority":0.5,"data_center_priority":0.7,"city_priority":0.4,"confidence":0.55,"rationale":"Protect cold-water origins while allowing seasonal productive use within deterministic floors."},
+    {"screen_id":"mccloud_pit","salmon_priority":0.9,"floodplain_priority":0.6,"agriculture_priority":0.5,"data_center_priority":0.7,"city_priority":0.4,"confidence":0.55,"rationale":"Maintain ecological continuity and treat the point-station proxy cautiously."},
+    {"screen_id":"cottonwood_creek","salmon_priority":0.8,"floodplain_priority":0.7,"agriculture_priority":0.5,"data_center_priority":0.6,"city_priority":0.4,"confidence":0.4,"rationale":"Missing temperature data lowers confidence without inventing thermal stress."},
+    {"screen_id":"mill_creek","salmon_priority":0.9,"floodplain_priority":0.7,"agriculture_priority":0.5,"data_center_priority":0.6,"city_priority":0.4,"confidence":0.6,"rationale":"Favor salmon and connected floodplain water under a provisional temperature signal."},
+    {"screen_id":"feather_river","salmon_priority":0.85,"floodplain_priority":0.7,"agriculture_priority":0.6,"data_center_priority":0.7,"city_priority":0.5,"confidence":0.55,"rationale":"Balance spring storage, ecological continuity, food, and winter compute."},
+    {"screen_id":"american_river","salmon_priority":0.85,"floodplain_priority":0.65,"agriculture_priority":0.6,"data_center_priority":0.7,"city_priority":0.5,"confidence":0.65,"rationale":"Use the seasonal reservoir buffer without consuming the salmon reserve."},
+    {"screen_id":"delta","salmon_priority":0.95,"floodplain_priority":0.9,"agriculture_priority":0.55,"data_center_priority":0.6,"city_priority":0.5,"confidence":0.45,"rationale":"Preserve the Delta remainder and floodplain because its input is a conceptual aggregate."}
+  ]
+}

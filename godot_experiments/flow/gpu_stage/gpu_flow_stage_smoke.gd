@@ -3,9 +3,9 @@ extends Node
 const STAGE_SCENE := preload(
 	"res://flow/gpu_stage/gpu_flow_stage_2d.tscn"
 )
-const EXPECTED_LAYER_SLOTS := [43, 43, 43, 43, 43, 43, 42]
-const EXPECTED_ACTIVE_HALF := [22, 22, 22, 21, 21, 21, 21]
-const EXPECTED_LAYER_CAPACITIES := [3225, 3225, 3225, 3225, 3225, 3225, 3150]
+const EXPECTED_LAYER_SLOTS := [143, 143, 143, 143, 143, 143, 142]
+const EXPECTED_ACTIVE_HALF := [72, 72, 72, 73, 72, 72, 72]
+const EXPECTED_LAYER_CAPACITIES := [10725, 10725, 10725, 10725, 10725, 10725, 10650]
 const EXPECTED_LAYER_Z := [0, 1, 2, 3, 4, 5, 6]
 const EXPECTED_TITLE_FONT_PATH := (
 	"res://flow/assets/fonts/BarlowCondensed-Medium.ttf"
@@ -45,6 +45,19 @@ const EXPECTED_PALETTE := [
 	Color(0.290, 0.690, 0.882, 1.0),
 	Color(0.118, 0.565, 1.0, 1.0),
 ]
+
+
+class DuplicateWatershedAIRecipient:
+	extends Node
+
+	func get_screen_id() -> StringName:
+		return &"delta"
+
+	func queue_control_message(_message: Dictionary) -> void:
+		pass
+
+	func validate_watershed_ai_control_message(_message: Dictionary) -> Dictionary:
+		return {"ok": true}
 
 
 func _ready() -> void:
@@ -398,7 +411,7 @@ func _ready() -> void:
 			)
 			and is_equal_approx(
 				float(leaf_summary.get("free_search_max_distance_pixels", 0.0)),
-				256.0
+				540.0
 			)
 			and is_equal_approx(
 				float(leaf_summary.get("stopped_fade_seconds", 0.0)),
@@ -417,7 +430,7 @@ func _ready() -> void:
 		):
 			errors.append("leaf disk-radius variation range is incorrect")
 		if String(leaf_summary.get("miss_behavior", "")) != (
-			"STOP_AT_INWARD_Y_DISTANCE_THEN_FADE"
+			"REACH_SCREEN_MIDLINE_THEN_FADE"
 		):
 			errors.append("unattached leaves do not stop and fade after a bounded search")
 		if not (
@@ -504,10 +517,10 @@ func _ready() -> void:
 			errors.append("digit key unexpectedly changed leaves %s" % key)
 	stage.call(&"set_flow_rate", 0.50)
 	summary = stage.call(&"runtime_summary")
-	if int(summary.get("amount", 0)) != 300:
-		errors.append("expected 300 particle slots")
-	if int(summary.get("active_heads_approx", 0)) != 150:
-		errors.append("expected about 150 active particles")
+	if int(summary.get("amount", 0)) != 1000:
+		errors.append("expected 1,000 particle slots")
+	if int(summary.get("active_heads_approx", 0)) != 505:
+		errors.append("expected 505 active particles at half flow")
 	if int(summary.get("palette_layer_count", 0)) != 7:
 		errors.append("expected seven fixed palette layers")
 	if int(summary.get("head_layer_count", 0)) != 7:
@@ -515,11 +528,79 @@ func _ready() -> void:
 	if int(summary.get("trail_segment_layer_count", 0)) != 7:
 		errors.append("expected seven independent immutable segment pools")
 	if Array(summary.get("head_layer_slot_counts", [])) != EXPECTED_LAYER_SLOTS:
-		errors.append("global 300 head slots are not distributed 43x6 + 42")
+		errors.append("global 1,000 head slots are not distributed 143x6 + 142")
+	if String(summary.get("head_emission_timing", "")) != (
+		"EVENLY_PHASED_DIRECT_RECYCLE_CONTINUOUS"
+	):
+		errors.append("head emission does not advertise continuous desynchronized timing")
+	if String(summary.get("head_native_amount_ratio_strategy", "")) != (
+		"FULL_CYCLE_SHADER_GATED"
+	):
+		errors.append("native amount-ratio batching remains enabled")
+	if bool(summary.get("head_reentry_waits_for_native_cycle", true)):
+		errors.append("head recycling still waits for a batch-prone native cycle")
+	if String(summary.get("water_coverage_model", "")) != (
+		"CENTER_BAND_SYMMETRIC_FLOW_PERCENT"
+	):
+		errors.append("water coverage does not widen symmetrically from center")
+	if not Vector2(
+		summary.get("water_inlet_band_y_range_pixels", Vector2.ZERO)
+	).is_equal_approx(Vector2(284.0, 796.0)):
+		errors.append("50% water does not occupy the centered half-height inlet band")
+	var preprocess_values := Array(summary.get("head_layer_preprocess_seconds", []))
+	if preprocess_values.size() != 7:
+		errors.append("expected a pre-process phase on every palette emitter")
+	for layer_index in range(preprocess_values.size()):
+		var expected_preprocess := 16.0 + float(layer_index) * 8.0 / 1000.0
+		if not is_equal_approx(
+			float(preprocess_values[layer_index]),
+			expected_preprocess,
+		):
+			errors.append("palette emitter pre-process phases are not interleaved")
+			break
+	for active_count_uniform: Variant in Array(
+		summary.get("active_particle_count_uniforms", [])
+	):
+		if not is_equal_approx(float(active_count_uniform), 505.0):
+			errors.append("50% active count did not reach every head shader")
+			break
+	for coverage_uniform: Variant in Array(
+		summary.get("water_coverage_fraction_uniforms", [])
+	):
+		if not is_equal_approx(float(coverage_uniform), 0.5):
+			errors.append("50% center-band coverage did not reach every head shader")
+			break
+	var head_layer_randomness := Array(summary.get("head_layer_randomness", []))
+	if head_layer_randomness.size() != 7:
+		errors.append("expected timing randomness on all seven palette emitters")
+	for timing_randomness: Variant in head_layer_randomness:
+		if not is_zero_approx(float(timing_randomness)):
+			errors.append("a palette emitter randomizes the exact continuous schedule")
+			break
+	var head_layer_explosiveness := Array(summary.get("head_layer_explosiveness", []))
+	if head_layer_explosiveness.size() != 7:
+		errors.append("expected explosiveness state on all seven palette emitters")
+	for explosiveness: Variant in head_layer_explosiveness:
+		if not is_zero_approx(float(explosiveness)):
+			errors.append("a palette emitter uses burst emission")
+			break
+	var fixed_seed_states := Array(summary.get("head_layer_fixed_seed_enabled", []))
+	if fixed_seed_states.size() != 7:
+		errors.append("expected fixed-seed state on all seven palette emitters")
+	for fixed_seed_enabled: Variant in fixed_seed_states:
+		if not bool(fixed_seed_enabled):
+			errors.append("a palette emitter lost deterministic fixed seeding")
+			break
+	var head_layer_seeds := Array(summary.get("head_layer_seeds", []))
+	var unique_head_layer_seeds: Dictionary = {}
+	for head_layer_seed: Variant in head_layer_seeds:
+		unique_head_layer_seeds[int(head_layer_seed)] = true
+	if head_layer_seeds.size() != 7 or unique_head_layer_seeds.size() != 7:
+		errors.append("palette emitters do not have seven distinct timing seeds")
 	if Array(summary.get("active_head_layer_counts", [])) != EXPECTED_ACTIVE_HALF:
-		errors.append("50% flow does not activate exactly 150 interleaved heads")
+		errors.append("50% flow does not activate exactly 505 interleaved heads")
 	if Array(summary.get("trail_segment_capacities", [])) != EXPECTED_LAYER_CAPACITIES:
-		errors.append("22,500 segment slots are not divided by palette population")
+		errors.append("75,000 segment slots are not divided by palette population")
 	if Array(summary.get("head_layer_z_indices", [])) != EXPECTED_LAYER_Z:
 		errors.append("head palette layers do not have stable z-indices 0 through 6")
 	if Array(summary.get("trail_segment_z_indices", [])) != EXPECTED_LAYER_Z:
@@ -568,8 +649,8 @@ func _ready() -> void:
 		errors.append("immutable segment texture is not the expected 1x8 envelope")
 	if Vector2(summary.get("head_texture_size", Vector2.ZERO)) != Vector2.ONE:
 		errors.append("hidden head texture is not the expected 1x1 source")
-	if int(summary.get("trail_segment_capacity", 0)) != 22500:
-		errors.append("expected 22,500 immutable segment slots")
+	if int(summary.get("trail_segment_capacity", 0)) != 75000:
+		errors.append("expected 75,000 immutable segment slots")
 	if not is_equal_approx(
 		float(summary.get("trail_segment_lifetime_uniform", 0.0)),
 		2.0
@@ -814,7 +895,7 @@ func _ready() -> void:
 	stage.call(&"set_gate_width", &"reservoir_main", 10.0)
 	summary = stage.call(&"runtime_summary")
 	var expected_full_gate_width := 223.71 * 2.0 / 120.0
-	if int(summary.get("trail_segment_capacity", 0)) != 22500:
+	if int(summary.get("trail_segment_capacity", 0)) != 75000:
 		errors.append("gate geometry unexpectedly changed trail capacity")
 	if not is_equal_approx(
 		float(summary.get("gate_width", 0.0)),
@@ -938,22 +1019,62 @@ func _ready() -> void:
 		errors.append("queued controller flow_rate did not update")
 	if not bool(summary.get("debug_visible", false)):
 		errors.append("absolute controller debug geometry visibility did not update")
-	if not is_equal_approx(float(summary.get("amount_ratio", 0.0)), 0.75):
+	if not is_equal_approx(float(summary.get("amount_ratio", 0.0)), 753.0 / 1000.0):
 		errors.append("controller flow_rate did not update active population")
-	if int(summary.get("active_heads_approx", 0)) != 225:
-		errors.append("75% flow does not activate exactly 225 global heads")
+	if int(summary.get("active_heads_approx", 0)) != 753:
+		errors.append("75% flow does not activate exactly 753 global heads")
 	if Array(summary.get("active_head_layer_counts", [])) != [
-		33, 32, 32, 32, 32, 32, 32
+		108, 107, 108, 108, 107, 109, 106
 	]:
-		errors.append("75% flow does not preserve exact interleaved activation")
+		errors.append("75% flow does not preserve exact evenly phased activation")
 	if not is_equal_approx(float(summary.get("base_speed_uniform", 0.0)), 450.0):
 		errors.append("controller flow_rate did not update core speed")
 	if not is_equal_approx(float(summary.get("velocity_response_uniform", 0.0)), 14.0):
 		errors.append("controller velocity response did not reach particle shader")
-	for amount_ratio: Variant in Array(summary.get("head_layer_amount_ratios", [])):
-		if not is_equal_approx(float(amount_ratio), 0.75):
-			errors.append("controller flow ratio did not reach every head layer")
+	for native_amount_ratio: Variant in Array(
+		summary.get("head_layer_amount_ratios", [])
+	):
+		if not is_equal_approx(float(native_amount_ratio), 1.0):
+			errors.append("a native palette emitter still uses batch-prone amount ratio")
 			break
+	var expected_layer_amount_ratios := [
+		108.0 / 143.0,
+		107.0 / 143.0,
+		108.0 / 143.0,
+		108.0 / 143.0,
+		107.0 / 143.0,
+		109.0 / 143.0,
+		106.0 / 142.0,
+	]
+	var actual_layer_amount_ratios := Array(
+		summary.get("head_layer_logical_active_ratios", [])
+	)
+	for layer_index in range(expected_layer_amount_ratios.size()):
+		if (
+			layer_index >= actual_layer_amount_ratios.size()
+			or not is_equal_approx(
+				float(actual_layer_amount_ratios[layer_index]),
+				float(expected_layer_amount_ratios[layer_index]),
+			)
+		):
+			errors.append("controller logical flow ratio did not reach every head layer")
+			break
+	for active_count_uniform: Variant in Array(
+		summary.get("active_particle_count_uniforms", [])
+	):
+		if not is_equal_approx(float(active_count_uniform), 753.0):
+			errors.append("controller active head count did not reach every shader")
+			break
+	for coverage_uniform: Variant in Array(
+		summary.get("water_coverage_fraction_uniforms", [])
+	):
+		if not is_equal_approx(float(coverage_uniform), 0.75):
+			errors.append("controller center-band coverage did not reach every shader")
+			break
+	if not Vector2(
+		summary.get("water_inlet_band_y_range_pixels", Vector2.ZERO)
+	).is_equal_approx(Vector2(156.0, 924.0)):
+		errors.append("75% water does not widen symmetrically around screen center")
 	for base_speed: Variant in Array(summary.get("base_speed_uniforms", [])):
 		if not is_equal_approx(float(base_speed), 450.0):
 			errors.append("controller flow speed did not reach every head shader")
@@ -1066,7 +1187,7 @@ func _ready() -> void:
 		72.0
 	):
 		errors.append("trail discontinuity bound did not reach head shader")
-	if int(summary.get("trail_segment_capacity", 0)) != 22500:
+	if int(summary.get("trail_segment_capacity", 0)) != 75000:
 		errors.append("flow-rate change unexpectedly resized immutable segment pool")
 	if not bool(summary.get("paused", false)):
 		errors.append("controller action dictionary did not pause")
@@ -1117,7 +1238,7 @@ func _ready() -> void:
 		)
 		and is_equal_approx(
 			float(controller_leaf_summary.get("free_search_max_distance_pixels", 0.0)),
-			480.0
+			540.0
 		)
 		and is_equal_approx(
 			float(controller_leaf_summary.get("stopped_fade_seconds", 0.0)),
@@ -1237,7 +1358,7 @@ func _ready() -> void:
 	summary = stage.call(&"runtime_summary")
 	if int(summary.get("interaction_polygon_count", 0)) != 7:
 		errors.append("controller polygon removal did not restore the resident slot bank")
-	if int(summary.get("trail_segment_capacity", 0)) != 22500:
+	if int(summary.get("trail_segment_capacity", 0)) != 75000:
 		errors.append("polygon geometry edits unexpectedly changed trail capacity")
 
 	# The operation ID is authoritative even if a hostile or stale payload also
@@ -1337,6 +1458,7 @@ func _ready() -> void:
 	):
 		errors.append("idempotent native reservoir radius flushed ownership")
 	_check_kinship_ecology_schedule(stage, errors)
+	await _check_watershed_ai_control(stage, errors)
 	await _check_regime_runtime_stability(stage, errors)
 	_check_controller_ownership_regression(stage, errors)
 	await _check_stage_title_reset_independence(stage, errors)
@@ -1344,8 +1466,8 @@ func _ready() -> void:
 	if errors.is_empty():
 		print(
 			"GPU_STAGE_SMOKE_OK: one_stage=true native=1920x1080 "
-			+ "slots=300 active=~150 render_paced=true max_fps=30 interpolation=true "
-				+ "immutable_segments=22500 palette_layers=7 fixed_z=true "
+			+ "slots=1000 active=505 render_paced=true max_fps=30 interpolation=true "
+				+ "immutable_segments=75000 palette_layers=7 fixed_z=true "
 				+ "identity=true gate=true pause=true "
 				+ "debug=true title=true temperature=true regimes=true controller=true "
 				+ "polygons=true salmon=true leaves=true"
@@ -1355,6 +1477,301 @@ func _ready() -> void:
 	for error in errors:
 		push_error("GPU_STAGE_SMOKE: %s" % error)
 	get_tree().quit(1)
+
+
+func _check_watershed_ai_control(
+	stage: Node,
+	errors: PackedStringArray,
+) -> void:
+	var bus := get_node_or_null("/root/FlowControlBus")
+	var regimes := get_node_or_null("/root/ModelRegimes")
+	if bus == null or regimes == null:
+		errors.append("Watershed AI smoke requires both control autoloads")
+		return
+	regimes.call(&"clear_regimes")
+	stage.call(
+		&"set_runtime_parameter",
+		&"watershed.drives_flow_rate",
+		true,
+	)
+	var baseline: Dictionary = stage.call(&"runtime_summary")
+	var baseline_gate_open := bool(baseline.get("gate_open_authored", true))
+	var baseline_input_rate := float(baseline.get("basin_input_rate", -1.0))
+	var baseline_node_count := _recursive_node_count(stage)
+	var baseline_pool_signature := _particle_pool_signature(stage)
+	var baseline_texture_signature := _stage_texture_signature(stage)
+	var baseline_feature_signature := _feature_resource_signature(stage)
+	var state := _watershed_ai_smoke_state("watershed-smoke-1")
+	var packet := _watershed_ai_smoke_packet(state)
+	var inactive_stage_validation: Dictionary = stage.call(
+		&"validate_watershed_ai_control_message",
+		packet,
+	)
+	if bool(inactive_stage_validation.get("ok", false)):
+		errors.append("GPU stage accepted Watershed AI outside exclusive Watershed")
+	if bool(bus.call(&"submit_packet", packet, "smoke-test", 0)):
+		errors.append("Watershed AI packet was accepted while Watershed was inactive")
+
+	regimes.call(&"set_active_names", ["Watershed"])
+	var unloaded_target_packet: Dictionary = packet.duplicate(true)
+	unloaded_target_packet["target"] = "feather_river"
+	if bool(bus.call(
+		&"submit_packet",
+		unloaded_target_packet,
+		"smoke-test",
+		0,
+	)):
+		errors.append("Watershed AI packet accepted zero loaded recipients")
+	var duplicate_recipient := DuplicateWatershedAIRecipient.new()
+	add_child(duplicate_recipient)
+	duplicate_recipient.add_to_group(&"flow_models")
+	if bool(bus.call(&"submit_packet", packet, "smoke-test", 0)):
+		errors.append("Watershed AI packet accepted multiple loaded recipients")
+	duplicate_recipient.queue_free()
+	await get_tree().process_frame
+	var wildcard_packet: Dictionary = packet.duplicate(true)
+	wildcard_packet["target"] = "*"
+	if bool(bus.call(&"submit_packet", wildcard_packet, "smoke-test", 0)):
+		errors.append("Watershed AI packet accepted a wildcard target")
+	var action_packet: Dictionary = packet.duplicate(true)
+	action_packet["actions"] = ["release_salmon"]
+	if bool(bus.call(&"submit_packet", action_packet, "smoke-test", 0)):
+		errors.append("Watershed AI packet accepted an action")
+	var geometry_packet: Dictionary = packet.duplicate(true)
+	geometry_packet["geometry_ops"] = [{"op": "remove", "id": "reservoir_main"}]
+	if bool(bus.call(&"submit_packet", geometry_packet, "smoke-test", 0)):
+		errors.append("Watershed AI packet accepted a geometry operation")
+	var malformed_packet: Dictionary = packet.duplicate(true)
+	var malformed_changes: Dictionary = Dictionary(
+		malformed_packet["changes"]
+	).duplicate(true)
+	var malformed_state: Dictionary = Dictionary(
+		malformed_changes["watershed.ai.state"]
+	).duplicate(true)
+	malformed_state["atmospheric_input_rate"] = INF
+	malformed_changes["watershed.ai.state"] = malformed_state
+	malformed_packet["changes"] = malformed_changes
+	if bool(bus.call(&"submit_packet", malformed_packet, "smoke-test", 0)):
+		errors.append("Watershed AI packet accepted a non-finite state")
+	var out_of_range_packet: Dictionary = packet.duplicate(true)
+	var out_of_range_changes: Dictionary = Dictionary(
+		out_of_range_packet["changes"]
+	).duplicate(true)
+	var out_of_range_state: Dictionary = Dictionary(
+		out_of_range_changes["watershed.ai.state"]
+	).duplicate(true)
+	out_of_range_state["city_fraction"] = 1.01
+	out_of_range_changes["watershed.ai.state"] = out_of_range_state
+	out_of_range_packet["changes"] = out_of_range_changes
+	if bool(bus.call(&"submit_packet", out_of_range_packet, "smoke-test", 0)):
+		errors.append("Watershed AI packet accepted an out-of-range state")
+	var before_apply: Dictionary = stage.call(&"runtime_summary")
+	if not String(before_apply.get(
+		"watershed_ai_applied_decision_id",
+		"",
+	)).is_empty():
+		errors.append("rejected Watershed AI packets changed applied state")
+
+	if not bool(bus.call(&"submit_packet", packet, "smoke-test", 0)):
+		errors.append("valid Watershed AI packet was rejected")
+	await get_tree().process_frame
+	var applied: Dictionary = stage.call(&"runtime_summary")
+	var applied_state: Dictionary = applied.get("watershed_ai_applied_state", {})
+	var applied_hash := String(applied.get("watershed_ai_applied_state_hash", ""))
+	if applied_hash != (
+		"abfc3b0a9327e7d9c4403dcd15e475a74c4223427eb9de96d0aeea03a2e4f5f9"
+	):
+		errors.append("Watershed AI state hash changed from the cross-language fixture")
+	if not (
+		bool(applied.get("watershed_ai_applied", false))
+		and bool(applied.get("watershed_ai_exclusive_active", false))
+		and String(applied.get("watershed_ai_applied_decision_id", ""))
+			== "watershed-smoke-1"
+		and applied_hash.length() == 64
+		and applied_state == state
+		and not bool(applied.get("watershed_data_drives_flow_rate", true))
+		and is_equal_approx(float(applied.get("flow_rate", -1.0)), 0.42)
+		and bool(applied.get("gate_open", false))
+	):
+		errors.append("valid Watershed AI state did not apply atomically")
+	var applied_budgets: Dictionary = applied.get(
+		"regime_applied_feature_budgets",
+		{},
+	)
+	var expected_ai_budgets := {
+		"reservoir_area_fraction": 0.50,
+		"reservoir_gate_aperture_fraction": 0.40,
+		"drain_area_fraction": 0.30,
+		"drain_power": 0.30,
+		"obstacle_area_fraction": 0.10,
+		"obstacle_power": 0.10,
+		"shoreline_randomness": 0.0,
+	}
+	for field: String in expected_ai_budgets:
+		if not is_equal_approx(
+			float(applied_budgets.get(field, -1.0)),
+			float(expected_ai_budgets[field]),
+		):
+			errors.append("Watershed AI did not derive visual field '%s'" % field)
+	if not is_equal_approx(
+		float(applied_budgets.get("reservoir_count_raw", -1.0)),
+		1.0,
+	):
+		errors.append("Watershed AI did not overlay reservoir_count")
+	var desired_counts: Dictionary = applied.get(
+		"regime_feature_slot_counts_desired",
+		{},
+	)
+	var rendered_counts: Dictionary = applied.get(
+		"regime_feature_slot_counts_rendered",
+		{},
+	)
+	if not (
+		int(desired_counts.get("drain", -1)) == 2
+		and int(desired_counts.get("obstacle", -1)) == 1
+		and int(rendered_counts.get("drain", -1)) == 2
+		and int(rendered_counts.get("obstacle", -1)) == 1
+	):
+		errors.append("Watershed AI did not modulate the resident feature banks")
+	if (
+		_recursive_node_count(stage) != baseline_node_count
+		or _particle_pool_signature(stage) != baseline_pool_signature
+		or _stage_texture_signature(stage) != baseline_texture_signature
+		or _feature_resource_signature(stage) != baseline_feature_signature
+	):
+		errors.append("Watershed AI replaced a fixed runtime resource")
+
+	var acknowledgement: Dictionary = bus.call(
+		&"_protocol_acknowledgement",
+		packet,
+		1,
+		true,
+		"",
+	)
+	var acknowledged_states: Dictionary = acknowledgement.get(
+		"recipient_watershed_ai_state",
+		{},
+	)
+	var delta_ack: Dictionary = acknowledged_states.get("delta", {})
+	var observation: Dictionary = delta_ack.get("current_observation", {})
+	if not (
+		String(acknowledgement.get("control_scope", "")) == "watershed-ai/2"
+		and Array(acknowledgement.get("regime_active_indices", [])) == [6]
+		and String(delta_ack.get("applied_decision_id", ""))
+			== "watershed-smoke-1"
+		and String(delta_ack.get("applied_state_hash", "")) == applied_hash
+		and String(observation.get("screen_id", "")) == "delta"
+		and bool(observation.get("temperature_valid", false))
+	):
+		errors.append("Watershed AI acknowledgement omitted applied state or observation")
+
+	var apply_count := int(applied.get("watershed_ai_apply_count", -1))
+	if not bool(bus.call(&"submit_packet", packet, "smoke-test", 0)):
+		errors.append("identical Watershed AI retry was rejected")
+	await get_tree().process_frame
+	var deduplicated: Dictionary = stage.call(&"runtime_summary")
+	if (
+		int(deduplicated.get("watershed_ai_apply_count", -2)) != apply_count
+		or int(deduplicated.get("watershed_ai_deduplicated_count", 0)) < 1
+	):
+		errors.append("identical Watershed AI retry repeated GPU work")
+
+	var conflict_packet: Dictionary = packet.duplicate(true)
+	var conflict_changes: Dictionary = Dictionary(
+		conflict_packet["changes"]
+	).duplicate(true)
+	var conflict_state: Dictionary = Dictionary(
+		conflict_changes["watershed.ai.state"]
+	).duplicate(true)
+	conflict_state["atmospheric_input_rate"] = 0.50
+	conflict_state["available_supply_rate"] = 0.60
+	conflict_state["remaining_rate"] = 0.36
+	conflict_changes["watershed.ai.state"] = conflict_state
+	conflict_packet["changes"] = conflict_changes
+	if bool(bus.call(&"submit_packet", conflict_packet, "smoke-test", 0)):
+		errors.append("Watershed AI reused a decision ID with different state")
+	var after_conflict: Dictionary = stage.call(&"runtime_summary")
+	if not is_equal_approx(float(after_conflict.get("flow_rate", -1.0)), 0.42):
+		errors.append("rejected Watershed AI conflict partially changed the stage")
+
+	var same_state_new_id := state.duplicate(true)
+	same_state_new_id["decision_id"] = "watershed-smoke-2"
+	var same_state_packet := _watershed_ai_smoke_packet(same_state_new_id)
+	if not bool(bus.call(&"submit_packet", same_state_packet, "smoke-test", 0)):
+		errors.append("new Watershed AI decision ID with identical state was rejected")
+	await get_tree().process_frame
+	var id_only: Dictionary = stage.call(&"runtime_summary")
+	if not (
+		String(id_only.get("watershed_ai_applied_decision_id", ""))
+			== "watershed-smoke-2"
+		and int(id_only.get("watershed_ai_apply_count", -2)) == apply_count
+	):
+		errors.append("identical Watershed AI visual state repeated GPU work")
+
+	regimes.call(&"set_active_names", ["Tech"])
+	await get_tree().process_frame
+	var restored: Dictionary = stage.call(&"runtime_summary")
+	var restored_features: Dictionary = restored.get(
+		"regime_effective_feature_state",
+		{},
+	)
+	var restored_drain: Dictionary = restored_features.get(
+		"drain_area_fraction",
+		{},
+	)
+	if not (
+		not bool(restored.get("watershed_ai_applied", true))
+		and String(restored.get("watershed_ai_applied_state_hash", "")).is_empty()
+		and bool(restored.get("watershed_data_drives_flow_rate", false))
+		and is_equal_approx(
+			float(restored.get("basin_input_rate", -2.0)),
+			baseline_input_rate
+		)
+		and is_equal_approx(
+			float(restored.get("flow_rate", -2.0)),
+			baseline_input_rate * 0.75
+		)
+		and bool(restored.get("gate_open_authored", not baseline_gate_open))
+			== baseline_gate_open
+		and Array(restored_drain.get("contributor_ids", [])) == ["tech"]
+	):
+		errors.append("leaving exclusive Watershed did not restore profile/timeline state")
+	regimes.call(&"clear_regimes")
+
+
+func _watershed_ai_smoke_state(decision_id: String) -> Dictionary:
+	return {
+		"schema_version": 2,
+		"decision_id": decision_id,
+		"atmospheric_input_rate": 0.60,
+		"reservoir_release_rate": 0.10,
+		"available_supply_rate": 0.70,
+		"extraction_fraction": 0.40,
+		"remaining_rate": 0.42,
+		"salmon_fraction": 0.35,
+		"floodplain_fraction": 0.25,
+		"agriculture_fraction": 0.15,
+		"data_center_fraction": 0.15,
+		"city_fraction": 0.10,
+		"reservoir_storage_fraction": 0.50,
+		"hydropower_fraction": 0.0,
+		"water_project_fraction": 0.0,
+	}
+
+
+func _watershed_ai_smoke_packet(state: Dictionary) -> Dictionary:
+	return {
+		"protocol": "ink-flow/1",
+		"control_scope": "watershed-ai/2",
+		"target": "delta",
+		"changes": {"watershed.ai.state": state.duplicate(true)},
+		"geometry_ops": [],
+		"actions": [],
+		"metadata": {
+			"source": "gpu-stage-smoke",
+			"request_id": String(state.get("decision_id", "")),
+		},
+	}
 
 
 func _check_water_temperature_title(
@@ -2500,11 +2917,11 @@ func _check_agriculture_field_contract(
 					% [label, bank_side, root_y]
 			)
 	for uniform_spec: Array in [
-		["bank_field_suction_reach_pixels", "bank_field_suction_reach_uniforms", 300.0],
+		["bank_field_suction_reach_pixels", "bank_field_suction_reach_uniforms", 720.0],
 		[
 			"bank_field_suction_crossflow_ratio",
 			"bank_field_suction_crossflow_uniforms",
-			1.60,
+			3.0,
 		],
 		[
 			"bank_field_suction_streamwise_ratio",
@@ -2514,7 +2931,7 @@ func _check_agriculture_field_contract(
 		[
 			"bank_field_min_withdrawal_speed_pixels",
 			"bank_field_min_withdrawal_speed_uniforms",
-			540.0,
+			720.0,
 		],
 		["bank_field_capture_depth_pixels", "bank_field_capture_depth_uniforms", 18.0],
 	]:
@@ -2601,9 +3018,17 @@ func _expect_disabled_controller_records_packed(
 		errors.append("%s lost the disabled regime_-prefixed controller polygon" % state_label)
 	var rendered := Dictionary(summary.get("regime_feature_slot_counts_rendered", {}))
 	var interaction_packed := int(summary.get("interaction_overlay_count", 0))
-	var managed_interaction_count := int(rendered.get("drain", 0)) + int(
+	var explicit_extractor_count := int(summary.get(
+		"active_regime_extractor_count",
+		0,
+	))
+	# Explicit extractor rectangles replace generic regime drain slots in the
+	# GPU texture; obstacles and both controller-owned records remain packed.
+	var managed_interaction_count := explicit_extractor_count + int(
 		rendered.get("obstacle", 0)
 	)
+	if explicit_extractor_count == 0:
+		managed_interaction_count += int(rendered.get("drain", 0))
 	if interaction_packed != managed_interaction_count + 2:
 		errors.append("%s compacted a disabled controller polygon" % state_label)
 	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
@@ -2685,9 +3110,10 @@ func _expect_regime_slot_counts(
 		errors.append("%s rendered slot counts are incorrect" % label)
 	if resident != EXPECTED_REGIME_SLOT_CAPACITIES:
 		errors.append("%s changed the fixed resident feature bank" % label)
-	var expected_interactions := int(expected.get("drain", 0)) + int(
-		expected.get("obstacle", 0)
-	)
+	# The rendered slot counts describe the fixed generic regime bank. Active
+	# basin extractor rectangles can replace its drain records, so validate the
+	# actual GPU count against the overlay's packed record count instead.
+	var expected_interactions := int(summary.get("interaction_overlay_count", 0))
 	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
 		if int(count_variant) != expected_interactions:
 			errors.append("%s interaction slot count missed a water shader" % label)

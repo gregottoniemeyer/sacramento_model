@@ -45,7 +45,7 @@ func _ready() -> void:
 		"free_sway_period_max_seconds": 2.8,
 		"free_water_search_radius_pixels": 120.0,
 		"free_water_steering_strength": 0.35,
-		"free_search_max_distance_pixels": 256.0,
+		"free_search_max_distance_pixels": 540.0,
 		"stopped_fade_seconds": 0.50,
 		"water_alpha_threshold": 0.001,
 		"contact_radius_pixels": 12.0,
@@ -190,14 +190,14 @@ func _ready() -> void:
 	)
 	_assert_or_quit(
 		String(summary.get("miss_behavior", ""))
-			== "STOP_AT_INWARD_Y_DISTANCE_THEN_FADE"
+			== "REACH_SCREEN_MIDLINE_THEN_FADE"
 		and String(summary.get("miss_state", "")) == "STOPPED_FADING"
 		and String(summary.get("miss_retirement", ""))
 			== "FREEZE_FADE_THEN_INACTIVE"
 		and String(summary.get("free_search_policy", ""))
-			== "NEARBY_2D_WATER_STEERING_UNTIL_DISTANCE_BOUND"
+			== "NEARBY_2D_WATER_STEERING_UNTIL_SCREEN_MIDLINE"
 		and String(summary.get("free_search_distance_measure", ""))
-			== "INWARD_Y_FROM_ORIGIN_BANK"
+			== "INWARD_Y_FROM_ORIGIN_BANK_TO_MIDLINE"
 		and String(summary.get("free_search_backward_samples", "")) == "REJECTED"
 		and int(summary.get("free_search_axis_samples", 0)) == 17
 		and is_equal_approx(
@@ -210,7 +210,11 @@ func _ready() -> void:
 		)
 		and is_equal_approx(
 			float(summary.get("free_search_max_distance_pixels", 0.0)),
-			256.0
+			540.0
+		)
+		and is_equal_approx(
+			float(summary.get("minimum_fade_inward_distance_pixels", 0.0)),
+			540.0
 		)
 		and is_equal_approx(float(summary.get("stopped_fade_seconds", 0.0)), 0.50),
 		"free leaves do not use bounded 2D water search and stopped fading"
@@ -333,7 +337,7 @@ func _ready() -> void:
 			float(head_material.get_shader_parameter(
 				&"free_search_max_distance_pixels"
 			)),
-			256.0
+				540.0
 		)
 		and is_equal_approx(
 			float(head_material.get_shader_parameter(&"stopped_fade_seconds")),

@@ -23,6 +23,28 @@ const DEFAULT_BIND_ADDRESS := "0.0.0.0"
 const UDP_PORT_SETTING := "flow_control/udp_port"
 const BIND_ADDRESS_SETTING := "flow_control/bind_address"
 const MAX_PACKETS_PER_FRAME := 256
+const WATERSHED_AI_CONTROL_SCOPE := "watershed-ai/2"
+const WATERSHED_AI_STATE_PATH := "watershed.ai.state"
+const WATERSHED_REGIME_INDEX := 6
+const CANONICAL_SCREEN_IDS: Array[String] = [
+	"mount_shasta",
+	"mccloud_pit",
+	"cottonwood_creek",
+	"mill_creek",
+	"feather_river",
+	"american_river",
+	"delta",
+]
+const WATERSHED_AI_TOP_LEVEL_FIELDS: Array[String] = [
+	"protocol",
+	"revision",
+	"target",
+	"changes",
+	"geometry_ops",
+	"actions",
+	"metadata",
+	"control_scope",
+]
 const PROCESS_GLOBAL_REGIME_PATHS: Array[String] = [
 	"regimes.active_indices",
 	"regimes.active_names",
@@ -239,6 +261,22 @@ func _handle_packet(
 		)
 		if normalized.is_empty():
 			return false
+		var scope_result := _validate_control_scope(normalized)
+		if not bool(scope_result.get("ok", false)):
+			var scope_reason := String(scope_result.get(
+				"error",
+				"The scoped control packet was rejected.",
+			))
+			_emit_packet_error(scope_reason, sender_ip, sender_port)
+			_send_protocol_ack(
+				normalized,
+				sender_ip,
+				sender_port,
+				0,
+				false,
+				scope_reason,
+			)
+			return false
 		var global_result := _apply_process_global_regime_changes(
 			normalized,
 			sender_ip,
@@ -253,6 +291,8 @@ func _handle_packet(
 			sender_ip,
 			sender_port,
 			recipient_count,
+			true,
+			"",
 		)
 		return true
 
@@ -346,6 +386,164 @@ func _normalize_protocol_packet(
 	return normalized
 
 
+func _validate_control_scope(message: Dictionary) -> Dictionary:
+	var scope := String(message.get("control_scope", "")).strip_edges()
+	if scope.is_empty():
+		return {"ok": true}
+	if scope != WATERSHED_AI_CONTROL_SCOPE:
+		return {
+			"ok": false,
+			"error": "Unsupported control_scope '%s'." % scope,
+		}
+	for field_variant: Variant in message:
+		var field := String(field_variant)
+		if field not in WATERSHED_AI_TOP_LEVEL_FIELDS:
+			return {
+				"ok": false,
+				"error": (
+					"Watershed AI packets cannot contain top-level field '%s'."
+					% field
+				),
+			}
+	var target_variant: Variant = message.get("target", "")
+	if not (target_variant is String or target_variant is StringName):
+		return {
+			"ok": false,
+			"error": "Watershed AI target must be one explicit screen ID.",
+		}
+	var target := String(target_variant)
+	if target not in CANONICAL_SCREEN_IDS:
+		return {
+			"ok": false,
+			"error": (
+				"Watershed AI target '%s' is not a canonical screen ID." % target
+			),
+		}
+	var changes_variant: Variant = message.get("changes", {})
+	if not changes_variant is Dictionary:
+		return {
+			"ok": false,
+			"error": "Watershed AI changes must be a dictionary.",
+		}
+	var changes: Dictionary = changes_variant
+	if changes.size() != 1 or not changes.has(WATERSHED_AI_STATE_PATH):
+		return {
+			"ok": false,
+			"error": (
+				"Watershed AI packets require exactly one '%s' change."
+				% WATERSHED_AI_STATE_PATH
+			),
+		}
+	if not changes[WATERSHED_AI_STATE_PATH] is Dictionary:
+		return {
+			"ok": false,
+			"error": "Watershed AI state must be a dictionary.",
+		}
+	if not Array(message.get("geometry_ops", [])).is_empty():
+		return {
+			"ok": false,
+			"error": "Watershed AI packets cannot contain geometry operations.",
+		}
+	if not Array(message.get("actions", [])).is_empty():
+		return {
+			"ok": false,
+			"error": "Watershed AI packets cannot contain actions.",
+		}
+	var metadata_variant: Variant = message.get("metadata", {})
+	if not metadata_variant is Dictionary:
+		return {
+			"ok": false,
+			"error": "Watershed AI metadata must be a dictionary.",
+		}
+	var request_id := String(Dictionary(metadata_variant).get(
+		"request_id",
+		"",
+	)).strip_edges()
+	if request_id.is_empty() or request_id.length() > 128:
+		return {
+			"ok": false,
+			"error": "Watershed AI metadata.request_id must contain 1..128 characters.",
+		}
+	if not _exclusive_watershed_active():
+		return {
+			"ok": false,
+			"error": "Watershed AI control requires exclusive active_indices [6].",
+		}
+	return _validate_watershed_ai_recipients(message)
+
+
+func _exclusive_watershed_active() -> bool:
+	var model_regimes := get_node_or_null("/root/ModelRegimes")
+	if model_regimes == null:
+		return false
+	var snapshot: Dictionary = model_regimes.call(&"snapshot")
+	var active_indices_variant: Variant = snapshot.get("active_indices", [])
+	if not active_indices_variant is Array:
+		return false
+	var active_indices: Array = active_indices_variant
+	return (
+		active_indices.size() == 1
+		and int(active_indices[0]) == WATERSHED_REGIME_INDEX
+	)
+
+
+func _validate_watershed_ai_recipients(message: Dictionary) -> Dictionary:
+	var target: Variant = message.get("target", "")
+	var recipient_count := 0
+	for candidate in get_tree().get_nodes_in_group(FLOW_MODELS_GROUP):
+		var model := candidate as Node
+		if (
+			model == null
+			or not is_instance_valid(model)
+			or not _target_matches_model(target, model)
+		):
+			continue
+		recipient_count += 1
+		if not model.has_method(&"queue_control_message"):
+			return {
+				"ok": false,
+				"error": (
+					"Target '%s' cannot queue Watershed AI control."
+					% String(target)
+				),
+			}
+		if not model.has_method(&"validate_watershed_ai_control_message"):
+			return {
+				"ok": false,
+				"error": (
+					"Target '%s' does not implement Watershed AI validation."
+					% String(target)
+				),
+			}
+		var result_variant: Variant = model.call(
+			&"validate_watershed_ai_control_message",
+			message,
+		)
+		if not result_variant is Dictionary:
+			return {
+				"ok": false,
+				"error": "Watershed AI recipient returned no validation result.",
+			}
+		var result: Dictionary = result_variant
+		if not bool(result.get("ok", false)):
+			return {
+				"ok": false,
+				"error": String(result.get(
+					"error",
+					"Watershed AI recipient rejected the state.",
+				)),
+			}
+	if recipient_count != 1:
+		return {
+			"ok": false,
+			"error": (
+				"Watershed AI target '%s' requires exactly one loaded recipient; found %d."
+				% [String(target), recipient_count]
+			),
+		}
+	return {"ok": true}
+
+
 func _apply_process_global_regime_changes(
 	message: Dictionary,
 	sender_ip: String,
@@ -434,33 +632,17 @@ func _send_protocol_ack(
 	sender_ip: String,
 	sender_port: int,
 	recipient_count: int,
+	accepted: bool = true,
+	reason: String = "",
 ) -> void:
 	if _udp == null or sender_port <= 0 or sender_ip.is_empty():
 		return
-	var active_indices: Array = []
-	var regime_revision := 0
-	var model_regimes := get_node_or_null("/root/ModelRegimes")
-	if model_regimes != null:
-		var snapshot: Dictionary = model_regimes.call(&"snapshot")
-		active_indices = Array(snapshot.get("active_indices", [])).duplicate()
-		regime_revision = int(snapshot.get("revision", 0))
-	var metadata_variant: Variant = message.get("metadata", {})
-	var request_id := ""
-	if metadata_variant is Dictionary:
-		request_id = String(Dictionary(metadata_variant).get("request_id", ""))
-	var acknowledgement := {
-		"protocol": ACK_PROTOCOL,
-		"accepted": true,
-		"revision": int(message.get("revision", 0)),
-		"request_id": request_id,
-		"recipient_count": recipient_count,
-		"recipient_screen_ids": _recipient_screen_ids(message.get("target", "*")),
-		"recipient_debug_geometry_visible": _recipient_debug_geometry_visibility(
-			message.get("target", "*")
-		),
-		"regime_active_indices": active_indices,
-		"regime_revision": regime_revision,
-	}
+	var acknowledgement := _protocol_acknowledgement(
+		message,
+		recipient_count,
+		accepted,
+		reason,
+	)
 	var destination_error := _udp.set_dest_address(sender_ip, sender_port)
 	if destination_error != OK:
 		var destination_reason := (
@@ -478,6 +660,43 @@ func _send_protocol_ack(
 		)
 		push_warning(send_reason)
 		transport_error.emit(send_reason)
+
+
+func _protocol_acknowledgement(
+	message: Dictionary,
+	recipient_count: int,
+	accepted: bool = true,
+	reason: String = "",
+) -> Dictionary:
+	var active_indices: Array = []
+	var regime_revision := 0
+	var model_regimes := get_node_or_null("/root/ModelRegimes")
+	if model_regimes != null:
+		var snapshot: Dictionary = model_regimes.call(&"snapshot")
+		active_indices = Array(snapshot.get("active_indices", [])).duplicate()
+		regime_revision = int(snapshot.get("revision", 0))
+	var metadata_variant: Variant = message.get("metadata", {})
+	var request_id := ""
+	if metadata_variant is Dictionary:
+		request_id = String(Dictionary(metadata_variant).get("request_id", ""))
+	return {
+		"protocol": ACK_PROTOCOL,
+		"accepted": accepted,
+		"reason": reason,
+		"revision": int(message.get("revision", 0)),
+		"request_id": request_id,
+		"control_scope": String(message.get("control_scope", "")),
+		"recipient_count": recipient_count,
+		"recipient_screen_ids": _recipient_screen_ids(message.get("target", "*")),
+		"recipient_debug_geometry_visible": _recipient_debug_geometry_visibility(
+			message.get("target", "*")
+		),
+		"recipient_watershed_ai_state": _recipient_watershed_ai_state(
+			message.get("target", "*")
+		),
+		"regime_active_indices": active_indices,
+		"regime_revision": regime_revision,
+	}
 
 
 func _recipient_screen_ids(target: Variant) -> Array[String]:
@@ -527,6 +746,30 @@ func _recipient_debug_geometry_visibility(target: Variant) -> Dictionary:
 		if not screen_id.is_empty() and visibility_variant != null:
 			visibility_by_screen[screen_id] = bool(visibility_variant)
 	return visibility_by_screen
+
+
+func _recipient_watershed_ai_state(target: Variant) -> Dictionary:
+	var state_by_screen: Dictionary = {}
+	for candidate in get_tree().get_nodes_in_group(FLOW_MODELS_GROUP):
+		var model := candidate as Node
+		if (
+			model == null
+			or not is_instance_valid(model)
+			or not _target_matches_model(target, model)
+			or not model.has_method(&"get_watershed_ai_ack_state")
+		):
+			continue
+		var screen_id := ""
+		if model.has_method(&"get_screen_id"):
+			screen_id = String(model.call(&"get_screen_id"))
+		else:
+			var screen_variant: Variant = _property_value(model, "screen_id")
+			if screen_variant != null:
+				screen_id = String(screen_variant)
+		var state_variant: Variant = model.call(&"get_watershed_ai_ack_state")
+		if not screen_id.is_empty() and state_variant is Dictionary:
+			state_by_screen[screen_id] = Dictionary(state_variant).duplicate(true)
+	return state_by_screen
 
 
 func _handle_legacy_packet(
@@ -594,6 +837,12 @@ func _handle_legacy_packet(
 		"legacy": true,
 		"legacy_speed": speed_step,
 	}
+	var chair_regime_indices: Variant = _regime_indices_from_chairs(packet.get(
+		"chairs",
+		null,
+	))
+	if chair_regime_indices != null:
+		normalized["changes"]["regimes.active_indices"] = chair_regime_indices
 
 	# Keep frequently used chair/regime fields directly accessible as well as
 	# preserving the full original packet under `metadata`.
@@ -628,11 +877,44 @@ func _update_cached_legacy_metadata(
 
 	cached_message["metadata"] = packet.duplicate(true)
 	cached_message["legacy_speed"] = speed_step
+	var chair_regime_indices: Variant = _regime_indices_from_chairs(packet.get(
+		"chairs",
+		null,
+	))
+	if chair_regime_indices != null:
+		cached_message["changes"]["regimes.active_indices"] = chair_regime_indices
 	for key in LEGACY_TOP_LEVEL_METADATA_KEYS:
 		if packet.has(key):
 			cached_message[key] = packet[key]
 		else:
 			cached_message.erase(key)
+
+
+func _regime_indices_from_chairs(chairs_value: Variant) -> Variant:
+	## Occupied chairs are authoritative absolute state in ModelRegimes' fixed
+	## order. When every chair is released, return to the non-extractive Kinship
+	## baseline instead of leaving the installation with no active regime.
+	if chairs_value == null:
+		return null
+	if not chairs_value is Array and not chairs_value is PackedByteArray:
+		return null
+	var chairs: Array = Array(chairs_value)
+	if chairs.size() != 7:
+		return null
+	var active_indices: Array[int] = []
+	for index in range(chairs.size()):
+		var value: Variant = chairs[index]
+		if value is bool:
+			if bool(value):
+				active_indices.append(index)
+		elif value is int or value is float:
+			if is_finite(float(value)) and not is_zero_approx(float(value)):
+				active_indices.append(index)
+		else:
+			return null
+	if active_indices.is_empty():
+		active_indices.append(0)
+	return active_indices
 
 
 func _recipient_signature(target: Variant) -> String:

@@ -161,8 +161,9 @@ link through `river_profile_path` to exact seven-screen tables at
 `gold_rush.txt`, `water_projects.txt`, `hydropower.txt`, and `tech.txt`.
 `profile_status` is descriptive metadata and never suppresses populated data.
 The master and linked tables use schema version `2`. The former supplemental
-source columns are absent. Ordinary water still enters through the fixed,
-full-height left river inlet; that lifecycle boundary is not a regime feature.
+source columns are absent. Ordinary water still enters through the fixed left
+river inlet; that lifecycle boundary is not a regime feature. The available
+range is full-height, while the active source band is centered and flow-scaled.
 
 A populated river cell overrides its master value. A blank river cell inherits
 a populated master value; if both are blank, the feature is undefined. An
@@ -187,7 +188,7 @@ interaction power.
 | Water Projects | S/Mc/F/A/D: `R .33/c1`, `Dr .50`; C/Mi: explicit `R 0/c0`, `Dr 0`; five of seven whole-river stages is the nearest discrete allocation to 75%; all: `Sh 0`, leaves `0`; no gate schedule. |
 | Hydropower | S/Mc/Mi/F/A/D: `R .50/c2`, aperture `.33`, open `01/01–12/31`; C: `R 0/c0`, no gate. `Dr .25` all; `Sh .20` Mc/C and `0` elsewhere. |
 | Tech | All: `R .75/c2`, `Dr .75/p1`, `Sh 0`; gate, obstacle, salmon, and leaf fields blank. |
-| Watershed | Reserved for the future AI watershed model; no linked river table and no runtime effects yet. |
+| Watershed | The authored profile remains a no-op until a valid `watershed-ai/2` seasonal allocation is applied. Selecting Watershed clears every other regime. |
 
 Area fractions are deterministic admission/encounter budgets, not literal
 geometry or guaranteed screen-area coverage. A positive drain or obstacle
@@ -214,13 +215,13 @@ fresh on every real transition, including `Tech -> Agriculture` and a later
 `A -> B -> A`. Re-sending an identical absolute set is idempotent: it publishes
 no change, advances no generation, and uploads no replacement geometry. Fields
 remain stratified along X, alternate top/bottom bank assignment between adjacent
-generations, and receive newly seeded mouths, widths, depths, and lane
+generations, and receive newly seeded widths, depths, and lane
 positions. Obstacles retain their immutable captured shape and move to newly
 seeded positions. An explicit zero activates no physics or debug guide.
 
-Each active regime field is a trapezoid rooted at exactly one top or bottom
-screen edge. Eligible heads curve laterally toward the strongest nearby
-river-facing mouth, cross through that mouth, continue through the field toward
+Each active regime field is an axis-aligned rectangle touching exactly one top
+or bottom screen edge. Eligible heads curve laterally toward the strongest
+nearby river-facing edge, cross through that edge, continue through the field toward
 the bank, and leave the screen. Offscreen recycling remains bounded and waits
 for the immutable trail to fade; no field teleports water or adds particle
 slots.
@@ -253,8 +254,10 @@ cross-stream turbulence plus a smaller streamwise component; only the outermost
 40 pixels apply inward confinement. At zero the complete effect is disabled;
 at `1.0` it is at full strength. No production shoreline polygon, collision
 chain, debug outline, or data texture is created, so the effect does not narrow
-the river. Ordinary left-edge lifecycles retain the full `y = 28…1052` inlet at
-every setting. Existing immutable water history is never rewritten. The uniform
+the river. Ordinary left-edge lifecycles use a centered subset of the available
+`y = 28…1052` range: 1% begins around `y = 540`, and increasing water widens
+the band equally upward and downward until 100% uses the complete range.
+Existing immutable water history is never rewritten. The uniform
 field is cheaper than the former shoreline force and swept-crossing passes.
 
 ### Regime-transition work and bounded state
@@ -318,8 +321,8 @@ texture. The legacy shoreline geometry diagnostic fields remain available for
 compatibility but report zero/empty/unbound values.
 
 Resident absorb records used as regime fields are generated as top- or
-bottom-bank trapezoids. Their suction field turns eligible heads toward the
-river-facing mouth, the swept crossing accepts only that mouth, and the field
+bottom-bank rectangles. Their suction field turns eligible heads toward the
+river-facing edge, the swept crossing accepts only that edge, and the field
 draining state carries accepted heads across the bank and offscreen. Freeform
 controller absorbers retain their legacy upstream-facing swept-entry behavior.
 
@@ -375,8 +378,8 @@ spaced every 120 pixels. The spacing is also the production conversion from one
 world unit to native pixels, so the grid directly describes the 16 x 9 model
 coordinate system. The first and last boundary lines are omitted on both axes,
 so the grid does not form a frame around the screen. The explicit background is
-at absolute Z `-100`, the grid is
-at `-75`, the temperature-bearing title, date, and regime panel are at `-50`, and
+at absolute Z `-100`, the grid is at `-75`, the Delta tide profile is at `-60`,
+the temperature-bearing title, date, and regime panel are at `-50`, and
 water/ecology are at `0` or higher.
 Active features can therefore pass visibly over both the grid and text. The grid
 and text remain outside `WaterOnlyViewport`, so their alpha never counts as
@@ -406,10 +409,56 @@ Each wrapper also loads one 720-row watershed file from
 `res://flow/data/water_pipeline/`. At the default year duration, each row spans
 one running second and a uniform 730 model minutes (12 hours 10 minutes). Since
 the text files contain no timestamps, the displayed `HH:MM` is synthetic uniform
-model time, not an observed timestamp. The water rate is a per-update linear
-interpolation between adjacent `norm` rows, including the last-to-first wrap.
-`norm` maps directly from `0.0…1.0` to `flow_rate` `0.0…1.0`, or 0…100 percent;
-neither the raw nor scaled data column multiplies that value.
+model time, not an observed timestamp. The atmospheric input rate is a
+per-update linear interpolation between adjacent `norm` rows, including the
+last-to-first wrap. `norm` maps directly from `0.0…1.0` to the single basin
+input. Active regimes contribute explicit extraction fractions, capped at 100
+percent. The one modeled output is:
+
+`Delta remainder = basin input × (1 − total extraction fraction)`
+
+The modeled input uses hydrologic memory before this equation. A trailing,
+cyclic 30-day running average spans 59 of the 720 annual samples. The runtime
+then redistributes the existing daily-average fog component into the morning
+pulse and applies a 2% minimum to the combined data-driven input. This prevents
+normal dry-weather precipitation gaps from depicting a dry river while keeping
+the raw and interpolated atmospheric series available for inspection.
+
+`flow_rate` remains the controller-compatible name for that post-extraction
+remainder. The raw and scaled columns never multiply the normalized input.
+
+On the Delta, Kinship floods the central floodplain using borderless 45-degree
+blue hatching with 3-pixel round-capped lines, 6-pixel gaps, fixed 33% alpha,
+and a 6-pixel label knockout. Every regime shows incoming
+Bay tide water from screen-right. Tide height and velocity
+come from `res://flow/data/tide/sf_bay_9414290_tide_720.txt`: 720 resampled NOAA
+CO-OPS hourly predictions for San Francisco station `9414290`, covering the
+same half-open July 1, 2025–June 30, 2026 annual window. The tide is a
+right-anchored FIFO time-series history of 35 pixel-aligned horizontal bars.
+The current value enters at the bottom and every stored value migrates upward
+by 30 pixels over one sample interval. At the interval boundary, the oldest top
+value is popped and the next value is pushed onto the bottom. Normalized tide
+height controls each bar's 41–306 pixel horizontal length, a 66% reach
+reduction. Every bar is solid Dodger Blue and 3 pixels wide, with no boundary,
+label, or arrowhead. The tide renders at Z=-60 below all text. Active extractor and
+city geometry is borderless 45-degree hatching with 3-pixel round-capped lines,
+6-pixel gaps, and fixed 33% alpha, rendered below the water; every overlay
+label is rotated -90 degrees. The internal physics name remains `obstacle` for
+protocol compatibility, but the visible term is City. The Delta budget legend
+has no background fill. Geometry labels use transparent hatch knockouts, with
+every hatch segment stopping six pixels before the measured text bounds.
+
+The seven water-color head emitters keep native `amount_ratio = 1`, zero timing
+randomness, and zero explosiveness. An exact global-slot selector distributes
+the requested logical population over the full emission cycle, and deterministic
+per-layer offsets interleave colors. After its prior two-second immutable tail
+fades, each head resets directly to the inlet instead of waiting for another
+native cycle. This eliminates low-flow packets and blank intervals without
+changing downstream trail or interaction physics. Runtime diagnostics include
+`head_emission_timing`, `head_native_amount_ratio_strategy`,
+`head_reentry_waits_for_native_cycle`, `active_particle_count_uniforms`,
+`water_coverage_fraction_uniforms`, `water_coverage_model`, and
+`water_inlet_band_y_range_pixels`.
 
 `set_model_date_time()`, the compatibility name `set_model_date_mm_dd()`,
 `calendar.date`, and `stage.date` accept canonical `MM/DD-HH:MM`, validate it,
@@ -450,12 +499,15 @@ The production scene-to-data assignments are:
 | `scene_6.tscn` | American River | `american_720.txt` | `american_fair_oaks_temp_c` |
 | `scene_7.tscn` | Delta | `delta_720.txt` | `delta_freeport_temp_c` |
 
-The combined McCloud-Pit display currently uses the McCloud series. The current
-Delta source is a short November 6, 2025–January 17, 2026 gauge-height window in
-feet, not full-year CFS. The pipeline has resampled it to 720 normalized rows and
-the stage stretches those rows across the display year, so its seasonality is
-provisional. Runtime APIs expose the pipeline's nominal `cfs` column under the
-unit-neutral name `raw_value`.
+The combined McCloud-Pit display uses the McCloud station proxy. All seven
+signals cover July 1, 2025 through June 30, 2026 and contain exactly 720
+uniform samples derived from NOAA precipitation, temperature, snowfall, and
+snow-depth records. The Delta is a documented weighted basin aggregate plus
+local Stockton precipitation. Snowmelt, humidity/dew input, travel delay, gap
+handling, normalization, and the speculative Delta weights are reproduced in
+`flow/data/basin_input/basin_input_2025_2026.ipynb` and
+`flow/data/basin_input/build_basin_input_720.py`. The second-column
+`input_mm_day` is exposed through the retained unit-neutral `raw_value` key.
 
 All configured stages share the comma-delimited project resource
 `res://flow/data/water_pipeline/water_temperature_all_rivers_720.txt`.
@@ -720,6 +772,115 @@ the accepted process-wide regime indices and revision. The Governator retries
 unanswered or not-yet-ready startup packets and prints `APPLIED` only after every
 configured process acknowledges the requested indices plus its exact configured
 screen IDs and count.
+
+### Watershed AI visual-control scope
+
+Watershed AI uses a deliberately narrow extension of the modern envelope. It
+controls only the Godot visualization; it is not connected to dams, gates,
+pumps, diversions, field equipment, or any other real infrastructure. A sender
+must address exactly one canonical production `screen_id`, and Watershed must
+already be the only active regime (`regime_active_indices == [6]`). The bus and
+the addressed GPU stage both enforce these conditions synchronously before any
+state is queued or applied, and the named screen must resolve to exactly one
+loaded GPU stage.
+
+```json
+{
+  "protocol": "ink-flow/1",
+  "control_scope": "watershed-ai/2",
+  "target": "feather_river",
+  "changes": {
+    "watershed.ai.state": {
+      "schema_version": 2,
+      "decision_id": "decision-2026-08-21T12:00:00Z",
+      "atmospheric_input_rate": 0.6,
+      "reservoir_release_rate": 0.1,
+      "available_supply_rate": 0.7,
+      "extraction_fraction": 0.4,
+      "remaining_rate": 0.42,
+      "salmon_fraction": 0.35,
+      "floodplain_fraction": 0.25,
+      "agriculture_fraction": 0.15,
+      "data_center_fraction": 0.15,
+      "city_fraction": 0.1,
+      "reservoir_storage_fraction": 0.5,
+      "hydropower_fraction": 0.0,
+      "water_project_fraction": 0.0
+    }
+  },
+  "geometry_ops": [],
+  "actions": [],
+  "metadata": {
+    "source": "watershed-ai",
+    "request_id": "decision-2026-08-21T12:00:00Z"
+  }
+}
+```
+
+The scoped envelope permits only `protocol`, optional `revision`,
+`control_scope`, `target`, `changes`, `geometry_ops`, `actions`, and `metadata`.
+It requires exactly one change named `watershed.ai.state`, empty `actions` and
+`geometry_ops`, and a nonempty `metadata.request_id` of at most 128 characters.
+The target must be one string from the canonical seven-screen list; wildcard,
+array, group, node-name, and node-path targeting are rejected for this scope.
+
+The state dictionary must contain exactly the fifteen fields shown above.
+`schema_version` is the integer `2`; `decision_id` is a nonempty string of at
+most 128 characters; every other state value is numeric, finite, and within
+`0..1`. Shares, extraction, available supply, and remaining water must close
+the deterministic budget, and both legacy power/project fractions must be zero.
+Unknown, missing, non-finite, or out-of-range values reject the complete state,
+so no partial visual update is possible.
+
+Godot computes `applied_state_hash` over the visual values only; `decision_id`
+is intentionally excluded. The sender must reproduce this exact UTF-8 payload,
+joined with `\n` and with no trailing newline, and take its lowercase SHA-256
+hex digest:
+
+```text
+schema_version=%d
+atmospheric_input_rate=%.9f
+reservoir_release_rate=%.9f
+available_supply_rate=%.9f
+extraction_fraction=%.9f
+remaining_rate=%.9f
+salmon_fraction=%.9f
+floodplain_fraction=%.9f
+agriculture_fraction=%.9f
+data_center_fraction=%.9f
+city_fraction=%.9f
+reservoir_storage_fraction=%.9f
+hydropower_fraction=%.9f
+water_project_fraction=%.9f
+```
+
+The fixed-decimal lines use exactly nine digits after the decimal point. A
+replayed `decision_id` with the same hash is an idempotent no-op. Reusing that
+ID with different visual values is rejected. A new ID with the same state hash
+updates the acknowledged ID without repeating GPU or geometry work.
+
+Because delivery to the stage is frame-queued, the immediate ACK may still
+describe the previously applied state. The sender converges by retrying the
+same absolute packet until all of these are true:
+
+- `accepted` is `true` and `control_scope` is `watershed-ai/2`;
+- `regime_active_indices` is exactly `[6]`;
+- `recipient_screen_ids` contains the one requested screen; and
+- `recipient_watershed_ai_state[screen].applied_decision_id` and
+  `.applied_state_hash` equal the sent decision and locally computed hash.
+
+That per-screen entry also returns `eligible`, `applied`, `applied_state`,
+`last_error`, counters, `fixed_bank_only`, and `current_observation`. The
+observation reports the current screen, model date/time, flow, watershed row,
+temperature validity/value, authored and effective gate state/aperture, and
+regime indices/revision for the sender's next decision.
+
+The state overlays only the already resident reservoir, five-drain, and
+two-obstacle banks plus existing shader parameters. It allocates no nodes,
+resources, textures, pools, or new geometry. Leaving exclusive Watershed mode
+clears the AI overlay and restores the stage's captured data-drive setting,
+flow, authored gate value, and the newly active authored/profile/timeline
+behavior.
 
 For the CPU `FlowModel2D`, one message is atomic for `changes` and
 `geometry_ops`: the model validates a duplicated candidate profile and rejects
@@ -1296,7 +1457,7 @@ prevents a live geometry edit from stretching or rewriting visible history.
 
 Unlike the retained CPU model's configurable `retention_capacity`, the
 production GPU water system has no separate reservoir-retention pool. A
-retained head continues to occupy one of the stage's fixed 300 active water-head
+retained head continues to occupy one of the stage's fixed 1,000 active water-head
 slots until it exits. A closed or high-capture reservoir can therefore
 temporarily thin ordinary inlet lanes. If all active slots are retained, no new
 ordinary inlet lifecycle can start until release and recycling free a slot.
@@ -1454,7 +1615,7 @@ Production GPU leaf paths and defaults are:
 | `leaves.contact_radius_pixels` | `12` | Radius of the one-way contact test |
 | `leaves.free_water_search_radius_pixels` | `120` | Radius of the free leaf's 17 x 17 forward/inward 2D water search |
 | `leaves.free_water_steering_strength` | `0.35` | Blend from inward fall toward nearby water |
-| `leaves.free_search_max_distance_pixels` | `256` | Inward bank distance searched before a miss freezes and fades |
+| `leaves.free_search_max_distance_pixels` | `540` | Minimum inward bank distance before a miss can fade; never less than the screen midline |
 | `leaves.stopped_fade_seconds` | `0.50` | Retirement fade after a missed leaf disk stops moving |
 | `leaves.follow_probe_min_pixels` | `8` | Nearest cached-local-heading probe radius |
 | `leaves.follow_probe_max_pixels` | `56` | Farthest multi-radius center/flank probe radius |
@@ -1545,10 +1706,14 @@ normalizes them to:
 }
 ```
 
-The mapping is `flow_rate = clamp(speed, 0, 9) / 9`. Chair, occupancy,
-`ring_alpha`, regime, stale/source, timestamp, temperature, and vote data are
-preserved under `metadata`; common chair/regime fields are also copied to the
-normalized message's top level.
+The mapping is `basin input = clamp(speed, 0, 9) / 9`; `flow_rate` is retained
+as its compatibility input path. A valid seven-value `chairs` array is also
+converted to the absolute `regimes.active_indices` set in this order: Kinship,
+Agriculture, Gold Rush, Water Projects, Hydropower, Tech, Watershed.
+Agriculture + Gold Rush + Tech applies `45% + 30% + 25% = 100%` extraction.
+When the controller reports all seven chairs released, the absolute state
+returns to Kinship instead of becoming an empty regime set.
+All original chair metadata remains available under `metadata`.
 
 Unchanged 60 Hz legacy packets are coalesced instead of filling every model's
 queue. Meaningful speed/chair/regime changes are delivered. The latest state is
@@ -1707,10 +1872,11 @@ ends with `FLOW_RUNTIME_SMOKE: PASS`. It deliberately submits one over-budget
 configuration to verify rollback, so the corresponding rejection warning is
 expected.
 
-The retained validation set has exactly five suites:
+The retained validation set has six suites:
 
 | Suite | Scene |
 |---|---|
+| Basin input, extraction budget, chair mapping, rectangles, flood/tide | `res://flow/tests/basin_budget_smoke.tscn` |
 | Controller transport and retained runtime | `res://flow/tests/flow_runtime_smoke.tscn` |
 | Reusable production GPU stage | `res://flow/gpu_stage/gpu_flow_stage_smoke.tscn` |
 | GPU salmon | `res://flow/gpu_stage/gpu_salmon_smoke.tscn` |
