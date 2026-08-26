@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .agent import DEFAULT_MODEL, MODEL_PRICING, propose_policy
+from .annual import load_annual_decision
 from .controller import (
     PartialApplyError,
     apply_decision,
@@ -55,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate or replay a saved decision without an OpenAI API call",
     )
     parser.add_argument(
+        "--annual-decisions",
+        type=Path,
+        help="select the current model day from a complete 365-decision array",
+    )
+    parser.add_argument(
         "--live",
         action="store_true",
         help="send to Godot; otherwise print a dry-run decision only",
@@ -87,6 +93,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--current requires --live")
         if args.current and args.decision is not None:
             raise ValueError("--current cannot be combined with --decision")
+        if args.annual_decisions is not None and not args.current:
+            raise ValueError("--annual-decisions requires --current --live")
+        if args.current and args.annual_decisions is None:
+            raise ValueError(
+                "--current requires --annual-decisions; live AI generation is disabled"
+            )
         if args.current and (args.frame is not None or args.fraction is not None):
             raise ValueError("--current cannot be combined with --frame or --fraction")
         if args.fraction is not None and args.frame is None:
@@ -95,9 +107,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.live:
             assert_studio_operator()
             fleet_moment = assert_watershed_active()
+        annual_day_index: int | None = None
         if args.decision is not None:
             decision = ValidatedBasinDecision.model_validate_json(
                 args.decision.read_text(encoding="utf-8")
+            )
+        elif args.annual_decisions is not None:
+            if fleet_moment is None:
+                raise RuntimeError("current fleet phase was not returned")
+            annual_day_index, decision = load_annual_decision(
+                args.annual_decisions,
+                fleet_moment.frame_index,
+                fleet_moment.frame_fraction,
             )
         else:
             if args.current:
@@ -133,6 +154,17 @@ def main(argv: list[str] | None = None) -> int:
                     else ""
                 )
                 print(f"OPENAI REPLAY cost $0.000000{original}")
+            elif annual_day_index is not None:
+                original = (
+                    decision.model_run.estimated_cost_usd
+                    if decision.model_run is not None
+                    else 0.0
+                )
+                print(
+                    f"OPENAI ANNUAL CACHE day {annual_day_index + 1}/365; "
+                    f"trigger cost $0.000000; original generation estimated "
+                    f"${original:.6f}"
+                )
             elif decision.model_run is not None:
                 report = decision.model_run
                 print(

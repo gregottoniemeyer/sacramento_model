@@ -837,7 +837,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("Watershed is active, but", rendered)
         self.assertNotIn("saved", rendered)
 
-    def test_watershed_ai_subprocess_uses_current_phase_without_shell(self):
+    def test_watershed_ai_subprocess_uses_offline_annual_cache_without_shell(self):
         self.configure_studio()
         with mock.patch.object(controller, "validate_watershed_ai_runtime"):
             with mock.patch.object(
@@ -850,6 +850,11 @@ class ControllerTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(str(controller.WATERSHED_AI_EXECUTABLE), command[0])
         self.assertIn("--current", command)
+        annual_option = command.index("--annual-decisions")
+        self.assertEqual(
+            str(controller.watershed_ai_annual_decisions_path()),
+            command[annual_option + 1],
+        )
         self.assertIn("--live", command)
         self.assertNotIn("--frame", command)
         self.assertEqual(

@@ -794,10 +794,17 @@ def validate_watershed_ai_runtime(decision_path: Optional[Path] = None) -> None:
             "Watershed AI environment is not installed; complete the one-time "
             "setup in watershed_ai/.venv before activating Watershed"
         )
+    if decision_path is None:
+        decision_path = watershed_ai_annual_decisions_path()
     if decision_path is not None and not decision_path.is_file():
         raise ValueError(
-            f"Watershed AI decision file not found: {decision_path}"
+            f"Watershed AI cache or decision file not found: {decision_path}"
         )
+
+
+def watershed_ai_annual_decisions_path() -> Path:
+    project_root, _executable = watershed_ai_runtime_paths()
+    return project_root / "watershed_ai/runlogs/annual-decisions.json"
 
 
 def watershed_ai_runtime_paths() -> tuple[Path, Path]:
@@ -814,8 +821,11 @@ def watershed_ai_runtime_paths() -> tuple[Path, Path]:
 
 
 def run_watershed_ai_once(decision_path: Optional[Path] = None) -> str:
-    """Run one authorized decision, or replay one without buying a new turn."""
-    validate_watershed_ai_runtime(decision_path)
+    """Select one offline annual decision, or replay an explicit recovery file."""
+    annual_path = (
+        None if decision_path is not None else watershed_ai_annual_decisions_path()
+    )
+    validate_watershed_ai_runtime(decision_path or annual_path)
     project_root, executable = watershed_ai_runtime_paths()
     command = [
         str(executable),
@@ -824,7 +834,7 @@ def run_watershed_ai_once(decision_path: Optional[Path] = None) -> str:
         "--live",
     ]
     if decision_path is None:
-        command.append("--current")
+        command.extend(["--current", "--annual-decisions", str(annual_path)])
     else:
         command.extend(["--decision", str(decision_path)])
     result = run_local(command, timeout=WATERSHED_AI_TIMEOUT_SECONDS)
@@ -1838,8 +1848,8 @@ def main() -> None:
                     ai_result = run_watershed_ai_once()
                 except (OSError, ValueError) as error:
                     print(
-                        "ERROR Watershed is active, but its one-shot "
-                        f"AI setting failed: {error}",
+                        "ERROR Watershed is active, but its cached AI "
+                        f"decision failed: {error}",
                         file=sys.stderr,
                     )
                     raise SystemExit(1)

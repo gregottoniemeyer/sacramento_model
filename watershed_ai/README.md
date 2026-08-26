@@ -1,8 +1,10 @@
 # Water Council seasonal Watershed optimizer
 
-This is a one-call OpenAI Agents SDK subsystem for the installation's exclusive
-Watershed regime. It reads the current point in the 720-sample July 2025–June
-2026 atmospheric-input year and proposes relative priorities for:
+This is an offline-at-runtime OpenAI Agents SDK subsystem for the installation's
+exclusive Watershed regime. A one-time build generates one decision for each of
+the 365 days in the 720-sample July 2025–June 2026 atmospheric-input year. A
+live trigger reads the synchronized fleet phase, selects that day's local
+decision, and applies allocations derived from relative priorities for:
 
 - salmon;
 - connected floodplain water;
@@ -48,14 +50,16 @@ Reservoir release is an internal time shift, not a second source of annual
 water. Atmospheric input remains precipitation + delayed snowmelt +
 humidity/dew + the morning fog baseline.
 
-## OpenAI call and cost
+## Annual OpenAI build and cost
 
-The runtime uses one tool-free structured-output agent turn with
-`gpt-5.6-luna`, `reasoning.effort="none"`, low verbosity, and a 1,600-token
-output ceiling. The existing ignored `OPENAI_API_KEY` is loaded from the
-repository root `.env.local`; the key is never printed or copied into a runlog.
+Each of the 365 build entries uses one tool-free structured-output agent turn
+with `gpt-5.6-luna`, `reasoning.effort="none"`, low verbosity, and a
+1,600-token output ceiling. The existing ignored `OPENAI_API_KEY` is loaded
+from the repository root `.env.local`; the key is never printed or copied into
+a runlog.
 
-Every new decision stores and prints:
+The resumable builder checkpoints each completed day in a 365-entry partial
+array. Every generated decision stores and prints:
 
 - request count;
 - input, cached-input, cache-write, output, and total tokens;
@@ -70,8 +74,11 @@ The Agents SDK exposes the measured run usage through
 `result.context_wrapper.usage`; see the
 [official usage guide](https://openai.github.io/openai-agents-python/usage/).
 
-A saved-decision replay makes no API call and reports `$0.000000` for the replay;
-the saved JSON retains the original generation cost for provenance.
+A live annual-cache selection and a saved-decision replay make no API call and
+report `$0.000000` for the trigger; each saved decision retains its original
+generation cost for provenance. Internet access and the API key are needed only
+while building or rebuilding the annual array. Normal chair and fleet-controller
+operation can remain offline.
 
 ## Runtime contract
 
@@ -114,10 +121,23 @@ Generate a dry-run decision at a specific sample:
 watershed_ai/.venv/bin/watercouncil-ai --project-root . --frame 420
 ```
 
-Use the fleet's acknowledged current model phase and apply once:
+Build or resume all 365 decisions. Four workers are used by default, and a
+successful build atomically promotes the partial checkpoint to
+`watershed_ai/runlogs/annual-decisions.json`:
 
 ```sh
-watershed_ai/.venv/bin/watercouncil-ai --project-root . --current --live
+watershed_ai/.venv/bin/watercouncil-ai-year --project-root . --workers 4
+```
+
+Use the fleet's acknowledged current model phase to select and apply exactly
+one cached day, without an API call:
+
+```sh
+watershed_ai/.venv/bin/watercouncil-ai \
+  --project-root . \
+  --current \
+  --annual-decisions watershed_ai/runlogs/annual-decisions.json \
+  --live
 ```
 
 Replay without spending another call:
@@ -129,6 +149,7 @@ watershed_ai/.venv/bin/watercouncil-ai \
   --live
 ```
 
-The fleet controller invokes the current-phase command once on a fresh
-exclusive Watershed transition. Repeating Watershed does not call the model;
-startup/restart replays `latest-decision.json` without a new call.
+The fleet controller requires the complete annual array and selects the current
+day once on every fresh exclusive Watershed transition. It never falls back to
+a live API call. Startup and restart establish Kinship; they do not replay a
+Watershed decision.

@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 watercouncil-ai = "watercouncil_ai.cli:main"
+watercouncil-ai-year = "watercouncil_ai.annual:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

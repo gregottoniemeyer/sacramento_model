@@ -21,8 +21,10 @@ live `motion_log.txt` and processes.
    for chairs 1-6 and a 60-second interval for AI Watershed chair 7; later
    major motion renews that chair's complete interval.
 3. `fleet/godot_controller.py chairs` loads that `SensorSource` state directly.
-4. Occupied chairs become the absolute active Godot regime set on UDP 5005.
-5. The optional diagnostic publisher uses UDP 5006, so it cannot collide with
+4. Chair 7 selects the current model day from the verified local 365-decision
+   AI Watershed array. Runtime selection makes no Internet or OpenAI call.
+5. Occupied chairs become the absolute active Godot regime set on UDP 5005.
+6. The optional diagnostic publisher uses UDP 5006, so it cannot collide with
    Godot. Run `python3 chair_state_monitor.py` to view it.
 
 The fixed artwork mapping is:
@@ -34,6 +36,10 @@ The fixed artwork mapping is:
 5. Hydropower
 6. Tech
 7. Watershed
+
+After `watershed_ai/runlogs/annual-decisions.json` contains all 365 validated
+entries, Wi-Fi on `.11` can be turned off. Ethernet `196.168.50.11` must remain
+connected to the isolated fleet switch.
 
 ## Automatic recovery
 

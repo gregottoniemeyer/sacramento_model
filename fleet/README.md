@@ -42,8 +42,8 @@ The studio Mac uses two separate networks:
 - Ethernet connects only to the isolated fleet switch. Configure it manually as
   `196.168.50.51` with subnet mask `255.255.255.0`. Leave router and DNS blank,
   and use link-local IPv6 only.
-- Wi-Fi supplies Internet access. Keep Wi-Fi above Ethernet in Network Service
-  Order so the normal default route remains on Wi-Fi.
+- Wi-Fi is not required during installation runtime. It may remain off once the
+  Governator's 365-entry annual AI cache has been generated and verified.
 - Leave Internet Sharing and network bridging off. Do not connect the fleet
   switch to the studio GS305, wall jack, or campus network.
 
@@ -286,7 +286,7 @@ visible geometry. Regime activation still determines which extractor and
 floodplain shapes exist.
 
 Inside `regime-console`, keys `1` through `6` toggle the first six regimes.
-Key `7` cannot activate Watershed because doing so would bypass its one-shot AI
+Key `7` cannot activate Watershed because doing so would bypass its cached AI
 decision; use `set --regime watershed` instead. Key `7` may still remove an
 already-active Watershed regime. Press `c` to clear the active set, and `q` or
 Escape to leave the console. The console opens by sending Kinship with visible
@@ -296,24 +296,23 @@ are restarted.
 An explicit transition into exclusive Watershed through
 `set --regime watershed` is a single-command operation from the studio `.51`
 Mac. Before changing the regime, the controller verifies that the local
-`watershed_ai/.venv` runtime exists. It then obtains all four regime ACKs and
-invokes exactly one OpenAI proposal using the currently displayed fleet phase.
+`watershed_ai/.venv` runtime and complete 365-entry annual cache exist. It then
+obtains all four regime ACKs, maps the displayed fleet phase to the current
+model day, and pushes that day's cached decision without an OpenAI call.
 Watershed is exclusive: a request or chair state that also contains other
 regimes is normalized to Watershed alone. Each explicit `set --regime
-watershed` is one new optimization request; UDP retries make no API call. Every
-new proposal prints measured token usage and
-its estimated USD cost.
+watershed` is one offline cache selection; UDP retries make no API call. The
+result prints the selected day, zero trigger cost, and original generation cost.
 
 The live preflight requires all seven updated stage capabilities and uses
 Delta's 720-row phase as the reference. Other screens must be within two cyclic
-rows or the model call is refused. If the API fails after activation, Watershed
-remains active with its baseline appearance and the command exits nonzero; it
-does not silently retry or spend another credit. A partial application records
-an ignored local recovery decision that can be replayed without the API.
+rows or cache selection is refused. If the cache is missing, incomplete, or
+invalid, the controller exits nonzero and never falls back to OpenAI. A partial
+application records a local recovery decision that can be replayed offline.
 
 `start` and `restart` never purchase or replay a Watershed decision: every
 launch begins in Kinship. A later explicit `set --regime watershed` performs
-the one-shot optimization normally.
+the current-day cache selection normally.
 
 Each change sends the same modern `ink-flow/1` absolute-state packet on UDP
 port `5005` once to every configured Godot process, with target `*`. A
@@ -374,7 +373,7 @@ The operator-level matrix is:
   but Cottonwood, reservoir/count zero on Cottonwood, drain `.25` everywhere,
   shoreline `.20` on McCloud/Cottonwood and `0` elsewhere.
 - Tech defines reservoir `.75`/count 2, drain `.75` at full power, and shoreline
-  zero on all seven. Watershed's static profile remains a no-op; its one-shot,
+  zero on all seven. Watershed's static profile remains a no-op; its cached,
   host-validated AI overlay supplies bounded per-screen visual settings only
   while exclusive Watershed is active.
 

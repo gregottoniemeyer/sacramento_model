@@ -86,9 +86,14 @@ class CliTests(unittest.TestCase):
             )
         self.assertEqual(loaded, decision)
 
-    def test_current_live_uses_ack_derived_frame_once(self):
+    def test_current_live_selects_annual_cache_without_api_call(self):
         proposal = ProposedBasinPolicy.model_validate_json(SAMPLE.read_text())
         moment = FleetMoment(123, 0.625, tuple())
+        decision = validate_policy(
+            load_observation(PROJECT_ROOT, 123, 0.625),
+            proposal,
+            self.agent_run(proposal).report,
+        )
         with (
             tempfile.TemporaryDirectory() as directory,
             patch("watercouncil_ai.cli.assert_studio_operator"),
@@ -96,28 +101,44 @@ class CliTests(unittest.TestCase):
                 "watercouncil_ai.cli.assert_watershed_active",
                 return_value=moment,
             ),
+            patch(
+                "watercouncil_ai.cli.load_annual_decision",
+                return_value=(62, decision),
+            ) as load_annual,
             patch("watercouncil_ai.cli.load_observation") as load_observation_mock,
-            patch("watercouncil_ai.cli.propose_policy", return_value=self.agent_run(proposal)),
-            patch("watercouncil_ai.cli.validate_policy") as validate_policy_mock,
+            patch("watercouncil_ai.cli.propose_policy") as propose_policy,
             patch("sys.stderr", new_callable=io.StringIO),
         ):
-            load_observation_mock.return_value = load_observation(PROJECT_ROOT, 123, 0.625)
-            validate_policy_mock.return_value = validate_policy(
-                load_observation_mock.return_value,
-                proposal,
-                self.agent_run(proposal).report,
-            )
             with patch("watercouncil_ai.cli.apply_decision", return_value=tuple()):
                 result = main(
                     [
                         "--project-root",
                         directory,
                         "--current",
+                        "--annual-decisions",
+                        str(Path(directory) / "annual.json"),
                         "--live",
                     ]
                 )
         self.assertEqual(result, 0)
-        load_observation_mock.assert_called_once_with(Path(directory), 123, 0.625)
+        load_annual.assert_called_once_with(
+            Path(directory) / "annual.json", 123, 0.625
+        )
+        propose_policy.assert_not_called()
+        load_observation_mock.assert_not_called()
+
+    def test_current_live_fails_closed_without_annual_cache(self):
+        with (
+            patch("watercouncil_ai.cli.assert_studio_operator") as operator,
+            patch("watercouncil_ai.cli.assert_watershed_active") as preflight,
+            patch("watercouncil_ai.cli.propose_policy") as propose_policy,
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            result = main(["--current", "--live"])
+        self.assertEqual(result, 1)
+        operator.assert_not_called()
+        preflight.assert_not_called()
+        propose_policy.assert_not_called()
 
     def test_live_saved_decision_is_credit_free(self):
         proposal = ProposedBasinPolicy.model_validate_json(SAMPLE.read_text())
