@@ -23,14 +23,15 @@ The controller passes stage assignments such as `--stages=7` and
 
 On the Governator, `godot_controller.py chairs` maps the seven absolute chair
 flags to the seven regimes. Every chair is a separate binary signal: strong
-motion turns only that chair on for 30 seconds, later strong motion from the
-same chair renews only its interval, and the timer releases exactly at its
-deadline. After every interval expires, the bridge performs an explicit hard
+motion turns chairs 1-6 on for 30 seconds and AI Watershed chair 7 on for 60
+seconds. Later strong motion from the same chair renews only its complete
+interval, and the timer releases exactly at its deadline. After every interval
+expires, the bridge performs an explicit hard
 reset to Kinship with geometry visible; it never sends an empty regime state.
 Regime activation alone determines which extractor and floodplain shapes exist.
 Watershed remains exclusive when chair 7 activates and clears all other chair
 timers. A newer strong signal from chairs 1-6 immediately cancels Watershed and
-starts that chair's timer. If Watershed reaches its own 30-second deadline, all
+starts that chair's timer. If Watershed reaches its own 60-second deadline, all
 chairs are released. Handoffs use the same strong-motion threshold as ordinary
 activation; there is no lower noise-sensitive threshold.
 

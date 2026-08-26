@@ -38,14 +38,14 @@ The diagnostic vote is `1` while the sensor reports strong motion and `0`
 otherwise. Strong motion is either an impact peak at or above `1500`, or two
 consecutive rotation packets whose largest acceleration-axis standard deviation
 is at least `300`. Each chair is a separate binary signal. Strong motion turns
-only that chair on for 30 seconds, later strong packets from that same chair
-renew its own interval, and its timer turns off exactly when the interval
-expires.
+chairs 1-6 on for 30 seconds and AI Watershed chair 7 on for 60 seconds. Later
+strong packets from that same chair renew its complete interval, and its timer
+turns off exactly when the interval expires.
 
 Watershed (chair 7) clears every other chair when strong motion activates it.
 A newer strong signal from chairs 1-6 immediately cancels Watershed and starts
 that chair's independent timer. If nothing supersedes Watershed, its own timer
-expires after 30 seconds and all chairs are released. All of these transitions
+expires after 60 seconds and all chairs are released. All of these transitions
 use the same strong-motion threshold of `1500`; there is no lower handoff
 threshold.
 
@@ -233,10 +233,11 @@ acceleration variation. A peak at or above `1500` recognizes a tap or impact.
 Two consecutive packets with maximum axis variation at or above `300` recognize
 steady rotation; the confirmation rejects an isolated noisy sample. Either
 signal turns that chair's binary state on and sets its deadline 30 seconds in
-the future. Every later strong packet from the same chair moves only that
-chair's deadline to 30 seconds from the new detection. The chair becomes free
-exactly when its deadline expires. Watershed clears the other chair timers when
-it activates, and a newer strong non-Watershed signal cancels it immediately.
+the future for chairs 1-6 or 60 seconds in the future for AI Watershed chair 7.
+Every later strong packet from the same chair renews that chair's complete
+interval. The chair becomes free exactly when its deadline expires. Watershed
+clears the other chair timers when it activates, and a newer strong
+non-Watershed signal cancels it immediately.
 
 It lives in `controller.py`, in the constants block marked `occupancy model`.
 
@@ -246,6 +247,7 @@ It lives in `controller.py`, in the constants block marked `occupancy model`.
 | `ROTATION_STD_RAW` | per-axis variation needed for a rotation candidate |
 | `ROTATION_CONFIRM_PACKETS` | consecutive rotation candidates required |
 | `OCCUPANCY_HOLD_S` | seconds occupancy remains after the latest major motion |
+| `WATERSHED_HOLD_S` | seconds AI Watershed remains after the latest major motion |
 | `STALE_S` | how long a silent chair waits before it reads offline |
 
 ---

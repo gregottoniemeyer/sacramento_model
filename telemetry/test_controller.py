@@ -66,7 +66,11 @@ class ChairModelTests(unittest.TestCase):
         source = controller.SensorSource.__new__(controller.SensorSource)
         controller.Source.__init__(source)
         source.models = {
-            c: controller.ChairModel()
+            c: controller.ChairModel(
+                controller.WATERSHED_HOLD_S
+                if c == controller.WATERSHED_CHAIR
+                else controller.OCCUPANCY_HOLD_S
+            )
             for c in range(1, controller.NUM_CHAIRS + 1)
         }
         source.last_seen = {
@@ -176,7 +180,7 @@ class ChairModelTests(unittest.TestCase):
         )
         self.assertEqual([0, 0, 0, 0, 0, 0, 0], source.chairs)
 
-    def test_watershed_clears_others_then_releases_everything(self):
+    def test_watershed_clears_others_then_releases_after_sixty_seconds(self):
         source = self.sensor_source_without_reader()
         source._ingest_summary_packet(2, 2000, 0, 10.0)
         source._ingest_summary_packet(4, 3000, 0, 11.0)
@@ -185,9 +189,9 @@ class ChairModelTests(unittest.TestCase):
         self.assertEqual("cleared by Watershed", source.models[2].reason)
         self.assertEqual("cleared by Watershed", source.models[4].reason)
 
-        source.poll(41.999)
+        source.poll(71.999)
         self.assertEqual([0, 0, 0, 0, 0, 0, 1], source.chairs)
-        source.poll(42.0)
+        source.poll(72.0)
         self.assertEqual([0, 0, 0, 0, 0, 0, 0], source.chairs)
 
     def test_new_strong_input_ends_watershed_immediately(self):

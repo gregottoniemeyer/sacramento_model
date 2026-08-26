@@ -17,8 +17,9 @@ live `motion_log.txt` and processes.
 1. The USB ESP32 receiver writes raw serial lines to the bounded live buffer
    `telemetry/motion_log.txt`. Existing or replaced file contents are never
    replayed, and the keep-alive clears the buffer above 1 MiB.
-2. `telemetry/controller.py` treats a major-motion peak as a 30-second chair
-   interval; later major motion renews that interval.
+2. `telemetry/controller.py` treats a major-motion peak as a 30-second interval
+   for chairs 1-6 and a 60-second interval for AI Watershed chair 7; later
+   major motion renews that chair's complete interval.
 3. `fleet/godot_controller.py chairs` loads that `SensorSource` state directly.
 4. Occupied chairs become the absolute active Godot regime set on UDP 5005.
 5. The optional diagnostic publisher uses UDP 5006, so it cannot collide with

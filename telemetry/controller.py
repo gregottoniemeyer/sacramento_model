@@ -173,12 +173,14 @@ PEAK_JUMP_RAW = 1500
 ROTATION_STD_RAW = 300
 ROTATION_CONFIRM_PACKETS = 2
 OCCUPANCY_HOLD_S = 30.0
+WATERSHED_HOLD_S = 60.0
 
 
 class ChairModel:
     """Hold occupancy for the configured interval after the latest major motion."""
 
-    def __init__(self):
+    def __init__(self, hold_seconds=OCCUPANCY_HOLD_S):
+        self.hold_seconds = float(hold_seconds)
         self.occupied = False
         self.occupied_until = 0.0
         self.vote_frac = 0.0
@@ -194,10 +196,10 @@ class ChairModel:
         self.vote_frac = 1.0 if major_motion else 0.0
         if major_motion:
             self.occupied = True
-            self.occupied_until = float(t) + OCCUPANCY_HOLD_S
+            self.occupied_until = float(t) + self.hold_seconds
             self.reason = (
                 ("confirmed rotation" if rotation_motion else "major motion")
-                + f"; {OCCUPANCY_HOLD_S:g}s interval renewed"
+                + f"; {self.hold_seconds:g}s interval renewed"
             )
             return
         self.advance(t)
@@ -206,7 +208,7 @@ class ChairModel:
         """Expire a held chair even when no fresh sensor packet arrives."""
         if self.occupied and float(t) >= self.occupied_until:
             self.occupied = False
-            self.reason = f"{OCCUPANCY_HOLD_S:g}s interval expired"
+            self.reason = f"{self.hold_seconds:g}s interval expired"
         elif self.occupied:
             remaining = max(self.occupied_until - float(t), 0.0)
             self.reason = f"held {remaining:.1f}s"
@@ -259,9 +261,10 @@ class Source:
 class SensorSource(Source):
     """The real chairs.
 
-    Every chair is an independent binary 30-second timer. Watershed clears all
-    other timers when it activates; a newer strong non-Watershed signal cancels
-    Watershed and starts only its own timer.
+    Chairs 1-6 are independent binary 30-second timers. Watershed uses a
+    60-second timer so its AI call and visual decision can complete; it still
+    clears all other timers when it activates, and a newer strong
+    non-Watershed signal cancels it immediately.
 
     A stale chair remains marked offline but any prior strong-motion interval
     is allowed to expire normally. It can therefore never latch forever.
@@ -274,7 +277,12 @@ class SensorSource(Source):
                 f"{LOG} does not exist, so the serial capture is not running.\n"
                 "See chair-occupancy-sensor/README.md, 'Run it', step 2.")
         self.log = LOG
-        self.models = {c: ChairModel() for c in range(1, NUM_CHAIRS + 1)}
+        self.models = {
+            c: ChairModel(
+                WATERSHED_HOLD_S if c == WATERSHED_CHAIR else OCCUPANCY_HOLD_S
+            )
+            for c in range(1, NUM_CHAIRS + 1)
+        }
         self.last_seen = {c: None for c in range(1, NUM_CHAIRS + 1)}
         self.last_peak = {c: 0 for c in range(1, NUM_CHAIRS + 1)}
         self.rotation_count = {c: 0 for c in range(1, NUM_CHAIRS + 1)}
