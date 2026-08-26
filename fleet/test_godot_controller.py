@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -35,6 +36,35 @@ class ControllerTests(unittest.TestCase):
             ["watershed"],
             controller.enforce_watershed_exclusivity(["tech", "watershed"]),
         )
+
+    def test_hidden_chair_chatter_does_not_reactivate_watershed(self):
+        regimes, applied, changed = controller.chair_regime_transition(
+            [0, 0, 0, 0, 0, 0, 1],
+            None,
+        )
+        self.assertEqual(["watershed"], regimes)
+        self.assertTrue(changed)
+
+        regimes, same_state, changed = controller.chair_regime_transition(
+            [1, 1, 1, 1, 1, 1, 1],
+            applied,
+        )
+        self.assertEqual(["watershed"], regimes)
+        self.assertEqual(applied, same_state)
+        self.assertFalse(changed)
+
+    def test_new_effective_regime_still_ends_watershed(self):
+        _regimes, watershed_state, _changed = controller.chair_regime_transition(
+            [0, 0, 0, 0, 0, 0, 1],
+            None,
+        )
+        regimes, next_state, changed = controller.chair_regime_transition(
+            [0, 0, 1, 0, 0, 0, 0],
+            watershed_state,
+        )
+        self.assertEqual(["gold_rush"], regimes)
+        self.assertEqual(("gold_rush",), next_state)
+        self.assertTrue(changed)
 
     def test_controller_has_no_geometry_hiding_helpers(self):
         self.assertFalse(hasattr(controller, "cli_boolean"))
@@ -876,28 +906,96 @@ class ControllerTests(unittest.TestCase):
             executable,
         )
 
+    def test_governator_cached_sender_uses_loopback_for_delta(self):
+        controller.configure_operator(
+            "en0: flags\n\tinet 196.168.50.11 netmask 0xffffff00\n"
+        )
+        destinations = controller.watershed_screen_destinations()
+        self.assertEqual("127.0.0.1", destinations["delta"])
+        self.assertEqual("196.168.50.21", destinations["mount_shasta"])
+
+    def test_standard_library_cache_loader_selects_and_validates_one_day(self):
+        day_index = 177
+        entries = []
+        for index in range(controller.MODEL_DAY_COUNT):
+            entries.append(
+                {
+                    "decision_id": f"{index:016x}",
+                    "frame_index": int(
+                        (index + 0.5)
+                        * controller.MODEL_SAMPLE_COUNT
+                        / controller.MODEL_DAY_COUNT
+                    ),
+                    "rivers": [],
+                    "model_run": {"estimated_cost_usd": 0.001},
+                }
+            )
+        decision_id = entries[day_index]["decision_id"]
+        frame_index = entries[day_index]["frame_index"]
+        rivers = []
+        for screen_id in controller.STAGE_SCREEN_IDS.values():
+            state = {
+                "schema_version": 2,
+                "decision_id": decision_id,
+                "state_hash": "0" * 64,
+                "frame_index": frame_index,
+                "atmospheric_input_rate": 0.5,
+                "reservoir_release_rate": 0.1,
+                "available_supply_rate": 0.6,
+                "extraction_fraction": 0.3,
+                "remaining_rate": 0.42,
+                "salmon_fraction": 0.4,
+                "floodplain_fraction": 0.3,
+                "agriculture_fraction": 0.1,
+                "data_center_fraction": 0.1,
+                "city_fraction": 0.1,
+                "reservoir_storage_fraction": 0.5,
+                "hydropower_fraction": 0.0,
+                "water_project_fraction": 0.0,
+            }
+            state["state_hash"] = controller.watershed_visual_state_hash(state)
+            rivers.append({"screen_id": screen_id, "visual_state": state})
+        entries[day_index]["rivers"] = rivers
+        position = (
+            (day_index + 0.5)
+            * controller.MODEL_SAMPLE_COUNT
+            / controller.MODEL_DAY_COUNT
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "annual.json"
+            path.write_text(json.dumps(entries), encoding="utf-8")
+            loaded = controller.load_cached_watershed_decision(
+                path,
+                int(position),
+                position % 1.0,
+            )
+        self.assertEqual(day_index, loaded[0])
+        self.assertEqual(decision_id, loaded[1])
+        self.assertEqual(7, len(loaded[2]))
+        self.assertEqual(0.001, loaded[3])
+
     def test_watershed_ai_worker_never_blocks_or_duplicates_a_live_run(self):
         started = controller.threading.Event()
         release = controller.threading.Event()
         calls = []
 
-        def runner():
-            calls.append("run")
+        def runner(frame_index, frame_fraction):
+            calls.append((frame_index, frame_fraction))
             started.set()
             release.wait(1.0)
             return ""
 
         worker = controller.WatershedAIWorker(runner)
-        self.assertTrue(worker.trigger())
+        self.assertTrue(worker.trigger(123, 0.5))
         self.assertTrue(started.wait(1.0))
-        self.assertFalse(worker.trigger())
+        self.assertFalse(worker.trigger(124, 0.25))
         release.set()
         for _attempt in range(100):
             with worker._lock:
                 if not worker._running:
                     break
             controller.time.sleep(0.001)
-        self.assertEqual(["run"], calls)
+        self.assertEqual([(123, 0.5)], calls)
 
     def test_deploy_rejects_duplicate_targets_defensively(self):
         self.configure_studio()

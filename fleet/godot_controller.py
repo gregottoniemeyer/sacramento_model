@@ -2,8 +2,10 @@
 """Control and deploy the Water Council Godot project across the four-Mac fleet."""
 
 import argparse
+import hashlib
 import importlib.util
 import json
+import math
 import os
 import posixpath
 import re
@@ -117,6 +119,25 @@ WATERSHED_AI_EXECUTABLE = (
     REPOSITORY_ROOT / "watershed_ai/.venv/bin/watercouncil-ai"
 )
 WATERSHED_AI_TIMEOUT_SECONDS = 300
+WATERSHED_AI_CONTROL_SCOPE = "watershed-ai/2"
+WATERSHED_ACTIVE_INDICES = [6]
+MODEL_SAMPLE_COUNT = 720
+MODEL_DAY_COUNT = 365
+WATERSHED_HASH_FIELDS = (
+    "atmospheric_input_rate",
+    "reservoir_release_rate",
+    "available_supply_rate",
+    "extraction_fraction",
+    "remaining_rate",
+    "salmon_fraction",
+    "floodplain_fraction",
+    "agriculture_fraction",
+    "data_center_fraction",
+    "city_fraction",
+    "reservoir_storage_fraction",
+    "hydropower_fraction",
+    "water_project_fraction",
+)
 TELEMETRY_DIR = REPOSITORY_ROOT / "telemetry"
 CHAIR_SENSOR_MODULE_PATH = TELEMETRY_DIR / "controller.py"
 CHAIR_POLL_SECONDS = 0.05
@@ -843,6 +864,258 @@ def run_watershed_ai_once(decision_path: Optional[Path] = None) -> str:
     return result.stdout.strip()
 
 
+def watershed_model_day(frame_index: int, frame_fraction: float) -> int:
+    """Map the synchronized 720-row phase to the cached July-through-June day."""
+    if not 0 <= frame_index < MODEL_SAMPLE_COUNT:
+        raise ValueError("Watershed frame must be in 0..719")
+    if not 0.0 <= frame_fraction < 1.0 or not math.isfinite(frame_fraction):
+        raise ValueError("Watershed frame fraction must be finite and in [0, 1)")
+    position = frame_index + frame_fraction
+    return min(
+        int(math.floor(position * MODEL_DAY_COUNT / MODEL_SAMPLE_COUNT)),
+        MODEL_DAY_COUNT - 1,
+    )
+
+
+def watershed_visual_state_hash(state: dict) -> str:
+    """Match Godot's fixed-precision Watershed visual-state hash."""
+    parts = [f"schema_version={int(state['schema_version'])}"]
+    parts.extend(
+        f"{field}={float(state[field]):.9f}"
+        for field in WATERSHED_HASH_FIELDS
+    )
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def load_cached_watershed_decision(
+    path: Path,
+    frame_index: int,
+    frame_fraction: float,
+) -> tuple[int, str, list[tuple[str, dict]], float]:
+    """Read one validated day using only the standard library."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list) or len(raw) != MODEL_DAY_COUNT:
+        raise ValueError(f"{path} must contain exactly 365 decisions")
+    if any(not isinstance(entry, dict) for entry in raw):
+        raise ValueError(f"{path} contains an incomplete decision entry")
+    decision_ids = [str(entry.get("decision_id", "")) for entry in raw]
+    if (
+        any(re.fullmatch(r"[a-f0-9]{16}", value) is None for value in decision_ids)
+        or len(set(decision_ids)) != MODEL_DAY_COUNT
+    ):
+        raise ValueError(f"{path} must contain 365 unique decision IDs")
+
+    day_index = watershed_model_day(frame_index, frame_fraction)
+    decision = raw[day_index]
+    expected_frame = int(
+        math.floor((day_index + 0.5) * MODEL_SAMPLE_COUNT / MODEL_DAY_COUNT)
+    )
+    if decision.get("frame_index") != expected_frame:
+        raise ValueError(
+            f"cached day {day_index + 1} has frame {decision.get('frame_index')!r}; "
+            f"expected {expected_frame}"
+        )
+    decision_id = decision_ids[day_index]
+    rivers = decision.get("rivers")
+    if not isinstance(rivers, list) or len(rivers) != len(STAGE_SCREEN_IDS):
+        raise ValueError(f"cached day {day_index + 1} must contain seven rivers")
+    by_screen = {
+        str(river.get("screen_id", "")): river
+        for river in rivers
+        if isinstance(river, dict)
+    }
+    expected_screens = [STAGE_SCREEN_IDS[index] for index in sorted(STAGE_SCREEN_IDS)]
+    if set(by_screen) != set(expected_screens):
+        raise ValueError(f"cached day {day_index + 1} has invalid screen IDs")
+
+    selected: list[tuple[str, dict]] = []
+    expected_state_keys = {
+        "schema_version",
+        "decision_id",
+        "state_hash",
+        "frame_index",
+        *WATERSHED_HASH_FIELDS,
+    }
+    for screen_id in expected_screens:
+        state = by_screen[screen_id].get("visual_state")
+        if not isinstance(state, dict) or set(state) != expected_state_keys:
+            raise ValueError(f"cached {screen_id} state has invalid fields")
+        if (
+            state.get("schema_version") != 2
+            or state.get("decision_id") != decision_id
+            or state.get("frame_index") != expected_frame
+            or re.fullmatch(r"[a-f0-9]{64}", str(state.get("state_hash", ""))) is None
+        ):
+            raise ValueError(f"cached {screen_id} state has invalid provenance")
+        try:
+            computed_hash = watershed_visual_state_hash(state)
+            extraction = float(state["extraction_fraction"])
+            hydropower = float(state["hydropower_fraction"])
+            water_project = float(state["water_project_fraction"])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"cached {screen_id} state is not numeric") from error
+        if computed_hash != state["state_hash"]:
+            raise ValueError(f"cached {screen_id} state hash is invalid")
+        if not 0.0 <= extraction <= 0.5:
+            raise ValueError(f"cached {screen_id} extraction exceeds its bounds")
+        if hydropower != 0.0 or water_project != 0.0:
+            raise ValueError(f"cached {screen_id} enables a prohibited extractor")
+        selected.append((screen_id, state))
+
+    model_run = decision.get("model_run", {})
+    original_cost = (
+        float(model_run.get("estimated_cost_usd", 0.0))
+        if isinstance(model_run, dict)
+        else 0.0
+    )
+    return day_index, decision_id, selected, original_cost
+
+
+def watershed_position_from_acknowledgements(
+    acknowledgements: dict[str, dict],
+    destination_specs: list[tuple[str, list[str]]],
+) -> tuple[int, float]:
+    """Extract one synchronized Delta-referenced phase from regime ACKs."""
+    positions: dict[str, float] = {}
+    for destination, expected_screens in destination_specs:
+        acknowledgement = acknowledgements.get(destination, {})
+        raw_states = acknowledgement.get("recipient_watershed_ai_state", {})
+        if not isinstance(raw_states, dict):
+            raise OSError(f"Godot at {destination} returned no Watershed state")
+        for screen_id in expected_screens:
+            state = raw_states.get(screen_id, {})
+            observation = state.get("current_observation", {}) if isinstance(state, dict) else {}
+            row = observation.get("watershed_row", {}) if isinstance(observation, dict) else {}
+            row_index = row.get("row_index") if isinstance(row, dict) else None
+            row_fraction = row.get("row_fraction") if isinstance(row, dict) else None
+            if (
+                observation.get("screen_id") != screen_id
+                or row.get("row_count") != MODEL_SAMPLE_COUNT
+                or isinstance(row_index, bool)
+                or not isinstance(row_index, int)
+                or not 0 <= row_index < MODEL_SAMPLE_COUNT
+                or isinstance(row_fraction, bool)
+                or not isinstance(row_fraction, (int, float))
+                or not math.isfinite(float(row_fraction))
+                or not 0.0 <= float(row_fraction) < 1.0
+            ):
+                raise OSError(f"Godot screen {screen_id} returned no valid model phase")
+            positions[screen_id] = row_index + float(row_fraction)
+    reference = positions.get("delta")
+    if reference is None or len(positions) != len(STAGE_SCREEN_IDS):
+        raise OSError("fleet did not return all seven Watershed model phases")
+    for screen_id, position in positions.items():
+        offset = abs(((position - reference + 360.0) % 720.0) - 360.0)
+        if offset > 2.0:
+            raise OSError(
+                f"fleet model timelines are out of sync; {screen_id} differs "
+                f"from Delta by {offset:.3f} rows"
+            )
+    return int(math.floor(reference)) % MODEL_SAMPLE_COUNT, reference % 1.0
+
+
+def watershed_screen_destinations() -> dict[str, str]:
+    """Use loopback for screens hosted by the current controller machine."""
+    destinations: dict[str, str] = {}
+    for computer in COMPUTERS.values():
+        destination = "127.0.0.1" if computer["local"] else computer["ip"]
+        for stage in computer["stages"]:
+            destinations[STAGE_SCREEN_IDS[stage]] = destination
+    return destinations
+
+
+def send_cached_watershed_state(
+    destination: str,
+    screen_id: str,
+    state: dict,
+) -> None:
+    """Apply one cached state from the authorized chair-bridge process."""
+    request_id = uuid.uuid4().hex
+    wire_state = {
+        key: value
+        for key, value in state.items()
+        if key not in {"state_hash", "frame_index"}
+    }
+    payload = {
+        "protocol": "ink-flow/1",
+        "control_scope": WATERSHED_AI_CONTROL_SCOPE,
+        "target": screen_id,
+        "changes": {"watershed.ai.state": wire_state},
+        "geometry_ops": [],
+        "actions": [],
+        "metadata": {
+            "source": "watercouncil-chair-cache",
+            "request_id": request_id,
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
+        udp_socket.bind(("", 0))
+        for _attempt in range(REGIME_ACK_ATTEMPTS):
+            sent = udp_socket.sendto(encoded, (destination, FLOW_CONTROL_PORT))
+            if sent != len(encoded):
+                raise OSError(f"sent only {sent} of {len(encoded)} bytes")
+            deadline = time.monotonic() + REGIME_ACK_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                udp_socket.settimeout(max(deadline - time.monotonic(), 0.01))
+                try:
+                    raw_ack, sender = udp_socket.recvfrom(16384)
+                except socket.timeout:
+                    break
+                if sender[0] != destination:
+                    continue
+                try:
+                    acknowledgement = json.loads(raw_ack.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if (
+                    not isinstance(acknowledgement, dict)
+                    or acknowledgement.get("protocol") != REGIME_ACK_PROTOCOL
+                    or acknowledgement.get("request_id") != request_id
+                ):
+                    continue
+                if acknowledgement.get("accepted") is not True:
+                    reason = acknowledgement.get("reason", "packet rejected")
+                    raise OSError(f"Godot at {destination} rejected state: {reason}")
+                if acknowledgement.get("regime_active_indices") != WATERSHED_ACTIVE_INDICES:
+                    raise OSError("Watershed ended before its cached state was applied")
+                if acknowledgement.get("recipient_screen_ids") != [screen_id]:
+                    continue
+                applied = acknowledgement.get("recipient_watershed_ai_state", {})
+                screen_state = applied.get(screen_id, {}) if isinstance(applied, dict) else {}
+                if (
+                    isinstance(screen_state, dict)
+                    and screen_state.get("applied_decision_id") == state["decision_id"]
+                    and screen_state.get("applied_state_hash") == state["state_hash"]
+                ):
+                    return
+    raise OSError(
+        f"no applied cached Watershed acknowledgement from {screen_id} "
+        f"at {destination}"
+    )
+
+
+def run_chair_watershed_cache_once(
+    frame_index: int,
+    frame_fraction: float,
+) -> str:
+    """Select and apply one local annual entry without a child or API call."""
+    path = watershed_ai_annual_decisions_path()
+    day_index, decision_id, rivers, original_cost = load_cached_watershed_decision(
+        path,
+        frame_index,
+        frame_fraction,
+    )
+    destinations = watershed_screen_destinations()
+    for screen_id, state in rivers:
+        send_cached_watershed_state(destinations[screen_id], screen_id, state)
+    return (
+        f"APPLIED cached AI decision {decision_id} to {len(rivers)} screens\n"
+        f"OPENAI ANNUAL CACHE day {day_index + 1}/365; trigger cost $0.000000; "
+        f"original generation estimated ${original_cost:.6f}"
+    )
+
+
 def send_fleet_regimes(
     regime_ids: list[str],
     command: str,
@@ -851,7 +1124,8 @@ def send_fleet_regimes(
     model_date: Optional[str] = None,
     model_calendar_auto_advance: Optional[bool] = None,
     expected_model_date: Optional[str] = None,
-) -> list[tuple[str, int, int]]:
+    capture_watershed_position: bool = False,
+):
     regime_ids = enforce_watershed_exclusivity(regime_ids)
     indices = regime_indices(regime_ids)
     geometry_visible = True
@@ -886,6 +1160,7 @@ def send_fleet_regimes(
     last_seen_screens: dict[str, list[str]] = {}
     last_seen_geometry: dict[str, dict[str, bool]] = {}
     last_seen_dates: dict[str, dict[str, str]] = {}
+    accepted_acknowledgements: dict[str, dict] = {}
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.bind(("", 0))
         for _attempt in range(REGIME_ACK_ATTEMPTS):
@@ -897,7 +1172,7 @@ def send_fleet_regimes(
             while pending and time.monotonic() < deadline:
                 udp_socket.settimeout(max(deadline - time.monotonic(), 0.01))
                 try:
-                    raw_ack, sender = udp_socket.recvfrom(4096)
+                    raw_ack, sender = udp_socket.recvfrom(16384)
                 except socket.timeout:
                     break
                 try:
@@ -972,6 +1247,7 @@ def send_fleet_regimes(
                 ):
                     continue
                 acknowledgements[sender_ip] = recipient_count
+                accepted_acknowledgements[sender_ip] = acknowledgement
                 pending.remove(sender_ip)
             if not pending:
                 break
@@ -994,10 +1270,21 @@ def send_fleet_regimes(
             + readiness
             + "; verify exactly one updated Godot owns UDP 5005 per fleet Mac"
         )
-    return [
+    results = [
         (destination, len(encoded), acknowledgements[destination])
         for destination in destinations
     ]
+    if capture_watershed_position:
+        if indices != WATERSHED_ACTIVE_INDICES:
+            raise ValueError("model phase capture requires exclusive Watershed")
+        return (
+            results,
+            watershed_position_from_acknowledgements(
+                accepted_acknowledgements,
+                destination_specs,
+            ),
+        )
+    return results
 
 
 def format_regime_send(results: list[tuple[str, int, int]]) -> str:
@@ -1054,25 +1341,39 @@ def chair_regime_ids(chairs) -> list[str]:
     return enforce_watershed_exclusivity(active) if active else ["kinship"]
 
 
+def chair_regime_transition(
+    chairs,
+    applied_regimes: Optional[tuple[str, ...]],
+) -> tuple[list[str], tuple[str, ...], bool]:
+    """Collapse raw chair chatter into one effective Godot regime transition."""
+    regime_ids = chair_regime_ids(chairs)
+    regime_state = tuple(regime_ids)
+    return regime_ids, regime_state, regime_state != applied_regimes
+
+
 class WatershedAIWorker:
-    """Run one chair-triggered AI decision without blocking newer chair input."""
+    """Apply one cached decision without blocking a newer chair input."""
 
     def __init__(self, runner=None):
-        self._runner = runner or run_watershed_ai_once
+        self._runner = runner or run_chair_watershed_cache_once
         self._lock = threading.Lock()
         self._running = False
 
-    def trigger(self) -> bool:
+    def trigger(self, frame_index: int, frame_fraction: float) -> bool:
         with self._lock:
             if self._running:
                 return False
             self._running = True
-        threading.Thread(target=self._run, daemon=True).start()
+        threading.Thread(
+            target=self._run,
+            args=(frame_index, frame_fraction),
+            daemon=True,
+        ).start()
         return True
 
-    def _run(self) -> None:
+    def _run(self, frame_index: int, frame_fraction: float) -> None:
         try:
-            result = self._runner()
+            result = self._runner(frame_index, frame_fraction)
             if result:
                 print(result, flush=True)
         except (OSError, ValueError) as error:
@@ -1106,7 +1407,7 @@ def run_chair_control() -> None:
     )
     print(f"Reading raw telemetry from {telemetry.LOG}", flush=True)
 
-    applied_state = None
+    applied_regimes: Optional[tuple[str, ...]] = None
     waiting_announced = False
     try:
         while True:
@@ -1123,19 +1424,28 @@ def run_chair_control() -> None:
                 continue
 
             chair_state = tuple(int(bool(value)) for value in source.chairs)
-            if chair_state == applied_state:
+            regime_ids, regime_state, regime_changed = chair_regime_transition(
+                chair_state,
+                applied_regimes,
+            )
+            if not regime_changed:
                 time.sleep(CHAIR_POLL_SECONDS)
                 continue
 
-            regime_ids = chair_regime_ids(chair_state)
             try:
                 # A complete release is a hard regime reset to Kinship. Geometry
                 # visibility is invariant: active geometries are always drawn.
                 geometry_visible = True
-                sends = send_fleet_regimes(
+                send_result = send_fleet_regimes(
                     regime_ids,
                     "chairs",
+                    capture_watershed_position=(regime_ids == ["watershed"]),
                 )
+                if regime_ids == ["watershed"]:
+                    sends, watershed_position = send_result
+                else:
+                    sends = send_result
+                    watershed_position = None
             except (OSError, ValueError) as error:
                 print(
                     f"ERROR chair state not applied: {error}",
@@ -1145,7 +1455,12 @@ def run_chair_control() -> None:
                 time.sleep(1.0)
                 continue
 
-            applied_state = chair_state
+            # Deduplicate by the effective regime state, not the raw chair
+            # vector. While Watershed is exclusive, hidden chair-bit chatter
+            # still normalizes to Watershed and must not resend the regime
+            # packet: Godot intentionally clears the AI overlay on a fresh
+            # activation, which would otherwise restore the fallback map.
+            applied_regimes = regime_state
             waiting_announced = False
             active = ", ".join(regime_ids)
             stale = ",".join(str(chair) for chair in source.stale) or "none"
@@ -1156,8 +1471,14 @@ def run_chair_control() -> None:
                 flush=True,
             )
             if regime_ids == ["watershed"]:
-                if watershed_ai.trigger():
-                    print("STARTED chair-triggered Watershed AI decision", flush=True)
+                if watershed_position is None:
+                    print(
+                        "ERROR chair-triggered Watershed has no model phase",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                elif watershed_ai.trigger(*watershed_position):
+                    print("STARTED chair-triggered cached Watershed decision", flush=True)
                 else:
                     print(
                         "Watershed AI decision already running; retaining it",

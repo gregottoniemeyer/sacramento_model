@@ -22,7 +22,9 @@ live `motion_log.txt` and processes.
    major motion renews that chair's complete interval.
 3. `fleet/godot_controller.py chairs` loads that `SensorSource` state directly.
 4. Chair 7 selects the current model day from the verified local 365-decision
-   AI Watershed array. Runtime selection makes no Internet or OpenAI call.
+   AI Watershed array. The chair bridge itself sends those cached states over
+   fleet Ethernet; it spawns no AI/network child and makes no Internet or
+   OpenAI call.
 5. Occupied chairs become the absolute active Godot regime set on UDP 5005.
 6. The optional diagnostic publisher uses UDP 5006, so it cannot collide with
    Godot. Run `python3 chair_state_monitor.py` to view it.

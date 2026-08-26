@@ -33,7 +33,10 @@ Watershed remains exclusive when chair 7 activates and clears all other chair
 timers. A newer strong signal from chairs 1-6 immediately cancels Watershed and
 starts that chair's timer. If Watershed reaches its own 60-second deadline, all
 chairs are released. Handoffs use the same strong-motion threshold as ordinary
-activation; there is no lower noise-sensitive threshold.
+activation; there is no lower noise-sensitive threshold. While Watershed is
+active, changes to hidden raw chair bits are deduplicated because they do not
+change the effective regime. They therefore cannot resend Watershed and clear
+the applied daily AI overlay back to its fallback map.
 
 ## Studio `.51` network setup
 
@@ -303,6 +306,9 @@ Watershed is exclusive: a request or chair state that also contains other
 regimes is normalized to Watershed alone. Each explicit `set --regime
 watershed` is one offline cache selection; UDP retries make no API call. The
 result prints the selected day, zero trigger cost, and original generation cost.
+On `.11`, the chair bridge reads that local array and sends the seven cached
+states from its already-authorized process. It does not spawn an AI/network
+helper, contact OpenAI, or require an Internet route when chair 7 is triggered.
 
 The live preflight requires all seven updated stage capabilities and uses
 Delta's 720-row phase as the reference. Other screens must be within two cyclic
