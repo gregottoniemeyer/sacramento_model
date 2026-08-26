@@ -5,11 +5,9 @@ import unittest
 from watercouncil_ai.data import load_observation
 from watercouncil_ai.policy import (
     BASE_SALMON_FLOOR,
-    CITY_FLOOR,
-    DATA_CENTER_FLOOR,
+    MAX_SUSTAINABLE_EXTRACTION,
     MAX_SALMON_FLOOR,
-    SUMMER_AGRICULTURE_FLOOR,
-    WINTER_DATA_CENTER_FLOOR,
+    MIN_SUSTAINABLE_EXTRACTION,
     _visual_state_hash,
     validate_policy,
 )
@@ -31,9 +29,9 @@ class PolicyTests(unittest.TestCase):
             shares = river.shares
             self.assertAlmostEqual(sum(shares.model_dump().values()), 1.0, places=10)
             self.assertGreaterEqual(shares.salmon, river.salmon_floor)
-            self.assertGreaterEqual(shares.city, CITY_FLOOR)
-            self.assertGreaterEqual(shares.agriculture, SUMMER_AGRICULTURE_FLOOR)
-            self.assertGreaterEqual(shares.data_centers, DATA_CENTER_FLOOR)
+            self.assertGreater(shares.city, 0.0)
+            self.assertGreater(shares.agriculture, 0.0)
+            self.assertGreaterEqual(shares.data_centers, river.data_center_floor)
             state = river.visual_state
             self.assertAlmostEqual(
                 state.extraction_fraction,
@@ -45,6 +43,14 @@ class PolicyTests(unittest.TestCase):
             )
             self.assertEqual(state.hydropower_fraction, 0.0)
             self.assertEqual(state.water_project_fraction, 0.0)
+            self.assertGreaterEqual(
+                state.extraction_fraction,
+                MIN_SUSTAINABLE_EXTRACTION,
+            )
+            self.assertLessEqual(
+                state.extraction_fraction,
+                MAX_SUSTAINABLE_EXTRACTION,
+            )
 
     def test_hotter_temperature_raises_salmon_floor(self):
         observation = load_observation(PROJECT_ROOT, 0)
@@ -65,8 +71,63 @@ class PolicyTests(unittest.TestCase):
         for winter_river, summer_river in zip(winter.rivers, summer.rivers):
             self.assertGreater(winter_river.shares.data_centers, summer_river.shares.data_centers)
             self.assertGreater(summer_river.shares.agriculture, winter_river.shares.agriculture)
-            self.assertGreaterEqual(winter_river.shares.data_centers, WINTER_DATA_CENTER_FLOOR)
-            self.assertGreaterEqual(summer_river.shares.data_centers, DATA_CENTER_FLOOR)
+            self.assertGreaterEqual(winter_river.shares.data_centers, winter_river.data_center_floor)
+            self.assertGreaterEqual(summer_river.shares.data_centers, summer_river.data_center_floor)
+
+    def test_extraction_rises_with_available_water_and_never_exceeds_half(self):
+        observation = load_observation(PROJECT_ROOT, 0)
+        base = observation.stages[0]
+        dry_stage = base.model_copy(update={
+            "atmospheric_input_0_1": 0.0,
+            "reservoir_release_0_1": 0.0,
+        })
+        wet_stage = base.model_copy(update={
+            "atmospheric_input_0_1": 1.0,
+            "reservoir_release_0_1": 0.0,
+        })
+        dry_observation = observation.model_copy(
+            update={"stages": (dry_stage, *observation.stages[1:])}
+        )
+        wet_observation = observation.model_copy(
+            update={"stages": (wet_stage, *observation.stages[1:])}
+        )
+        dry = validate_policy(dry_observation, self.proposal).rivers[0].visual_state
+        wet = validate_policy(wet_observation, self.proposal).rivers[0].visual_state
+        self.assertAlmostEqual(dry.extraction_fraction, MIN_SUSTAINABLE_EXTRACTION)
+        self.assertGreater(wet.extraction_fraction, dry.extraction_fraction)
+        self.assertLessEqual(wet.extraction_fraction, MAX_SUSTAINABLE_EXTRACTION)
+
+    def test_cool_water_favors_data_centers_and_warm_water_favors_fields(self):
+        observation = load_observation(PROJECT_ROOT, 360)
+        base = observation.stages[0].model_copy(update={
+            "atmospheric_input_0_1": 0.4,
+            "reservoir_release_0_1": 0.0,
+        })
+        cool_stage = base.model_copy(update={"temperature_c": 8.0})
+        warm_stage = base.model_copy(update={"temperature_c": 24.0})
+        cool_observation = observation.model_copy(
+            update={"stages": (cool_stage, *observation.stages[1:])}
+        )
+        warm_observation = observation.model_copy(
+            update={"stages": (warm_stage, *observation.stages[1:])}
+        )
+        cool = validate_policy(cool_observation, self.proposal).rivers[0]
+        warm = validate_policy(warm_observation, self.proposal).rivers[0]
+        self.assertGreater(cool.shares.data_centers, warm.shares.data_centers)
+        self.assertGreater(warm.shares.agriculture, cool.shares.agriculture)
+
+    def test_screen_specific_inputs_produce_distinct_allocations(self):
+        decision = validate_policy(load_observation(PROJECT_ROOT, 360), self.proposal)
+        allocations = {
+            (
+                round(river.visual_state.extraction_fraction, 6),
+                round(river.shares.agriculture, 6),
+                round(river.shares.data_centers, 6),
+                round(river.shares.floodplain, 6),
+            )
+            for river in decision.rivers
+        }
+        self.assertGreater(len(allocations), 1)
 
     def test_same_input_is_idempotent(self):
         observation = load_observation(PROJECT_ROOT, 17, 0.25)

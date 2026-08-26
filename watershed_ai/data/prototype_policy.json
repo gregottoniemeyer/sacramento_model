@@ -5,11 +5,24 @@
     "salmon_cap": 0.61,
     "floodplain_default": 0.08,
     "floodplain_winter_spring": 0.15,
-    "agriculture_default": 0.04,
-    "agriculture_summer": 0.08,
-    "data_centers_default": 0.07,
-    "data_centers_winter": 0.10,
-    "city": 0.10
+    "agriculture_share_of_extraction_default": 0.15,
+    "agriculture_share_of_extraction_summer": 0.25,
+    "data_centers_share_of_extraction_default": 0.15,
+    "data_centers_share_of_extraction_winter": 0.25,
+    "city_share_of_extraction": 0.20
+  },
+  "sustainable_extraction": {
+    "minimum": 0.05,
+    "maximum": 0.50,
+    "dry_supply_rate": 0.03,
+    "abundant_supply_rate": 0.60,
+    "curve": "SMOOTHSTEP"
+  },
+  "temperature_allocation": {
+    "cool_water_c": 8.0,
+    "warm_water_c": 24.0,
+    "cool_bias": "data_centers",
+    "warm_bias": "agriculture_fields"
   },
   "fixed_zero_extraction": ["hydropower", "water_projects"],
   "notes": [

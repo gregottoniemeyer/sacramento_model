@@ -11,6 +11,7 @@ from watercouncil_ai.controller import (
     AppliedScreen,
     PartialApplyError,
     apply_decision,
+    assert_studio_operator,
     assert_watershed_active,
 )
 from watercouncil_ai.data import load_observation
@@ -83,6 +84,26 @@ class FakePreflightSocket:
 
 
 class ControllerTests(unittest.TestCase):
+    def test_live_ai_allows_studio_and_governator_ethernet_only(self):
+        for address in ("196.168.50.11", "196.168.50.51"):
+            with patch(
+                "watercouncil_ai.controller.subprocess.run",
+                return_value=type("Result", (), {
+                    "returncode": 0,
+                    "stdout": f"inet {address}\n",
+                })(),
+            ):
+                assert_studio_operator()
+        with patch(
+            "watercouncil_ai.controller.subprocess.run",
+            return_value=type("Result", (), {
+                "returncode": 0,
+                "stdout": "inet 10.0.0.2\n",
+            })(),
+        ):
+            with self.assertRaisesRegex(OSError, "196.168.50.11"):
+                assert_studio_operator()
+
     def test_preflight_requires_exact_hosts_and_capability(self):
         fake_socket = FakePreflightSocket()
         with patch("watercouncil_ai.controller.socket.socket", return_value=fake_socket):

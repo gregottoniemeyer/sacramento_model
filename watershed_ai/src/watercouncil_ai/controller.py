@@ -47,12 +47,17 @@ class FleetMoment:
 
 
 def assert_studio_operator() -> None:
-    """Live AI is deliberately restricted to the isolated studio controller."""
+    """Live AI is restricted to the studio and isolated fleet controller."""
     result = subprocess.run(
         ["/sbin/ifconfig"], capture_output=True, text=True, timeout=4, check=False
     )
-    if result.returncode != 0 or "196.168.50.51" not in result.stdout:
-        raise OSError("live Watershed AI requires studio Ethernet 196.168.50.51")
+    authorized_addresses = ("196.168.50.11", "196.168.50.51")
+    if result.returncode != 0 or not any(
+        address in result.stdout for address in authorized_addresses
+    ):
+        raise OSError(
+            "live Watershed AI requires Ethernet 196.168.50.11 or 196.168.50.51"
+        )
 
 
 def _fleet_moment_from_capabilities(

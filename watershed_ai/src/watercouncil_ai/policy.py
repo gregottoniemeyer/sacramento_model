@@ -21,13 +21,19 @@ from .schemas import (
 
 BASE_SALMON_FLOOR = 0.35
 MAX_SALMON_FLOOR = 0.61
-CITY_FLOOR = 0.10
-AGRICULTURE_FLOOR = 0.04
-SUMMER_AGRICULTURE_FLOOR = 0.08
-DATA_CENTER_FLOOR = 0.07
-WINTER_DATA_CENTER_FLOOR = 0.10
 FLOODPLAIN_FLOOR = 0.08
 WET_SEASON_FLOODPLAIN_FLOOR = 0.15
+MIN_SUSTAINABLE_EXTRACTION = 0.05
+MAX_SUSTAINABLE_EXTRACTION = 0.50
+DRY_SUPPLY_RATE = 0.03
+ABUNDANT_SUPPLY_RATE = 0.60
+COOL_WATER_ALLOCATION_C = 8.0
+WARM_WATER_ALLOCATION_C = 24.0
+CITY_EXTRACTION_FLOOR_RATIO = 0.20
+AGRICULTURE_EXTRACTION_FLOOR_RATIO = 0.15
+SUMMER_AGRICULTURE_EXTRACTION_FLOOR_RATIO = 0.25
+DATA_CENTER_EXTRACTION_FLOOR_RATIO = 0.15
+WINTER_DATA_CENTER_EXTRACTION_FLOOR_RATIO = 0.25
 TEMPERATURE_STRESS_BEGINS_C = 15.0
 TEMPERATURE_STRESS_FULL_C = 23.0
 MAX_THERMAL_FLOOR_INCREMENT = 0.15
@@ -49,27 +55,73 @@ def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(value, maximum))
 
 
-def _allocation_floors(season: Season, available_supply: float, temperature: float | None) -> tuple[tuple[float, ...], float, float, float]:
+def _sustainable_extraction_fraction(available_supply: float) -> float:
+    """Map each screen's available water to a smooth, bounded withdrawal."""
+    progress = _clamp(
+        (available_supply - DRY_SUPPLY_RATE)
+        / (ABUNDANT_SUPPLY_RATE - DRY_SUPPLY_RATE)
+    )
+    smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+    return (
+        MIN_SUSTAINABLE_EXTRACTION
+        + (MAX_SUSTAINABLE_EXTRACTION - MIN_SUSTAINABLE_EXTRACTION)
+        * smooth_progress
+    )
+
+
+def _warm_water_fraction(temperature: float | None) -> float:
+    if temperature is None:
+        return 0.5
+    return _clamp(
+        (temperature - COOL_WATER_ALLOCATION_C)
+        / (WARM_WATER_ALLOCATION_C - COOL_WATER_ALLOCATION_C)
+    )
+
+
+def _allocation_floors(
+    season: Season,
+    available_supply: float,
+    temperature: float | None,
+) -> tuple[tuple[float, ...], float, float, float, float]:
     scarcity_stress = _clamp((SUPPLY_SCARCITY_THRESHOLD - available_supply) / SUPPLY_SCARCITY_THRESHOLD)
     thermal_stress = 0.0 if temperature is None else _clamp(
         (temperature - TEMPERATURE_STRESS_BEGINS_C) / (TEMPERATURE_STRESS_FULL_C - TEMPERATURE_STRESS_BEGINS_C)
     )
     floodplain_floor = WET_SEASON_FLOODPLAIN_FLOOR if season in ("winter", "spring") else FLOODPLAIN_FLOOR
-    agriculture_floor = SUMMER_AGRICULTURE_FLOOR if season == "summer" else AGRICULTURE_FLOOR
-    data_center_floor = WINTER_DATA_CENTER_FLOOR if season == "winter" else DATA_CENTER_FLOOR
-    non_salmon = floodplain_floor + agriculture_floor + data_center_floor + CITY_FLOOR
+    extraction_target = _sustainable_extraction_fraction(available_supply)
     salmon_floor = _clamp(
         BASE_SALMON_FLOOR
         + scarcity_stress * MAX_SCARCITY_FLOOR_INCREMENT
         + thermal_stress * MAX_THERMAL_FLOOR_INCREMENT,
         BASE_SALMON_FLOOR,
-        min(MAX_SALMON_FLOOR, 1.0 - non_salmon),
+        min(MAX_SALMON_FLOOR, 1.0 - floodplain_floor),
+    )
+    extraction_target = min(
+        extraction_target,
+        max(1.0 - salmon_floor - floodplain_floor, 0.0),
+    )
+    agriculture_ratio = (
+        SUMMER_AGRICULTURE_EXTRACTION_FLOOR_RATIO
+        if season == "summer"
+        else AGRICULTURE_EXTRACTION_FLOOR_RATIO
+    )
+    data_center_ratio = (
+        WINTER_DATA_CENTER_EXTRACTION_FLOOR_RATIO
+        if season == "winter"
+        else DATA_CENTER_EXTRACTION_FLOOR_RATIO
     )
     return (
-        (salmon_floor, floodplain_floor, agriculture_floor, data_center_floor, CITY_FLOOR),
+        (
+            salmon_floor,
+            floodplain_floor,
+            extraction_target * agriculture_ratio,
+            extraction_target * data_center_ratio,
+            extraction_target * CITY_EXTRACTION_FLOOR_RATIO,
+        ),
         scarcity_stress,
         thermal_stress,
         salmon_floor,
+        extraction_target,
     )
 
 
@@ -79,18 +131,43 @@ def _shares_from_priorities(
     priorities: tuple[float, ...],
     reservoir_storage: float,
     reservoir_release: float,
+    extraction_target: float,
+    temperature: float | None,
 ) -> WaterAllocationShares:
-    remaining = 1.0 - sum(floors)
-    if remaining < -1e-9:
-        raise ValueError("deterministic water floors exceed one")
     multipliers = list(SEASONAL_MULTIPLIERS[season])
     if season == "summer":
         # Spring storage specifically strengthens food production in the dry season.
         multipliers[2] *= 1.0 + reservoir_storage * 1.5 + reservoir_release * 4.0
+    warm_water = _warm_water_fraction(temperature)
+    # Within the extraction budget, cool water favors compute and warm water
+    # favors fields. Missing temperature is neutral rather than invented.
+    multipliers[2] *= 0.65 + warm_water * 1.35
+    multipliers[3] *= 2.00 - warm_water * 1.35
     weighted = [_clamp(value) * multipliers[index] for index, value in enumerate(priorities)]
-    weight_sum = sum(weighted)
-    weights = [value / weight_sum for value in weighted] if weight_sum > 1e-12 else [0.2] * 5
-    values = [floors[index] + remaining * weights[index] for index in range(5)]
+    ecology_budget = 1.0 - extraction_target
+    ecology_remaining = ecology_budget - floors[0] - floors[1]
+    productive_remaining = extraction_target - sum(floors[2:])
+    if ecology_remaining < -1e-9 or productive_remaining < -1e-9:
+        raise ValueError("deterministic water floors exceed their budgets")
+    ecology_weight_sum = sum(weighted[:2])
+    ecology_weights = (
+        [value / ecology_weight_sum for value in weighted[:2]]
+        if ecology_weight_sum > 1e-12
+        else [0.5, 0.5]
+    )
+    productive_weight_sum = sum(weighted[2:])
+    productive_weights = (
+        [value / productive_weight_sum for value in weighted[2:]]
+        if productive_weight_sum > 1e-12
+        else [1.0 / 3.0] * 3
+    )
+    values = [
+        floors[0] + ecology_remaining * ecology_weights[0],
+        floors[1] + ecology_remaining * ecology_weights[1],
+        floors[2] + productive_remaining * productive_weights[0],
+        floors[3] + productive_remaining * productive_weights[1],
+        floors[4] + productive_remaining * productive_weights[2],
+    ]
     values[1] += 1.0 - sum(values)  # residue stays in-system as floodplain water
     return WaterAllocationShares(
         salmon=values[0],
@@ -110,7 +187,10 @@ def _state_payload_without_hash(
     shares: WaterAllocationShares,
 ) -> dict[str, object]:
     available_supply = _clamp(atmospheric_input + reservoir_release)
-    extraction = _clamp(shares.extraction_fraction)
+    extraction = _clamp(
+        shares.extraction_fraction,
+        maximum=MAX_SUSTAINABLE_EXTRACTION,
+    )
     remaining = _clamp(available_supply * (1.0 - extraction))
     return {
         "schema_version": 2,
@@ -162,7 +242,13 @@ def validate_policy(
     for stage in observation.stages:
         proposed = proposals[stage.screen_id]
         available = _clamp(stage.atmospheric_input_0_1 + stage.reservoir_release_0_1)
-        floors, scarcity_stress, thermal_stress, salmon_floor = _allocation_floors(
+        (
+            floors,
+            scarcity_stress,
+            thermal_stress,
+            salmon_floor,
+            extraction_target,
+        ) = _allocation_floors(
             observation.season, available, stage.temperature_c
         )
         shares = _shares_from_priorities(
@@ -177,6 +263,8 @@ def validate_policy(
             ),
             stage.reservoir_storage_0_1,
             stage.reservoir_release_0_1,
+            extraction_target,
+            stage.temperature_c,
         )
         rows.append((stage, proposed, shares, floors, scarcity_stress, thermal_stress, salmon_floor))
         canonical_seed.append({

@@ -34,6 +34,8 @@ Policy intent:
 - In spring, favor floodplain connection and reservoir carryover.
 - In summer, use conceptual spring reservoir carryover to grow food, while
   retaining a nonzero data-center allocation and protecting salmon.
+- Treat cooler water as more suitable for data centers and warmer water as more
+  suitable for fields; propose distinct priorities for each screen's needs.
 - Hydropower and water-project extraction are fixed at zero by host policy because
   the scenario assumes solar, wind, and nuclear power; do not propose them.
 
@@ -44,7 +46,8 @@ Hard boundaries:
   point-station proxies and the Delta is a conceptual weighted aggregate.
 - Return every canonical screen exactly once.
 - Values are priorities only. Deterministic host code enforces final shares,
-  seasonal floors, bounds, water accounting, and all Godot/network behavior.
+  seasonal floors, supply-dependent extraction capped at 50%, temperature
+  biases, bounds, water accounting, and all Godot/network behavior.
 """
 
 

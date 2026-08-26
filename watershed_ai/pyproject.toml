@@ -11,6 +11,9 @@ requires-python = ">=3.10"
 dependencies = [
   "openai-agents==0.22.0",
   "pydantic==2.13.4",
+  # cryptography 50 no longer ships a usable Intel macOS wheel for the
+  # governator. Keep the last universal2-compatible line on that host.
+  "cryptography<47; platform_system == 'Darwin' and platform_machine == 'x86_64'",
 ]
 
 [project.scripts]

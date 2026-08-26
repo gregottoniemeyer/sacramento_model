@@ -298,8 +298,9 @@ The main-canvas presentation stack is fixed around the animated content:
   existing typography. Only the Delta wrapper enables the regime panel. It hides the
   optional 48-pixel `Regime` heading and leaves the seven 60-pixel names at
   their existing positions beginning on X `1420` with 72-pixel centerline
-  spacing. Its last visible name is `AI Watershed`; this Delta-only label does
-  not change the stable internal `Watershed` name or `watershed` ID.
+  spacing. Its visible presentation names include `Water Project` and
+  `AI Watershed`; these Delta-only labels do not change the stable internal
+  `Water Projects`/`water_projects` or `Watershed`/`watershed` names and IDs.
   Active names are opaque and inactive names are shown at `0.25` alpha.
   The panel follows the shared `ModelRegimes` state, so matching active names
   highlight immediately even when that state arrived before Delta was loaded.
@@ -419,7 +420,10 @@ Projects/export 40%, Hydropower/reservoir loss 15%, Tech/data-center cooling
 25%, and the authored Watershed fallback 0%, capped at 100%. An applied
 Watershed AI state instead derives extraction from its agriculture,
 data-center, and city allocations. Until that state arrives, the Delta panel
-shows an em dash rather than claiming `0%`. The panel displays input, total
+shows an em dash rather than claiming `0%`. The host maps each screen's own
+available supply to a smooth 5%-to-50% extraction target, biases cooler water
+toward data centers and warmer water toward fields, and independently resolves
+each screen from its own observation and AI priorities. The panel displays input, total
 extraction, and remainder. Kinship floods the Delta with borderless 45-degree
 blue hatching: 3-pixel round-capped lines, 6-pixel gaps, fixed 33% alpha, and a
 6-pixel label knockout. Every regime draws the incoming Bay tide as a
@@ -555,7 +559,8 @@ reservoir_storage_fraction, hydropower_fraction, water_project_fraction
 all other values must be finite numbers in `0..1`. Allocation shares must sum
 to one; extraction must equal agriculture + data centers + city; available and
 remaining rates must close the budget; hydropower and water projects must both
-be zero. Missing, extra, invalid, or non-finite values reject the state atomically. The scoped envelope accepts no
+be zero; extraction above 50% is rejected. Missing, extra, invalid, or
+non-finite values reject the state atomically. The scoped envelope accepts no
 top-level fields beyond `protocol`, optional `revision`, `control_scope`,
 `target`, `changes`, `geometry_ops`, `actions`, and `metadata`, and requires a
 nonempty `metadata.request_id` of at most 128 characters.

@@ -366,11 +366,12 @@ degrees, and uses the same Barlow Condensed Medium font and `#4AB0E1` color.
 The Delta wrapper hides the optional `Regime` heading, leaving only the seven
 60-pixel names at their existing positions beginning on X `1420` with 72-pixel
 centerline spacing. They follow the historical order—Kinship,
-Agriculture, Gold Rush, Water Projects, Hydropower, Tech, AI Watershed—with a
+Agriculture, Gold Rush, Water Project, Hydropower, Tech, AI Watershed—with a
 72-pixel column interval. Active names are opaque; inactive names remain
 visible at `0.25` alpha.
-`AI Watershed` is a Delta-only presentation label; the stable internal regime
-name and ID remain `Watershed` and `watershed`.
+`Water Project` and `AI Watershed` are Delta-only presentation labels; their
+stable internal regime names and IDs remain `Water Projects`/`water_projects`
+and `Watershed`/`watershed`.
 The panel listens to the shared `ModelRegimes` authority, so a received
 absolute-state packet immediately highlights Kinship or any other active name,
 including state received before the Delta stage was loaded.
@@ -452,7 +453,10 @@ every hatch segment stopping six pixels before the measured text bounds.
 During exclusive Watershed, the extraction percentage is derived directly
 from the applied agriculture, data-center, and city allocation fractions. If
 no AI allocation has been applied, the panel displays an em dash instead of
-the misleading authored-fallback value `0%`.
+the misleading authored-fallback value `0%`. The host maps each screen's own
+available supply to a smooth 5%-to-50% extraction target, biases cooler water
+toward data centers and warmer water toward fields, and resolves each screen
+from its own observation and AI priorities.
 
 The seven water-color head emitters keep native `amount_ratio = 1`, zero timing
 randomness, and zero explosiveness. An exact global-slot selector distributes
@@ -834,7 +838,8 @@ The state dictionary must contain exactly the fifteen fields shown above.
 `schema_version` is the integer `2`; `decision_id` is a nonempty string of at
 most 128 characters; every other state value is numeric, finite, and within
 `0..1`. Shares, extraction, available supply, and remaining water must close
-the deterministic budget, and both legacy power/project fractions must be zero.
+the deterministic budget, extraction cannot exceed 50%, and both legacy
+power/project fractions must be zero.
 Unknown, missing, non-finite, or out-of-range values reject the complete state,
 so no partial visual update is possible.
 

@@ -11,6 +11,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -779,13 +780,14 @@ def regime_indices(regime_ids: list[str]) -> list[int]:
 
 
 def validate_watershed_ai_runtime(decision_path: Optional[Path] = None) -> None:
-    if current_operator()["name"] != "studio":
+    operator_name = current_operator()["name"]
+    if operator_name not in {"studio", "governator"}:
         raise ValueError(
-            "automatic Watershed AI activation is available only from the "
-            "studio controller at 196.168.50.51"
+            "automatic Watershed AI activation requires the studio or Governator"
         )
-    if not WATERSHED_AI_EXECUTABLE.is_file() or not os.access(
-        WATERSHED_AI_EXECUTABLE,
+    _project_root, executable = watershed_ai_runtime_paths()
+    if not executable.is_file() or not os.access(
+        executable,
         os.X_OK,
     ):
         raise ValueError(
@@ -798,13 +800,27 @@ def validate_watershed_ai_runtime(decision_path: Optional[Path] = None) -> None:
         )
 
 
+def watershed_ai_runtime_paths() -> tuple[Path, Path]:
+    """Return the authorized AI root and executable for this controller host."""
+    project_root = (
+        Path(GOVERNATOR_TELEMETRY_RUNTIME_ROOT)
+        if current_operator()["name"] == "governator"
+        else REPOSITORY_ROOT
+    )
+    return (
+        project_root,
+        project_root / "watershed_ai/.venv/bin/watercouncil-ai",
+    )
+
+
 def run_watershed_ai_once(decision_path: Optional[Path] = None) -> str:
-    """Run one studio-side decision, or replay one without buying a new turn."""
+    """Run one authorized decision, or replay one without buying a new turn."""
     validate_watershed_ai_runtime(decision_path)
+    project_root, executable = watershed_ai_runtime_paths()
     command = [
-        str(WATERSHED_AI_EXECUTABLE),
+        str(executable),
         "--project-root",
-        str(REPOSITORY_ROOT),
+        str(project_root),
         "--live",
     ]
     if decision_path is None:
@@ -1028,6 +1044,38 @@ def chair_regime_ids(chairs) -> list[str]:
     return enforce_watershed_exclusivity(active) if active else ["kinship"]
 
 
+class WatershedAIWorker:
+    """Run one chair-triggered AI decision without blocking newer chair input."""
+
+    def __init__(self, runner=None):
+        self._runner = runner or run_watershed_ai_once
+        self._lock = threading.Lock()
+        self._running = False
+
+    def trigger(self) -> bool:
+        with self._lock:
+            if self._running:
+                return False
+            self._running = True
+        threading.Thread(target=self._run, daemon=True).start()
+        return True
+
+    def _run(self) -> None:
+        try:
+            result = self._runner()
+            if result:
+                print(result, flush=True)
+        except (OSError, ValueError) as error:
+            print(
+                f"ERROR chair-triggered Watershed AI setting failed: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+        finally:
+            with self._lock:
+                self._running = False
+
+
 def run_chair_control() -> None:
     """Continuously apply the Governator's raw chair telemetry to Godot."""
     if current_operator()["name"] != "governator":
@@ -1037,6 +1085,7 @@ def run_chair_control() -> None:
         )
     telemetry = load_chair_sensor_module()
     source = telemetry.SensorSource()
+    watershed_ai = WatershedAIWorker()
     print(
         "Chair control: "
         + ", ".join(
@@ -1096,6 +1145,14 @@ def run_chair_control() -> None:
                 f"stale={stale}; {format_regime_send(sends)}",
                 flush=True,
             )
+            if regime_ids == ["watershed"]:
+                if watershed_ai.trigger():
+                    print("STARTED chair-triggered Watershed AI decision", flush=True)
+                else:
+                    print(
+                        "Watershed AI decision already running; retaining it",
+                        flush=True,
+                    )
     except KeyboardInterrupt:
         print("Chair control stopped.", flush=True)
 

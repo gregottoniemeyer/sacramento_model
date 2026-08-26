@@ -12,8 +12,9 @@ Watershed regime. It reads the current point in the 720-sample July 2025–June
 
 Deterministic local code—not the model—turns those priorities into a complete
 water budget, enforces ecological and seasonal floors, closes the sum to 100%,
-sets hydropower and water-project extraction to zero, hashes the state, and
-sends one exact state to each of the seven Godot screens.
+sets a smooth supply-dependent extraction target between 5% and 50%, keeps
+hydropower and water-project extraction at zero, hashes the state, and sends
+one screen-specific state to each of the seven Godot screens.
 
 This is a speculative art model, not a biological, legal, agricultural,
 municipal, tribal, cultural, flood-control, or water-operations system.
@@ -27,6 +28,11 @@ municipal, tribal, cultural, flood-control, or water-operations system.
   data-center floor and the dynamically protected salmon share remain.
 - Scarcity and heat increase the salmon floor. Missing temperature never
   invents thermal stress.
+- Greater available supply permits greater sustainable extraction; scarce
+  supply approaches the 5% minimum and extraction can never exceed 50%.
+- Within each screen's extraction budget, cooler water favors data centers and
+  warmer water favors agriculture/fields. Each screen uses its own input,
+  release, storage, temperature, quality flags, and AI priorities.
 - Hydropower and water-project extraction are fixed at `0.0` in this scenario.
 
 The instantaneous accounting is:

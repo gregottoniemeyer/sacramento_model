@@ -857,6 +857,43 @@ class ControllerTests(unittest.TestCase):
             run.call_args.kwargs["timeout"],
         )
 
+    def test_governator_uses_its_isolated_watershed_ai_runtime(self):
+        controller.configure_operator(
+            "en0: flags\n\tinet 196.168.50.11 netmask 0xffffff00\n"
+        )
+        project_root, executable = controller.watershed_ai_runtime_paths()
+        self.assertEqual(
+            Path(controller.GOVERNATOR_TELEMETRY_RUNTIME_ROOT),
+            project_root,
+        )
+        self.assertEqual(
+            project_root / "watershed_ai/.venv/bin/watercouncil-ai",
+            executable,
+        )
+
+    def test_watershed_ai_worker_never_blocks_or_duplicates_a_live_run(self):
+        started = controller.threading.Event()
+        release = controller.threading.Event()
+        calls = []
+
+        def runner():
+            calls.append("run")
+            started.set()
+            release.wait(1.0)
+            return ""
+
+        worker = controller.WatershedAIWorker(runner)
+        self.assertTrue(worker.trigger())
+        self.assertTrue(started.wait(1.0))
+        self.assertFalse(worker.trigger())
+        release.set()
+        for _attempt in range(100):
+            with worker._lock:
+                if not worker._running:
+                    break
+            controller.time.sleep(0.001)
+        self.assertEqual(["run"], calls)
+
     def test_deploy_rejects_duplicate_targets_defensively(self):
         self.configure_studio()
         results = controller.deploy_targets(["21", "21"], dry_run=True)

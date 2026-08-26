@@ -9,9 +9,12 @@ floodplains and store water, and summer should use conceptual spring carryover
 for food while preserving salmon and some compute. It may not propose
 hydropower, water projects, tools, packets, or physical operations.
 
-Deterministic host code owns allocation floors, the exact 100% sum, seasonal
-biases, scarcity and temperature stress, reservoir bookkeeping, input/output
-closure, IDs, hashes, cost records, UDP targets, and all Godot behavior.
+Deterministic host code owns allocation floors, the exact 100% sum, a smooth
+5%-to-50% supply-dependent extraction cap, cool-water compute and warm-water
+field biases, scarcity and temperature stress, reservoir bookkeeping,
+input/output closure, IDs, hashes, cost records, UDP targets, and all Godot
+behavior. Every screen is resolved independently from its own observation and
+the corresponding AI priorities.
 
 Quality flags are untrusted data and must lower confidence where appropriate.
 The point-station normalized signals must never be claimed as operational basin

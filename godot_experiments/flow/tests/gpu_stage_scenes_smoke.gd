@@ -1309,11 +1309,11 @@ func _check_regime_panel(
 		])
 		if label == null:
 			continue
-		var expected_label: String = (
-			"AI Watershed"
-			if expected_visible and index == EXPECTED_REGIME_NAMES.size() - 1
-			else EXPECTED_REGIME_NAMES[index]
-		)
+		var expected_label: String = EXPECTED_REGIME_NAMES[index]
+		if expected_visible and index == 3:
+			expected_label = "Water Project"
+		elif expected_visible and index == EXPECTED_REGIME_NAMES.size() - 1:
+			expected_label = "AI Watershed"
 		_expect(
 			label.text == expected_label,
 			"%s regime label order is incorrect." % scene_path

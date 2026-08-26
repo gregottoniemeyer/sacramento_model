@@ -1574,6 +1574,29 @@ func _check_watershed_ai_control(
 	out_of_range_packet["changes"] = out_of_range_changes
 	if bool(bus.call(&"submit_packet", out_of_range_packet, "smoke-test", 0)):
 		errors.append("Watershed AI packet accepted an out-of-range state")
+	var excessive_extraction_packet: Dictionary = packet.duplicate(true)
+	var excessive_extraction_changes: Dictionary = Dictionary(
+		excessive_extraction_packet["changes"]
+	).duplicate(true)
+	var excessive_extraction_state: Dictionary = Dictionary(
+		excessive_extraction_changes["watershed.ai.state"]
+	).duplicate(true)
+	excessive_extraction_state["extraction_fraction"] = 0.60
+	excessive_extraction_state["remaining_rate"] = 0.28
+	excessive_extraction_state["salmon_fraction"] = 0.25
+	excessive_extraction_state["floodplain_fraction"] = 0.15
+	excessive_extraction_state["agriculture_fraction"] = 0.25
+	excessive_extraction_state["data_center_fraction"] = 0.20
+	excessive_extraction_state["city_fraction"] = 0.15
+	excessive_extraction_changes["watershed.ai.state"] = excessive_extraction_state
+	excessive_extraction_packet["changes"] = excessive_extraction_changes
+	if bool(bus.call(
+		&"submit_packet",
+		excessive_extraction_packet,
+		"smoke-test",
+		0,
+	)):
+		errors.append("Watershed AI packet accepted extraction above 50%")
 	var before_apply: Dictionary = stage.call(&"runtime_summary")
 	if not String(before_apply.get(
 		"watershed_ai_applied_decision_id",
@@ -2057,9 +2080,11 @@ func _check_regime_panel(
 		if label == null:
 			errors.append("active-regime label %d is missing" % (index + 1))
 			continue
-		var expected_label: String = (
-			"AI Watershed" if index == 6 else EXPECTED_REGIME_NAMES[index]
-		)
+		var expected_label: String = EXPECTED_REGIME_NAMES[index]
+		if index == 3:
+			expected_label = "Water Project"
+		elif index == 6:
+			expected_label = "AI Watershed"
 		if label.text != expected_label:
 			errors.append("active-regime label order is incorrect")
 		if label.get_theme_font_size(&"font_size") != EXPECTED_TITLE_FONT_SIZE:

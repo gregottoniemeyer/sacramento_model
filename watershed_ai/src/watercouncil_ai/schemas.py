@@ -101,6 +101,8 @@ class WaterAllocationShares(StrictModel):
         total = self.salmon + self.floodplain + self.agriculture + self.data_centers + self.city
         if abs(total - 1.0) > 1e-8:
             raise ValueError("water-allocation shares must sum to one")
+        if self.extraction_fraction > 0.5 + 1e-8:
+            raise ValueError("sustainable extraction cannot exceed 50%")
         return self
 
     @property
@@ -118,7 +120,7 @@ class WatershedVisualState(StrictModel):
     atmospheric_input_rate: float = Field(ge=0.0, le=1.0)
     reservoir_release_rate: float = Field(ge=0.0, le=1.0)
     available_supply_rate: float = Field(ge=0.0, le=1.0)
-    extraction_fraction: float = Field(ge=0.0, le=1.0)
+    extraction_fraction: float = Field(ge=0.0, le=0.5)
     remaining_rate: float = Field(ge=0.0, le=1.0)
     salmon_fraction: float = Field(ge=0.0, le=1.0)
     floodplain_fraction: float = Field(ge=0.0, le=1.0)

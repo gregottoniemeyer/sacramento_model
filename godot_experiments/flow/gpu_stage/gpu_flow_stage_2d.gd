@@ -119,6 +119,7 @@ const WATERSHED_AI_CONTROL_SCOPE := "watershed-ai/2"
 const WATERSHED_AI_STATE_PATH := "watershed.ai.state"
 const WATERSHED_AI_STATE_SCHEMA_VERSION := 2
 const WATERSHED_REGIME_INDEX := 6
+const WATER_PROJECTS_REGIME_INDEX := 3
 const WATERSHED_AI_TOP_LEVEL_FIELDS: Array[String] = [
 	"protocol",
 	"revision",
@@ -229,6 +230,7 @@ const REGIME_NAME_START_Y := 60.0
 const REGIME_NAME_ROW_HEIGHT := 72.0
 const REGIME_ACTIVE_ALPHA := 1.0
 const REGIME_INACTIVE_ALPHA := 0.25
+const DELTA_WATER_PROJECT_DISPLAY_NAME := "Water Project"
 const DELTA_WATERSHED_DISPLAY_NAME := "AI Watershed"
 const MODEL_CALENDAR_DAY_COUNT := 365
 const MODEL_MINUTES_PER_DAY := 1440
@@ -920,6 +922,11 @@ func _validated_watershed_ai_state(state_variant: Variant) -> Dictionary:
 		return {
 			"ok": false,
 			"error": "Watershed AI extraction_fraction is not the consumptive sum.",
+		}
+	if extraction_sum > 0.500001:
+		return {
+			"ok": false,
+			"error": "Watershed AI sustainable extraction cannot exceed 50%.",
 		}
 	var expected_available := clampf(
 		float(canonical_state["atmospheric_input_rate"])
@@ -6129,8 +6136,11 @@ func _apply_regime_panel() -> void:
 
 
 func _regime_display_name(names: Array, index: int) -> String:
-	if screen_id == &"delta" and index == WATERSHED_REGIME_INDEX:
-		return DELTA_WATERSHED_DISPLAY_NAME
+	if screen_id == &"delta":
+		if index == WATER_PROJECTS_REGIME_INDEX:
+			return DELTA_WATER_PROJECT_DISPLAY_NAME
+		if index == WATERSHED_REGIME_INDEX:
+			return DELTA_WATERSHED_DISPLAY_NAME
 	return String(names[index]) if index < names.size() else ""
 
 
