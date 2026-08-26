@@ -14,7 +14,9 @@ live `motion_log.txt` and processes.
 
 ## Runtime chain
 
-1. The USB ESP32 receiver writes raw serial lines to `telemetry/motion_log.txt`.
+1. The USB ESP32 receiver writes raw serial lines to the bounded live buffer
+   `telemetry/motion_log.txt`. Existing or replaced file contents are never
+   replayed, and the keep-alive clears the buffer above 1 MiB.
 2. `telemetry/controller.py` treats a major-motion peak as a 30-second chair
    interval; later major motion renews that interval.
 3. `fleet/godot_controller.py chairs` loads that `SensorSource` state directly.

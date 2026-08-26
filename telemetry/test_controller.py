@@ -1,6 +1,63 @@
+import os
+import tempfile
+import threading
+import time
 import unittest
+from pathlib import Path
 
 from telemetry import controller
+
+
+class LiveFollowTests(unittest.TestCase):
+    def _next_line(self, path):
+        stop = threading.Event()
+        lines = []
+
+        def read_one():
+            stream = controller.follow(path, stop)
+            try:
+                lines.append(next(stream))
+            finally:
+                stop.set()
+                stream.close()
+
+        thread = threading.Thread(target=read_one, daemon=True)
+        thread.start()
+        return thread, stop, lines
+
+    def test_follow_does_not_replay_existing_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "motion_log.txt"
+            path.write_text("historical motion\n")
+            thread, stop, lines = self._next_line(path)
+            try:
+                time.sleep(0.05)
+                with path.open("a") as handle:
+                    handle.write("live motion\n")
+                thread.join(1.0)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(["live motion\n"], lines)
+            finally:
+                stop.set()
+
+    def test_follow_skips_contents_written_during_file_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "motion_log.txt"
+            replacement = Path(directory) / "replacement.txt"
+            path.write_text("old history\n")
+            thread, stop, lines = self._next_line(path)
+            try:
+                time.sleep(0.05)
+                replacement.write_text("replacement history\n")
+                os.replace(replacement, path)
+                time.sleep(0.05)
+                with path.open("a") as handle:
+                    handle.write("new live motion\n")
+                thread.join(1.0)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(["new live motion\n"], lines)
+            finally:
+                stop.set()
 
 
 class ChairModelTests(unittest.TestCase):

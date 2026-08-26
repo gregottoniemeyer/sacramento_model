@@ -32,6 +32,7 @@ HZ = 60
 STALE_S = 3.0
 NUM_CHAIRS = 7
 WATERSHED_CHAIR = 7
+MAX_LIVE_BACKLOG_BYTES = 32 * 1024
 
 # Receiver slot 8 is currently installed as the physical replacement for
 # logical chair 3. Keep this mapping explicit so a stray packet from the
@@ -114,35 +115,53 @@ def parse(line):
 
 
 def follow(path, stop=None):
-    """Yield complete lines as they are appended, surviving truncation.
+    """Yield only live complete lines, surviving replacement or truncation.
 
     Holds a partial line until its newline arrives: reading a file another
     process is appending to otherwise returns half lines, which then match the
     shorter raw pattern and silently record as data with no statistics.
+
+    Existing contents are deliberately never replayed. Reopening at byte zero
+    after a deployment replaced or truncated the capture log once turned old
+    motion into new chair activations for many minutes.
     """
-    f = open(path, "r", errors="replace")
-    f.seek(0, os.SEEK_END)
-    where = f.tell()
+    def open_live_end():
+        handle = open(path, "r", errors="replace")
+        handle.seek(0, os.SEEK_END)
+        stat = os.fstat(handle.fileno())
+        return handle, handle.tell(), (stat.st_dev, stat.st_ino)
+
+    f, where, identity = open_live_end()
     buf = ""
-    while stop is None or not stop.is_set():
-        try:
-            if os.stat(path).st_size < where:
-                f.close()
-                f = open(path, "r", errors="replace")
-                buf = ""
-        except FileNotFoundError:
-            time.sleep(0.2)
-            continue
-        chunk = f.readline()
-        where = f.tell()
-        if not chunk:
-            time.sleep(0.02)
-            continue
-        buf += chunk
-        if not buf.endswith("\n"):
-            continue
-        line, buf = buf, ""
-        yield line
+    try:
+        while stop is None or not stop.is_set():
+            try:
+                stat = os.stat(path)
+                if (stat.st_dev, stat.st_ino) != identity or stat.st_size < where:
+                    f.close()
+                    f, where, identity = open_live_end()
+                    buf = ""
+                elif stat.st_size - where > MAX_LIVE_BACKLOG_BYTES:
+                    # A delayed consumer must recover by dropping old telemetry,
+                    # never by turning historical motion into a current regime.
+                    f.seek(0, os.SEEK_END)
+                    where = f.tell()
+                    buf = ""
+            except FileNotFoundError:
+                time.sleep(0.2)
+                continue
+            chunk = f.readline()
+            where = f.tell()
+            if not chunk:
+                time.sleep(0.02)
+                continue
+            buf += chunk
+            if not buf.endswith("\n"):
+                continue
+            line, buf = buf, ""
+            yield line
+    finally:
+        f.close()
 
 
 # ------------------------------------------------------------ occupancy model
