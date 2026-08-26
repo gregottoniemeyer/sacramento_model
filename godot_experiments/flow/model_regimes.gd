@@ -1,5 +1,5 @@
 extends Node
-## Process-persistent authority for the seven historical water regimes.
+## In-memory authority for the seven historical water regimes within one process.
 ##
 ## The active set survives current-scene replacement and is intentionally
 ## independent of river identity. Several historical regimes may be active at

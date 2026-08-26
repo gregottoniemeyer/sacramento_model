@@ -74,9 +74,10 @@ the sole active regime (`active_indices == [6]`). Packets cannot contain actions
 geometry operations, wildcard targets, missing fields, extra fields, non-finite
 numbers, unclosed budgets, or nonzero hydropower/water-project allocation.
 
-Watershed is also exclusive at the persistent Godot state and fleet-controller
+Watershed is also exclusive at the live Godot state and fleet-controller
 boundaries. If Watershed is selected with other chairs or regimes, every other
-regime is cleared: optimize or bust.
+regime is cleared: optimize or bust. The fleet controller does not save or
+replay that regime state.
 
 The state drives:
 

@@ -13,7 +13,7 @@ Godot project. Run every command below from the repository root.
 
 | Target | Address | SSH account | Installed project | Stages |
 | --- | --- | --- | --- | --- |
-| `11` | `196.168.50.11` | `francescospagnolo` | `/Users/francescospagnolo/Documents/watercouncil/code` | `7` |
+| `11` | `196.168.50.11` | `francescospagnolo` | `/Users/francescospagnolo/Documents/watercouncil/code` | `7` on extended screen `1` |
 | `21` | `196.168.50.21` | `gregniemeyer` | `/Users/gregniemeyer/Documents/watercouncil/code` | `1,2` |
 | `31` | `196.168.50.31` | `gregniemeyer` | `/Users/gregniemeyer/Documents/watercouncil/code` | `3,4` |
 | `41` | `196.168.50.41` | `gregniemeyer` | `/Users/gregniemeyer/Documents/watercouncil/code` | `5,6` |
@@ -22,11 +22,17 @@ The controller passes stage assignments such as `--stages=7` and
 `--stages=1,2` to `godot_experiments/startup_selector.gd`.
 
 On the Governator, `godot_controller.py chairs` maps the seven absolute chair
-flags to the seven regimes. Telemetry holds each major-motion detection for 60
-seconds and renews the interval when more major motion arrives. After every
-interval expires, the bridge performs an explicit hard reset to Kinship with
-debug/obstacle geometry hidden; it never sends an empty regime state. The next
-detected chair explicitly restores geometry for its active extractive regimes.
+flags to the seven regimes. Every chair is a separate binary signal: strong
+motion turns only that chair on for 30 seconds, later strong motion from the
+same chair renews only its interval, and the timer releases exactly at its
+deadline. After every interval expires, the bridge performs an explicit hard
+reset to Kinship with geometry visible; it never sends an empty regime state.
+Regime activation alone determines which extractor and floodplain shapes exist.
+Watershed remains exclusive when chair 7 activates and clears all other chair
+timers. A newer strong signal from chairs 1-6 immediately cancels Watershed and
+starts that chair's timer. If Watershed reaches its own 30-second deadline, all
+chairs are released. Handoffs use the same strong-motion threshold as ordinary
+activation; there is no lower noise-sensitive threshold.
 
 ## Studio `.51` network setup
 
@@ -134,6 +140,21 @@ For a production release, deploy all four together so the installation does not
 run mixed code. Do not interrupt a real deployment after it begins promotion.
 Do not run a regime command during a partial deployment or maintenance window.
 
+For an offline gallery update copied directly onto the Governator, first stop
+the fleet and install the changed source into target `11` locally. The updated
+Governator controller can then atomically deploy that complete local source to
+the three remote render nodes:
+
+```bash
+python3 fleet/godot_controller.py deploy 21 31 41 --dry-run
+python3 fleet/godot_controller.py deploy 21 31 41
+python3 fleet/godot_controller.py start
+```
+
+The Governator intentionally refuses to deploy target `11` to itself; the
+offline update bundle owns that local copy step. The full `start` still launches
+stage 7 on extended screen `1`, establishes Kinship, and restarts telemetry.
+
 Each target is staged in a sibling `.code.deploy-<12-hex-id>` directory.
 During promotion, the previous tree is moved to the matching
 `.code.backup-<12-hex-id>` path so an automatic rollback remains possible.
@@ -170,8 +191,16 @@ python3 fleet/godot_controller.py restart 21 31
 `start`, `restart`, `editor`, and `stop` terminate **every** Godot instance on
 each selected Mac, not only this project. That is safe only because the fleet
 Macs are dedicated render nodes. `start` and `restart` launch exactly one
-process per selected Mac, wait for the configured stage IDs, and reapply the
-central regime state. An `OK` launch request without the later `APPLIED` line is
+process per selected Mac, wait for the configured stage IDs, and apply the hard
+startup baseline: Kinship with geometry visible. When target `11` starts
+successfully, the controller then copies the installed fleet controller into
+the Governator's isolated live runtime and restarts the telemetry launch agent.
+It verifies that exactly one diagnostic publisher and one Godot chair bridge
+remain, so `python3 fleet/godot_controller.py start` is also a clean telemetry
+restart. Conversely, a successful `stop` that includes target `11` unloads the
+telemetry LaunchAgent, terminates both telemetry processes, and verifies that
+zero remain. The next `start` bootstraps the LaunchAgent again. An `OK` launch request
+without the later `APPLIED` line is
 not a complete successful start. Inspect the corresponding
 `code/godot-remote.log` before retrying a failed start. Each new launch truncates
 the active log, so copy a log that matters before `start` or `restart`.
@@ -212,22 +241,18 @@ shutdown event. Do not use `pmset schedule cancelall` merely to remove benign
 one-time wake entries created by macOS; use it only if `pmset -g sched` reveals
 an unwanted one-time **sleep** or **shutdown** event.
 
-## Central regime state on `.11`
+## Stateless regime control
 
-The authoritative state file is
-`/Users/francescospagnolo/.water_council_regime_state.json` on `.11`. A
-controller running on `.51` reads and writes that same file over SSH; it must
-not create a competing state file in the `.51` home directory. This keeps
-regime and geometry state stable when operators alternate between `.11` and
-`.51`, and a project deployment does not replace it because it lives outside
-the installed `code` tree.
+The fleet controller does not save regime or geometry state to disk. It has no
+state file to read, write, or replay. `start` and `restart` always establish
+Kinship with visible geometry after the launched processes acknowledge the
+baseline. Live chair and operator commands affect the running Godot processes
+only; a later process launch begins from Kinship again.
 
-Back up the central file before intentionally resetting installation state. If
-`.11` or its SSH authentication is unavailable, do not guess or create a local
-replacement; restore access to `.11` first. `start` and `restart` use the
-central state for startup synchronization, while `set`, `regime-clear`, and
-`regime-console` update it only after the fleet acknowledges the requested
-absolute state.
+This is intentional. A chair release cannot be acknowledged while Godot is
+stopped, so replaying an older on-disk chair state could incorrectly restore an
+extractive regime the next morning. The running Godot process keeps only the
+volatile state needed to render its current scenes.
 
 ## Rollback
 
@@ -236,14 +261,12 @@ or checksum verification fails. After all four new trees verify, the temporary
 predecessor trees are deleted as requested; there is no lingering on-machine
 old version. To return to an earlier release after a successful deployment,
 check out or extract that known release in the authoritative studio repository,
-run `deploy --dry-run`, and deploy all four Macs together. The central regime
-state normally does not need rollback because project deployment does not
-modify it.
+run `deploy --dry-run`, and deploy all four Macs together.
 
 ## First-six per-river regime pilot
 
-The Governator at `.11` owns authoritative regime state, but the operator may
-send commands from `.11` or `.51`. An active Godot stage intentionally ignores
+The running Godot processes own the current volatile regime state, and the
+operator may send commands from `.11` or `.51`. An active Godot stage intentionally ignores
 number keys `1` through `7`; run the controller console in a focused Terminal
 window instead:
 
@@ -253,39 +276,32 @@ python3 fleet/godot_controller.py regime-clear
 python3 fleet/godot_controller.py set --regime kinship
 python3 fleet/godot_controller.py set --regime kinship --regime tech
 python3 fleet/godot_controller.py set --regime watershed
-python3 fleet/godot_controller.py set --geo FALSE
-python3 fleet/godot_controller.py set --regime kinship --geo TRUE
 python3 fleet/godot_controller.py regime-console
 ```
 
-`set --geo TRUE/FALSE` sets obstacle/debug geometry to an absolute state on all
-seven screens. `FALSE` hides the reservoir guide and obstacle/drain outlines
-without changing their physics; `TRUE` shows them. A geometry-only `set`
-preserves the saved regime set, while a combined command replaces the regime
-set and changes geometry visibility together. The geometry value is persisted
-and reapplied by `start` and `restart`. Values are case-insensitive, but must be
-`TRUE` or `FALSE`. When `set` supplies regimes without `--geo`, extractive
-regimes default to visible geometry while Kinship defaults to a clear basin.
+Geometry is always visible. The controller has no geometry-hiding option, and
+every startup, chair, clear, console, and `set` packet explicitly establishes
+visible geometry. Regime activation still determines which extractor and
+floodplain shapes exist.
 
 Inside `regime-console`, keys `1` through `6` toggle the first six regimes.
 Key `7` cannot activate Watershed because doing so would bypass its one-shot AI
 decision; use `set --regime watershed` instead. Key `7` may still remove an
 already-active Watershed regime. Press `c` to clear the active set, and `q` or
-Escape to leave the console. Exiting leaves the last sent regime state active.
-The controller persists the authoritative set on `.11` and resends that
-absolute state when the console opens.
+Escape to leave the console. The console opens by sending Kinship with visible
+geometry. Exiting leaves its last state active only until the Godot processes
+are restarted.
 
 An explicit transition into exclusive Watershed through
 `set --regime watershed` is a single-command operation from the studio `.51`
 Mac. Before changing the regime, the controller verifies that the local
-`watershed_ai/.venv` runtime exists. It then obtains all four regime ACKs, saves
-the central state, and invokes exactly one OpenAI proposal using the currently
-displayed fleet phase. Watershed is exclusive: a request or chair state that
-also contains other regimes is normalized to Watershed alone. A duplicate
-Watershed `set`, a geometry-only set, and UDP retries do not make another API
-call. Leave Watershed and activate it again to request one new setting. Every
-new proposal prints measured token usage and its estimated USD cost; saved
-startup decisions replay at zero new API cost.
+`watershed_ai/.venv` runtime exists. It then obtains all four regime ACKs and
+invokes exactly one OpenAI proposal using the currently displayed fleet phase.
+Watershed is exclusive: a request or chair state that also contains other
+regimes is normalized to Watershed alone. Each explicit `set --regime
+watershed` is one new optimization request; UDP retries make no API call. Every
+new proposal prints measured token usage and
+its estimated USD cost.
 
 The live preflight requires all seven updated stage capabilities and uses
 Delta's 720-row phase as the reference. Other screens must be within two cyclic
@@ -294,10 +310,9 @@ remains active with its baseline appearance and the command exits nonzero; it
 does not silently retry or spend another credit. A partial application records
 an ignored local recovery decision that can be replayed without the API.
 
-`start` and `restart` never purchase a fresh decision. When the saved regime is
-Watershed, a studio launch reapplies `watershed_ai/runlogs/latest-decision.json`
-after startup synchronization. A missing saved decision is reported as an
-incomplete restore instead of silently generating one.
+`start` and `restart` never purchase or replay a Watershed decision: every
+launch begins in Kinship. A later explicit `set --regime watershed` performs
+the one-shot optimization normally.
 
 Each change sends the same modern `ink-flow/1` absolute-state packet on UDP
 port `5005` once to every configured Godot process, with target `*`. A
@@ -314,8 +329,8 @@ indices, recipient count, and recipient screen IDs. The controller retries until
 every process reports the exact screen IDs and count configured for that Mac,
 and prints `APPLIED` only after every process also acknowledges the exact regime
 state. A missing or mismatched acknowledgement is an error rather than a
-successful send. For `--geo`, the acknowledgement also reports applied
-visibility by screen ID. Stages apply routed control at a frame boundary, so the
+successful send. The acknowledgement also reports visible geometry by screen
+ID. Stages apply routed control at a frame boundary, so the
 controller retries the same absolute packet until every configured screen
 reports the requested value.
 

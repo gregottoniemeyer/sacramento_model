@@ -26,6 +26,7 @@ const EXPECTED_TEMPERATURE_DATA_PATH := (
 )
 const EXPECTED_TEMPERATURE_ROW_COUNT := 720
 const EXPECTED_TEMPERATURE_INTERPOLATION := "HALF_OPEN_ANNUAL_LINEAR_WRAP"
+const EXPECTED_TIDE_ROW_COUNT := 8760
 const EXPECTED_TEMPERATURE_COLUMNS := {
 	"mount_shasta": "shasta_keswick_release_temp_c",
 	"mccloud_pit": "mccloud_above_shasta_lake_temp_c",
@@ -52,7 +53,7 @@ const SCENES: Array[Dictionary] = [
 	{
 		"path": "res://scene_1.tscn",
 		"id": &"mount_shasta",
-		"title": "Mount Shasta",
+		"title": "Lake Shasta",
 	},
 	{
 		"path": "res://scene_2.tscn",
@@ -144,7 +145,7 @@ func _check_project_configuration() -> void:
 	_expect(
 		String(ProjectSettings.get_setting("autoload/ModelRegimes", ""))
 			== "*res://flow/model_regimes.gd",
-		"project.godot must install the persistent ModelRegimes autoload."
+		"project.godot must install the in-memory ModelRegimes autoload."
 	)
 
 
@@ -546,13 +547,13 @@ func _check_two_stage_texture_isolation() -> void:
 		v_key.keycode = KEY_V
 		first_stage.call(&"_unhandled_input", v_key)
 		_expect(
-			not bool(first_stage.call(&"runtime_summary").get(
-				"debug_visible", true
+			bool(first_stage.call(&"runtime_summary").get(
+				"debug_visible", false
 			))
-			and not bool(second_stage.call(&"runtime_summary").get(
-				"debug_visible", true
+			and bool(second_stage.call(&"runtime_summary").get(
+				"debug_visible", false
 			)),
-			"V from stage A must hide debug geometry on both active stages."
+			"V from stage A must not hide geometry on either active stage."
 		)
 		second_stage.call(&"_unhandled_input", v_key)
 		_expect(
@@ -562,20 +563,20 @@ func _check_two_stage_texture_isolation() -> void:
 			and bool(second_stage.call(&"runtime_summary").get(
 				"debug_visible", false
 			)),
-			"V from stage B must reveal debug geometry on both active stages."
+			"V from stage B must keep geometry visible on both active stages."
 		)
 		first_stage.call(&"queue_control_message", {
 			"actions": ["toggle_debug"],
 		})
 		await get_tree().process_frame
 		_expect(
-			not bool(first_stage.call(&"runtime_summary").get(
-				"debug_visible", true
+			bool(first_stage.call(&"runtime_summary").get(
+				"debug_visible", false
 			))
 			and bool(second_stage.call(&"runtime_summary").get(
 				"debug_visible", false
 			)),
-			"A targeted debug action must remain local to its recipient stage."
+			"A targeted debug action must not hide recipient geometry."
 		)
 		first_stage.call(&"set_debug_visible", true)
 		var first_summary: Dictionary = first_stage.call(&"runtime_summary")
@@ -701,13 +702,14 @@ func _check_delta_tide_exclusivity(
 	var is_delta := expected_id == &"delta"
 	_expect(
 		bool(summary.get("delta_tide_visible", false)) == is_delta,
-		"%s must %s the Kinship tide."
+		"%s must %s the Delta tide."
 			% [scene_path, "show" if is_delta else "never show"],
 	)
 	_expect(
-		(
-			String(summary.get("delta_tide_data_status", "")) == "READY"
-			and int(summary.get("delta_tide_data_row_count", 0)) == 720
+			(
+				String(summary.get("delta_tide_data_status", "")) == "READY"
+				and int(summary.get("delta_tide_data_row_count", 0))
+					== EXPECTED_TIDE_ROW_COUNT
 		) if is_delta else (
 			String(summary.get("delta_tide_data_status", "")) == "NOT_DELTA"
 			and int(summary.get("delta_tide_data_row_count", -1)) == 0
@@ -718,6 +720,12 @@ func _check_delta_tide_exclusivity(
 	stage.call(&"set_active_regime_names", ["Agriculture", "Tech"])
 	await get_tree().process_frame
 	await get_tree().process_frame
+	summary = stage.call(&"runtime_summary")
+	_expect(
+		bool(summary.get("delta_tide_visible", false)) == is_delta,
+		"%s must keep Delta tide visibility independent of regime."
+			% scene_path,
+	)
 
 
 func _check_shared_timeline_state(stage: Node, scene_path: String) -> void:
@@ -1277,7 +1285,7 @@ func _check_regime_panel(
 	_expect(
 		bool(summary.get("regime_state_shared", false))
 		and String(summary.get("regime_state_scope", "")) == "GODOT_PROCESS",
-		"%s must consume the process-persistent regime state." % scene_path
+		"%s must consume the in-memory process regime state." % scene_path
 	)
 	_expect(
 		Array(summary.get("regime_names", [])) == EXPECTED_REGIME_NAMES,
@@ -1301,8 +1309,13 @@ func _check_regime_panel(
 		])
 		if label == null:
 			continue
+		var expected_label: String = (
+			"AI Watershed"
+			if expected_visible and index == EXPECTED_REGIME_NAMES.size() - 1
+			else EXPECTED_REGIME_NAMES[index]
+		)
 		_expect(
-			label.text == EXPECTED_REGIME_NAMES[index],
+			label.text == expected_label,
 			"%s regime label order is incorrect." % scene_path
 		)
 		var expected_alpha := 1.0 if index in [1, 5] else 0.25
@@ -2018,7 +2031,7 @@ func _finish() -> void:
 			"GPU_STAGE_SCENES_SMOKE: PASS "
 			+ "(7 scenes, unique IDs/titles, 1920x1080, Mobile, "
 			+ "six temperature-bearing titles, "
-			+ "persistent timeline/regimes + gate + routed "
+				+ "shared in-memory timeline/regimes + gate + routed "
 			+ "polygons/salmon/leaves)"
 		)
 		get_tree().quit(0)

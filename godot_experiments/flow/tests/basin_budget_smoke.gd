@@ -146,38 +146,40 @@ func _run() -> void:
 	)
 	_expect(
 		String(summary.get("delta_tide_data_status", "")) == "READY"
-		and int(summary.get("delta_tide_data_row_count", 0)) == 720,
-		"Delta must load exactly 720 NOAA San Francisco tide samples."
+		and int(summary.get("delta_tide_data_row_count", 0)) == 8760,
+		"Delta must load all 8,760 hourly NOAA San Francisco tide samples."
 	)
 	_expect(
 		String(summary.get("delta_tide_station_id", "")) == "9414290"
 		and String(summary.get("delta_tide_animation_direction", ""))
 		== "BOTTOM_TO_TOP",
-		"Delta tide must identify the NOAA station and enter from screen-right."
+		"Delta tide must identify the NOAA station and move forward bottom-to-top."
 	)
 	_expect(
 		String(summary.get("delta_tide_render_style", ""))
-		== "BOTTOM_TO_TOP_FIFO_TIMESERIES_BARS"
+		== "RIGHT_ANCHORED_CENTERED_96H_FIFO_HATCHED_AREA"
 		and String(summary.get("delta_tide_area_shape", ""))
-		== "RIGHT_ANCHORED_LENGTH_PROFILE"
-		and int(summary.get("delta_tide_series_sample_count", 0)) == 720
-		and int(summary.get("delta_tide_visible_line_count", 0)) == 35
-		and is_equal_approx(float(summary.get("delta_tide_first_line_y", 0.0)), 30.0)
-		and is_equal_approx(float(summary.get("delta_tide_last_line_y", 0.0)), 1050.0)
-		and float(summary.get("delta_tide_current_sample_screen_y", 0.0)) >= 1020.0
-		and float(summary.get("delta_tide_current_sample_screen_y", 0.0)) <= 1050.0
-		and not bool(summary.get("delta_tide_current_sample_centered", true))
-		and int(summary.get("delta_tide_history_capacity", 0)) == 35
+		== "RIGHT_ANCHORED_HOURLY_TIDE_POLYGON"
+		and int(summary.get("delta_tide_series_sample_count", 0)) == 8760
+		and int(summary.get("delta_tide_visible_line_count", 0)) == 120
+		and is_equal_approx(float(summary.get("delta_tide_first_line_y", 0.0)), 4.5)
+		and is_equal_approx(float(summary.get("delta_tide_last_line_y", 0.0)), 1075.5)
+		and is_equal_approx(
+			float(summary.get("delta_tide_current_sample_screen_y", 0.0)),
+			540.0,
+		)
+		and bool(summary.get("delta_tide_current_sample_centered", false))
+		and int(summary.get("delta_tide_history_capacity", 0)) == 97
 		and String(summary.get("delta_tide_history_update_mode", ""))
-		== "ARRAY_POP_FRONT_PUSH_BACK"
+		== "WRAPPED_LINEAR_HOURLY_FIFO_WINDOW"
 		and String(summary.get("delta_tide_history_order", ""))
 		== "OLDEST_TOP_NEWEST_BOTTOM"
 		and is_equal_approx(
 			float(summary.get("delta_tide_migration_pixels_per_sample", 0.0)),
-			30.0,
+			11.25,
 		)
 		and String(summary.get("delta_tide_bar_value_dimension", ""))
-		== "HORIZONTAL_LENGTH_FROM_TIDE_HEIGHT"
+		== "POLYGON_LEFT_BOUNDARY_X_FROM_TIDE_HEIGHT"
 		and Vector2(summary.get("delta_tide_line_length_range_pixels", Vector2.ZERO))
 		== Vector2(40.8, 306.0)
 		and is_equal_approx(
@@ -192,8 +194,12 @@ func _run() -> void:
 		== "NORMALIZED_TIDE_HEIGHT"
 		and String(summary.get("delta_tide_origin_side", "")) == "RIGHT"
 		and Color(summary.get("delta_tide_line_color", Color.TRANSPARENT))
-		== Color("1e90ff")
-		and String(summary.get("delta_tide_line_color_name", "")) == "DODGER_BLUE"
+		== Color.WHITE
+		and String(summary.get("delta_tide_line_color_name", "")) == "WHITE"
+		and is_equal_approx(float(summary.get("delta_tide_line_alpha", 0.0)), 0.20)
+		and bool(summary.get("delta_budget_percentage_tabular_numerals", false))
+		and String(summary.get("delta_budget_percentage_font_resource", ""))
+		== "res://flow/assets/fonts/BarlowCondensed-Medium.ttf"
 		and bool(summary.get("delta_tide_below_text", false))
 		and not summary.has("delta_tide_colors_randomized")
 		and not summary.has("delta_tide_color_random_seed")
@@ -204,16 +210,23 @@ func _run() -> void:
 		)
 		and is_equal_approx(
 			float(summary.get("delta_tide_fill_line_gap_pixels", 0.0)),
-			27.0,
+			6.0,
 		)
 		and is_equal_approx(
 			float(summary.get("delta_tide_fill_line_period_pixels", 0.0)),
-			30.0,
+			9.0,
 		)
+		and is_equal_approx(float(summary.get("delta_tide_window_hours", 0.0)), 96.0)
+		and is_equal_approx(float(summary.get("delta_tide_window_past_hours", 0.0)), 48.0)
+		and is_equal_approx(float(summary.get("delta_tide_window_future_hours", 0.0)), 48.0)
+		and int(summary.get("delta_tide_window_sample_count", 0)) == 97
+		and bool(summary.get("delta_tide_wrap_enabled", false))
+		and String(summary.get("delta_tide_timeline_source", ""))
+		== "SHARED_MODEL_YEAR_PROGRESS"
 		and bool(summary.get("delta_tide_skips_screen_boundary_gridlines", false))
 		and not bool(summary.get("delta_tide_boundary_visible", true))
 		and not bool(summary.get("delta_tide_label_visible", true)),
-		"Delta tide must push/pop 35 Dodger Blue bars from bottom to top."
+		"Delta tide must draw a wrapped, right-anchored centered 96-hour white-hatched FIFO area."
 	)
 	_expect(
 		is_zero_approx(float(summary.get("interaction_count_uniform", -1.0)))
@@ -224,22 +237,59 @@ func _run() -> void:
 	var tide_overlay := stage.get_node_or_null("DeltaTideOverlay")
 	_expect(tide_overlay != null, "Delta must expose its FIFO tide overlay.")
 	if tide_overlay != null:
-		var history_before := Array(tide_overlay.get("tide_history")).duplicate()
-		stage.set_model_date_time("01/15-12:30")
-		await _settle()
-		var history_after := Array(tide_overlay.get("tide_history")).duplicate()
-		_expect(
-			history_before.size() == 35 and history_after.size() == 35,
-			"The tide FIFO must retain exactly 35 data values."
+		var percentage_font := tide_overlay.get("_tabular_font") as FontVariation
+		var tabular_tag := TextServerManager.get_primary_interface().name_to_tag(
+			"tnum"
 		)
-		if history_before.size() == 35 and history_after.size() == 35:
-			for history_index in range(34):
+		_expect(
+			percentage_font != null
+			and int(percentage_font.opentype_features.get(tabular_tag, 0)) == 1,
+			"Delta budget percentages must use tabular numerals."
+		)
+		var history_before := Array(tide_overlay.get("tide_fifo_values")).duplicate()
+		var tide_polygon: PackedVector2Array = tide_overlay.call(&"_tide_area_polygon")
+		_expect(
+			tide_polygon.size() == 99
+			and tide_polygon[0] == Vector2(1920.0, 0.0)
+			and tide_polygon[98] == Vector2(1920.0, 1080.0)
+			and is_equal_approx(tide_polygon[49].y, 540.0)
+			and tide_polygon[49].x < 1920.0,
+			"The tide area must anchor to the right edge with its live profile on the left."
+		)
+		stage.set_model_date_time("01/15-01:00")
+		await _settle()
+		var history_after := Array(tide_overlay.get("tide_fifo_values")).duplicate()
+		_expect(
+			history_before.size() == 97 and history_after.size() == 97,
+			"The centered tide FIFO must retain exactly 97 hourly boundary values."
+		)
+		if history_before.size() == 97 and history_after.size() == 97:
+			for history_index in range(96):
 				_expect(
 					is_equal_approx(
 						float(history_before[history_index + 1]),
 						float(history_after[history_index]),
 					),
-					"The tide FIFO must pop one top value and shift every retained sample."
+					"One model hour must shift the wrapped FIFO by exactly one hourly sample."
+				)
+		stage.set_model_date_time("06/30-23:00")
+		await _settle()
+		var year_end_window := Array(tide_overlay.get("tide_fifo_values")).duplicate()
+		stage.set_model_date_time("07/01-00:00")
+		await _settle()
+		var year_start_window := Array(tide_overlay.get("tide_fifo_values")).duplicate()
+		_expect(
+			year_end_window.size() == 97 and year_start_window.size() == 97,
+			"The tide FIFO must remain populated across the annual boundary."
+		)
+		if year_end_window.size() == 97 and year_start_window.size() == 97:
+			for history_index in range(96):
+				_expect(
+					is_equal_approx(
+						float(year_end_window[history_index + 1]),
+						float(year_start_window[history_index]),
+					),
+					"The hourly tide FIFO must wrap without a year-end gap."
 				)
 	_expect(
 		is_equal_approx(

@@ -123,7 +123,7 @@ func _run() -> void:
 			var regime_snapshot: Dictionary = model_regimes.call(&"snapshot")
 			_expect(
 				Array(regime_snapshot.get("active_indices", [])) == [0],
-				"The bus must apply Kinship directly to persistent ModelRegimes.",
+				"The bus must apply Kinship directly to in-memory ModelRegimes.",
 			)
 			model_regimes.call(&"set_active_indices", [1, 6])
 			regime_snapshot = model_regimes.call(&"snapshot")

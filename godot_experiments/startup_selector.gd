@@ -2,7 +2,7 @@ extends Control
 
 const DUAL_STAGE_HOST_SCENE := preload("res://dual_stage_host.tscn")
 const SCENES: Array[Dictionary] = [
-	{"title": "Mount Shasta", "comment": "snowmelt", "path": "res://scene_1.tscn"},
+	{"title": "Lake Shasta", "comment": "snowmelt", "path": "res://scene_1.tscn"},
 	{"title": "McCloud-Pit Rivers", "comment": "upper volcanic watershed", "path": "res://scene_2.tscn"},
 	{"title": "Cottonwood Creek", "comment": "major undammed west-side tributary", "path": "res://scene_3.tscn"},
 	{"title": "Mill Creek", "comment": "east-side mountain tributary", "path": "res://scene_4.tscn"},

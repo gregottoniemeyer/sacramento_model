@@ -30,7 +30,7 @@ script = ExtResource("1_stage")
 [node name="FlowModel2D" parent="." unique_id=1272129814 instance=ExtResource("2_flow")]
 model_id = &"mount_shasta_flow"
 screen_id = &"mount_shasta"
-stage_title = "Mount Shasta"
+stage_title = "Lake Shasta"
 debug_visible = true
 regime_profile_physics_enabled = true
 model_start_day_index = 181

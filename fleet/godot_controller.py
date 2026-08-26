@@ -11,7 +11,6 @@ import shlex
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +26,7 @@ COMPUTERS = {
         "user": "francescospagnolo",
         "project": "/Users/francescospagnolo/Documents/watercouncil/code",
         "stages": (7,),
+        "screen": 1,
         "local": False,
         "dedicated": True,
     },
@@ -83,7 +83,7 @@ REGIME_TARGET = "*"
 REGIME_ACK_PROTOCOL = "ink-flow/1-ack"
 REGIME_ACK_ATTEMPTS = 24
 REGIME_ACK_WAIT_SECONDS = 0.75
-REGIME_STATE_PATH = "/Users/francescospagnolo/.water_council_regime_state.json"
+STARTUP_MODEL_DATE = "07/01-00:00"
 GLOBAL_CLASS_CACHE_RELATIVE_PATH = ".godot/global_script_class_cache.cfg"
 FONT_CACHE_RELATIVE_PATH = (
     ".godot/imported/"
@@ -102,17 +102,33 @@ REQUIRED_GLOBAL_CLASSES = (
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_SOURCE_DIR = REPOSITORY_ROOT / "godot_experiments"
+# The studio development checkout keeps the Godot project in the
+# godot_experiments/ child. A promoted Governator installation places
+# project.godot directly at the repository root beside fleet/. Recognize that
+# complete installed layout so .11 can be the offline deployment authority.
+if (
+    not PROJECT_SOURCE_DIR.is_dir()
+    and (REPOSITORY_ROOT / "project.godot").is_file()
+):
+    PROJECT_SOURCE_DIR = REPOSITORY_ROOT
 FLEET_SOURCE_DIR = Path(__file__).resolve().parent
 WATERSHED_AI_EXECUTABLE = (
     REPOSITORY_ROOT / "watershed_ai/.venv/bin/watercouncil-ai"
-)
-WATERSHED_AI_LATEST_DECISION = (
-    REPOSITORY_ROOT / "watershed_ai/runlogs/latest-decision.json"
 )
 WATERSHED_AI_TIMEOUT_SECONDS = 300
 TELEMETRY_DIR = REPOSITORY_ROOT / "telemetry"
 CHAIR_SENSOR_MODULE_PATH = TELEMETRY_DIR / "controller.py"
 CHAIR_POLL_SECONDS = 0.05
+GOVERNATOR_TELEMETRY_RUNTIME_ROOT = (
+    "/Users/francescospagnolo/.water_council/runtime/code"
+)
+GOVERNATOR_TELEMETRY_LAUNCH_AGENT = "gui/501/com.watercouncil.telemetry"
+GOVERNATOR_TELEMETRY_LAUNCH_AGENT_DOMAIN = "gui/501"
+GOVERNATOR_TELEMETRY_LAUNCH_AGENT_PLIST = (
+    "/Users/francescospagnolo/Library/LaunchAgents/"
+    "com.watercouncil.telemetry.plist"
+)
+TELEMETRY_RESTART_TIMEOUT_SECONDS = 12.0
 PRESERVED_RUNTIME_PATHS = (
     "telemetry",
     "watershed_ai",
@@ -243,6 +259,7 @@ def godot_launch_command(
     project_dir: str,
     stage_argument: Optional[str] = None,
     editor: bool = False,
+    screen_index: Optional[int] = None,
 ) -> list[str]:
     """Build a lifetime-scoped macOS sleep guard around one Godot process."""
     command = [
@@ -252,6 +269,8 @@ def godot_launch_command(
         "--path",
         project_dir,
     ]
+    if screen_index is not None:
+        command.extend(["--screen", str(screen_index)])
     if editor:
         command.append("--editor")
     elif stage_argument is not None:
@@ -321,6 +340,139 @@ def stop_godot_processes(computer: dict) -> subprocess.CompletedProcess:
     )
 
 
+def governator_telemetry_process_patterns() -> tuple[str, str]:
+    """Return patterns that match only the two isolated telemetry roles."""
+    publisher_pattern = (
+        re.escape(GOVERNATOR_TELEMETRY_RUNTIME_ROOT)
+        + r"/telemetry/controller[.]py --source sensors --port 5006 --quiet$"
+    )
+    bridge_pattern = (
+        re.escape(GOVERNATOR_TELEMETRY_RUNTIME_ROOT)
+        + r"/(telemetry/[.][.]/)?fleet/godot_controller[.]py chairs$"
+    )
+    return publisher_pattern, bridge_pattern
+
+
+def governator_telemetry_stop_fragment() -> str:
+    """Terminate both telemetry roles and verify that neither remains."""
+    publisher_pattern, bridge_pattern = governator_telemetry_process_patterns()
+    stop_polls = " ".join(str(index) for index in range(50))
+    return (
+        f"pkill -TERM -f {shlex.quote(publisher_pattern)} 2>/dev/null || true; "
+        f"pkill -TERM -f {shlex.quote(bridge_pattern)} 2>/dev/null || true; "
+        f"for _telemetry_poll in {stop_polls}; do "
+        f"if ! pgrep -f {shlex.quote(publisher_pattern)} >/dev/null "
+        f"&& ! pgrep -f {shlex.quote(bridge_pattern)} >/dev/null; then break; fi; "
+        "sleep 0.1; done; "
+        f"pkill -KILL -f {shlex.quote(publisher_pattern)} 2>/dev/null || true; "
+        f"pkill -KILL -f {shlex.quote(bridge_pattern)} 2>/dev/null || true; "
+    )
+
+
+def governator_telemetry_restart_command() -> str:
+    """Build one exact, self-verifying restart of the Governator telemetry."""
+    computer = COMPUTERS["11"]
+    installed_controller = posixpath.join(
+        computer["project"],
+        "fleet/godot_controller.py",
+    )
+    runtime_controller = posixpath.join(
+        GOVERNATOR_TELEMETRY_RUNTIME_ROOT,
+        "fleet/godot_controller.py",
+    )
+    keep_alive = posixpath.join(
+        GOVERNATOR_TELEMETRY_RUNTIME_ROOT,
+        "telemetry/chair-occupancy-sensor/tools/keep_alive.sh",
+    )
+    publisher_pattern, bridge_pattern = governator_telemetry_process_patterns()
+    start_polls = " ".join(str(index) for index in range(100))
+    return (
+        f"test -f {shlex.quote(installed_controller)} || "
+        f"{{ echo 'installed fleet controller missing'; exit 20; }}; "
+        f"test -f {shlex.quote(keep_alive)} || "
+        f"{{ echo 'telemetry keep-alive missing'; exit 21; }}; "
+        f"test -f {shlex.quote(GOVERNATOR_TELEMETRY_LAUNCH_AGENT_PLIST)} || "
+        f"{{ echo 'telemetry launch-agent plist missing'; exit 25; }}; "
+        f"cp -p {shlex.quote(installed_controller)} "
+        f"{shlex.quote(runtime_controller)} || exit 22; "
+        + governator_telemetry_stop_fragment()
+        + f"launchctl print {shlex.quote(GOVERNATOR_TELEMETRY_LAUNCH_AGENT)} "
+        ">/dev/null 2>&1 || "
+        f"launchctl bootstrap {shlex.quote(GOVERNATOR_TELEMETRY_LAUNCH_AGENT_DOMAIN)} "
+        f"{shlex.quote(GOVERNATOR_TELEMETRY_LAUNCH_AGENT_PLIST)} || exit 26; "
+        f"launchctl kickstart -k {shlex.quote(GOVERNATOR_TELEMETRY_LAUNCH_AGENT)} "
+        "|| exit 23; "
+        f"for _telemetry_poll in {start_polls}; do "
+        f"_publisher_count=$(pgrep -f {shlex.quote(publisher_pattern)} | wc -l | tr -d '[:space:]'); "
+        f"_bridge_count=$(pgrep -f {shlex.quote(bridge_pattern)} | wc -l | tr -d '[:space:]'); "
+        "if test \"$_publisher_count\" = 1 && test \"$_bridge_count\" = 1; then "
+        "echo 'telemetry restarted: publisher=1 bridge=1'; exit 0; fi; "
+        "sleep 0.1; done; "
+        "echo \"telemetry restart verification failed: "
+        "publisher=$_publisher_count bridge=$_bridge_count\"; exit 24"
+    )
+
+
+def governator_telemetry_stop_command() -> str:
+    """Unload automatic recovery, stop both roles, and verify zero remain."""
+    publisher_pattern, bridge_pattern = governator_telemetry_process_patterns()
+    return (
+        f"launchctl bootout {shlex.quote(GOVERNATOR_TELEMETRY_LAUNCH_AGENT)} "
+        "2>/dev/null || true; "
+        + governator_telemetry_stop_fragment()
+        + f"_publisher_count=$(pgrep -f {shlex.quote(publisher_pattern)} | wc -l | tr -d '[:space:]'); "
+        f"_bridge_count=$(pgrep -f {shlex.quote(bridge_pattern)} | wc -l | tr -d '[:space:]'); "
+        "if test \"$_publisher_count\" = 0 && test \"$_bridge_count\" = 0; then "
+        "echo 'telemetry stopped: publisher=0 bridge=0'; exit 0; fi; "
+        "echo \"telemetry stop verification failed: "
+        "publisher=$_publisher_count bridge=$_bridge_count\"; exit 27"
+    )
+
+
+def restart_governator_telemetry() -> tuple[bool, str]:
+    """Reload current telemetry code and leave exactly one process per role."""
+    computer = COMPUTERS["11"]
+    command = governator_telemetry_restart_command()
+    result = (
+        run_local(
+            ["/bin/zsh", "-c", command],
+            timeout=TELEMETRY_RESTART_TIMEOUT_SECONDS,
+        )
+        if computer["local"]
+        else ssh(
+            computer,
+            command,
+            timeout=SSH_TIMEOUT_SECONDS + TELEMETRY_RESTART_TIMEOUT_SECONDS,
+        )
+    )
+    return (
+        result.returncode == 0,
+        result.stdout.strip() if result.returncode == 0 else error_message(result),
+    )
+
+
+def stop_governator_telemetry() -> tuple[bool, str]:
+    """Disable automatic recovery and leave no telemetry process running."""
+    computer = COMPUTERS["11"]
+    command = governator_telemetry_stop_command()
+    result = (
+        run_local(
+            ["/bin/zsh", "-c", command],
+            timeout=TELEMETRY_RESTART_TIMEOUT_SECONDS,
+        )
+        if computer["local"]
+        else ssh(
+            computer,
+            command,
+            timeout=SSH_TIMEOUT_SECONDS + TELEMETRY_RESTART_TIMEOUT_SECONDS,
+        )
+    )
+    return (
+        result.returncode == 0,
+        result.stdout.strip() if result.returncode == 0 else error_message(result),
+    )
+
+
 def required_project_files(computer: dict) -> list[str]:
     return [
         "project.godot",
@@ -349,7 +501,7 @@ def required_project_files(computer: dict) -> list[str]:
         "flow/data/water_pipeline/american_720.txt",
         "flow/data/water_pipeline/delta_720.txt",
         "flow/data/water_pipeline/water_temperature_all_rivers_720.txt",
-        "flow/data/tide/sf_bay_9414290_tide_720.txt",
+        "flow/data/tide/sf_bay_9414290_tide_hourly_2025_2026.txt",
         *(f"scene_{stage}.tscn" for stage in computer["stages"]),
     ]
 
@@ -464,9 +616,10 @@ def all_godot_status(computer: dict) -> tuple[bool, str]:
         GODOT_BIN,
         "--path",
         computer["project"],
-        "--",
-        stage_argument,
     ]
+    if computer.get("screen") is not None:
+        expected_command.extend(["--screen", str(computer["screen"])])
+    expected_command.extend(["--", stage_argument])
     parsed_commands = []
     for process in processes:
         try:
@@ -537,6 +690,7 @@ def perform(target: str, action: str) -> tuple[str, bool, str]:
                 project_dir,
                 stage_argument=stage_argument,
                 editor=action == "editor",
+                screen_index=computer.get("screen"),
             )
             try:
                 subprocess.Popen(
@@ -556,6 +710,7 @@ def perform(target: str, action: str) -> tuple[str, bool, str]:
             project_dir,
             stage_argument=stage_argument,
             editor=action == "editor",
+            screen_index=computer.get("screen"),
         )
         command = (
             f"nohup {shlex.join(launch_command)} "
@@ -623,15 +778,6 @@ def regime_indices(regime_ids: list[str]) -> list[int]:
     return sorted(known_ids.index(regime_id) for regime_id in regime_ids)
 
 
-def is_exclusive_watershed_activation(
-    previous_regime_ids: set[str],
-    next_regime_ids: list[str],
-) -> bool:
-    return set(next_regime_ids) == {"watershed"} and previous_regime_ids != {
-        "watershed"
-    }
-
-
 def validate_watershed_ai_runtime(decision_path: Optional[Path] = None) -> None:
     if current_operator()["name"] != "studio":
         raise ValueError(
@@ -648,7 +794,7 @@ def validate_watershed_ai_runtime(decision_path: Optional[Path] = None) -> None:
         )
     if decision_path is not None and not decision_path.is_file():
         raise ValueError(
-            f"saved Watershed AI decision not found: {decision_path}"
+            f"Watershed AI decision file not found: {decision_path}"
         )
 
 
@@ -671,27 +817,27 @@ def run_watershed_ai_once(decision_path: Optional[Path] = None) -> str:
     return result.stdout.strip()
 
 
-def cli_boolean(value: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized == "true":
-        return True
-    if normalized == "false":
-        return False
-    raise argparse.ArgumentTypeError("expected TRUE or FALSE")
-
-
 def send_fleet_regimes(
     regime_ids: list[str],
     command: str,
     target_names=None,
-    geometry_visible: Optional[bool] = None,
+    *,
+    model_date: Optional[str] = None,
+    model_calendar_auto_advance: Optional[bool] = None,
+    expected_model_date: Optional[str] = None,
 ) -> list[tuple[str, int, int]]:
     regime_ids = enforce_watershed_exclusivity(regime_ids)
     indices = regime_indices(regime_ids)
+    geometry_visible = True
     request_id = uuid.uuid4().hex
-    changes = {"regimes.active_indices": indices}
-    if geometry_visible is not None:
-        changes["debug.geometry_visible"] = geometry_visible
+    changes = {
+        "regimes.active_indices": indices,
+        "debug.geometry_visible": geometry_visible,
+    }
+    if model_date is not None:
+        changes["calendar.date"] = model_date
+    if model_calendar_auto_advance is not None:
+        changes["calendar.auto_advance"] = model_calendar_auto_advance
     source_name = CURRENT_OPERATOR["name"] if CURRENT_OPERATOR else "fleet-controller"
     payload = {
         "protocol": "ink-flow/1",
@@ -713,6 +859,7 @@ def send_fleet_regimes(
     acknowledgements: dict[str, int] = {}
     last_seen_screens: dict[str, list[str]] = {}
     last_seen_geometry: dict[str, dict[str, bool]] = {}
+    last_seen_dates: dict[str, dict[str, str]] = {}
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.bind(("", 0))
         for _attempt in range(REGIME_ACK_ATTEMPTS):
@@ -764,19 +911,38 @@ def send_fleet_regimes(
                     else {}
                 )
                 last_seen_geometry[sender_ip] = received_geometry
-                recipient_count = int(acknowledgement.get("recipient_count", 0))
-                expected_geometry = (
+                raw_dates = acknowledgement.get("recipient_model_date_times", {})
+                received_dates = (
                     {
-                        screen_id: geometry_visible
+                        str(screen_id): str(date_time)
+                        for screen_id, date_time in raw_dates.items()
+                        if isinstance(date_time, str)
+                    }
+                    if isinstance(raw_dates, dict)
+                    else {}
+                )
+                last_seen_dates[sender_ip] = received_dates
+                recipient_count = int(acknowledgement.get("recipient_count", 0))
+                expected_geometry = {
+                    screen_id: geometry_visible
+                    for screen_id in expected_screens_by_destination[sender_ip]
+                }
+                expected_dates = (
+                    {
+                        screen_id: expected_model_date
                         for screen_id in expected_screens_by_destination[sender_ip]
                     }
-                    if geometry_visible is not None
+                    if expected_model_date is not None
                     else None
                 )
                 if (
                     received_screens != expected_screens_by_destination[sender_ip]
                     or recipient_count != len(expected_screens_by_destination[sender_ip])
-                    or (expected_geometry is not None and received_geometry != expected_geometry)
+                    or received_geometry != expected_geometry
+                    or (
+                        expected_dates is not None
+                        and received_dates != expected_dates
+                    )
                 ):
                     continue
                 acknowledgements[sender_ip] = recipient_count
@@ -787,10 +953,12 @@ def send_fleet_regimes(
         readiness = "; ".join(
             f"{destination} expected {expected_screens_by_destination[destination]!r}, "
             f"saw {last_seen_screens.get(destination, [])!r}"
+            + f", expected geo={geometry_visible}, "
+            f"saw {last_seen_geometry.get(destination, {})!r}"
             + (
-                f", expected geo={geometry_visible}, "
-                f"saw {last_seen_geometry.get(destination, {})!r}"
-                if geometry_visible is not None
+                f", expected date={expected_model_date!r}, "
+                f"saw {last_seen_dates.get(destination, {})!r}"
+                if expected_model_date is not None
                 else ""
             )
             for destination in sorted(pending)
@@ -811,123 +979,6 @@ def format_regime_send(results: list[tuple[str, int, int]]) -> str:
         f"{destination}:{FLOW_CONTROL_PORT} ({sent} bytes, {recipient_count} stage(s))"
         for destination, sent, recipient_count in results
     )
-
-
-def _read_controller_state_text() -> Optional[str]:
-    authority = COMPUTERS["11"]
-    if authority["local"]:
-        if not os.path.isfile(REGIME_STATE_PATH):
-            return None
-        with open(REGIME_STATE_PATH, "r", encoding="utf-8") as state_file:
-            return state_file.read()
-    command = (
-        f"if test -f {shlex.quote(REGIME_STATE_PATH)}; then "
-        f"cat {shlex.quote(REGIME_STATE_PATH)}; else exit 3; fi"
-    )
-    result = ssh(authority, command)
-    if result.returncode == 3:
-        return None
-    if result.returncode != 0:
-        raise OSError(f"could not read authoritative state on {authority['ip']}: {error_message(result)}")
-    return result.stdout
-
-
-def _state_document(
-    regime_ids: list[str],
-    geometry_visible: Optional[bool],
-) -> dict:
-    regime_ids = enforce_watershed_exclusivity(regime_ids)
-    regime_indices(regime_ids)
-    requested_ids = set(regime_ids)
-    ordered_ids = [
-        regime_id
-        for regime_id, _display_name in REGIMES
-        if regime_id in requested_ids
-    ]
-    document = {"active_regime_ids": ordered_ids}
-    if geometry_visible is not None:
-        document["debug_geometry_visible"] = geometry_visible
-    return document
-
-
-def load_controller_state(
-    require_exists: bool = False,
-) -> tuple[set[str], Optional[bool]]:
-    try:
-        raw_document = _read_controller_state_text()
-        if raw_document is None:
-            if require_exists:
-                raise ValueError(
-                    "authoritative controller state does not exist on 196.168.50.11"
-                )
-            return set(), None
-        document = json.loads(raw_document)
-        if not isinstance(document, dict):
-            raise ValueError("controller state must be a JSON object")
-        regime_ids = document.get("active_regime_ids", [])
-        if not isinstance(regime_ids, list) or not all(
-            isinstance(regime_id, str) for regime_id in regime_ids
-        ):
-            raise ValueError("active_regime_ids must be a string list")
-        regime_indices(regime_ids)
-        geometry_visible = document.get("debug_geometry_visible")
-        if geometry_visible is not None and not isinstance(geometry_visible, bool):
-            raise ValueError("debug_geometry_visible must be true or false")
-        return set(enforce_watershed_exclusivity(regime_ids)), geometry_visible
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        raise ValueError(f"invalid controller state {REGIME_STATE_PATH}: {error}") from error
-
-
-def load_controller_regime_state() -> set[str]:
-    regime_ids, _geometry_visible = load_controller_state()
-    return regime_ids
-
-
-def save_controller_state(
-    regime_ids: list[str],
-    geometry_visible: Optional[bool],
-) -> None:
-    document = _state_document(regime_ids, geometry_visible)
-    encoded = json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
-    authority = COMPUTERS["11"]
-    if authority["local"]:
-        state_directory = os.path.dirname(REGIME_STATE_PATH) or "."
-        os.makedirs(state_directory, exist_ok=True)
-        file_descriptor, temporary_path = tempfile.mkstemp(
-            prefix=".water_council_regime_state.",
-            suffix=".tmp",
-            dir=state_directory,
-            text=True,
-        )
-        try:
-            with os.fdopen(file_descriptor, "w", encoding="utf-8") as state_file:
-                state_file.write(encoded)
-            os.replace(temporary_path, REGIME_STATE_PATH)
-        except BaseException:
-            try:
-                os.unlink(temporary_path)
-            except OSError:
-                pass
-            raise
-        return
-
-    temporary_path = f"{REGIME_STATE_PATH}.tmp.{uuid.uuid4().hex}"
-    command = (
-        "umask 077; "
-        f"_state_tmp={shlex.quote(temporary_path)}; "
-        "trap 'rm -f \"$_state_tmp\"' EXIT HUP INT TERM; "
-        f"printf '%s\\n' {shlex.quote(encoded.rstrip())} > \"$_state_tmp\" && "
-        f"mv \"$_state_tmp\" {shlex.quote(REGIME_STATE_PATH)}; "
-        "_state_status=$?; trap - EXIT HUP INT TERM; exit $_state_status"
-    )
-    result = ssh(authority, command)
-    if result.returncode != 0:
-        raise OSError(f"could not save authoritative state on {authority['ip']}: {error_message(result)}")
-
-
-def save_controller_regime_state(regime_ids: list[str]) -> None:
-    _active_ids, geometry_visible = load_controller_state()
-    save_controller_state(regime_ids, geometry_visible)
 
 
 def print_regime_catalog() -> None:
@@ -977,11 +1028,6 @@ def chair_regime_ids(chairs) -> list[str]:
     return enforce_watershed_exclusivity(active) if active else ["kinship"]
 
 
-def default_geometry_visibility(regime_ids) -> bool:
-    """Show active extractive-regime geometry; Kinship keeps a clear basin."""
-    return any(regime_id != "kinship" for regime_id in regime_ids)
-
-
 def run_chair_control() -> None:
     """Continuously apply the Governator's raw chair telemetry to Godot."""
     if current_operator()["name"] != "governator":
@@ -1023,18 +1069,14 @@ def run_chair_control() -> None:
                 continue
 
             regime_ids = chair_regime_ids(chair_state)
-            released = regime_ids == ["kinship"] and not any(chair_state)
             try:
-                # A complete release is a hard baseline reset: Kinship plus no
-                # geometry. Any occupied chair explicitly restores the active
-                # regimes' geometry instead of inheriting that cleared state.
-                geometry_visible = not released
+                # A complete release is a hard regime reset to Kinship. Geometry
+                # visibility is invariant: active geometries are always drawn.
+                geometry_visible = True
                 sends = send_fleet_regimes(
                     regime_ids,
                     "chairs",
-                    geometry_visible=geometry_visible,
                 )
-                save_controller_state(regime_ids, geometry_visible)
             except (OSError, ValueError) as error:
                 print(
                     f"ERROR chair state not applied: {error}",
@@ -1064,7 +1106,8 @@ def run_regime_console() -> None:
     import termios
     import tty
 
-    active_ids, geometry_visible = load_controller_state(require_exists=True)
+    active_ids = {"kinship"}
+    geometry_visible = True
     file_descriptor = sys.stdin.fileno()
     original_terminal = termios.tcgetattr(file_descriptor)
     print("Regime console: 1-7 toggle, c clears, q or Esc quits.")
@@ -1073,7 +1116,6 @@ def run_regime_console() -> None:
     sends = send_fleet_regimes(
         ordered_start,
         "regime-console-sync",
-        geometry_visible=geometry_visible,
     )
     initial_state = ", ".join(ordered_start) if ordered_start else "none"
     print(f"APPLIED to {format_regime_send(sends)}: active={initial_state}")
@@ -1089,11 +1131,10 @@ def run_regime_console() -> None:
                 return
             if character in {"c", "C"}:
                 active_ids.clear()
-                geometry_visible = False
+                geometry_visible = True
                 sends = send_fleet_regimes(
                     [],
                     "regime-clear",
-                    geometry_visible=geometry_visible,
                 )
             elif character in "1234567":
                 regime_id = REGIMES[int(character) - 1][0]
@@ -1107,16 +1148,14 @@ def run_regime_console() -> None:
                     active_ids.remove(regime_id)
                 else:
                     active_ids.add(regime_id)
-                geometry_visible = default_geometry_visibility(active_ids)
+                geometry_visible = True
                 sends = send_fleet_regimes(
                     list(active_ids),
                     "regime-console",
-                    geometry_visible=geometry_visible,
                 )
             else:
                 continue
             ordered = [regime_id for regime_id, _name in REGIMES if regime_id in active_ids]
-            save_controller_state(ordered, geometry_visible)
             state = ", ".join(ordered) if ordered else "none"
             print(f"\rAPPLIED to {format_regime_send(sends)}: active={state}          ")
     finally:
@@ -1497,12 +1536,12 @@ def deploy_targets(
             for target in dict.fromkeys(targets)
             if target in COMPUTERS
         ]
-    if current_operator()["name"] != "studio":
+    if current_operator()["name"] not in {"studio", "governator"}:
         return [
             (
                 COMPUTERS[target]["ip"],
                 False,
-                "deploy is permitted only from the studio controller at 196.168.50.51",
+                "deploy requires the studio or Governator controller",
             )
             for target in targets
         ]
@@ -1517,7 +1556,10 @@ def deploy_targets(
         )
         return [(COMPUTERS[target]["ip"], False, message) for target in targets]
     if any(COMPUTERS[target]["local"] for target in targets):
-        message = "studio deployment requires every selected fleet computer to be remote"
+        message = (
+            "deployment requires every selected target to be remote; "
+            "install target 11 locally, then deploy targets 21 31 41"
+        )
         return [(COMPUTERS[target]["ip"], False, message) for target in targets]
 
     if dry_run:
@@ -1673,13 +1715,6 @@ def main() -> None:
         help="regime ID for set; repeat to activate several regimes",
     )
     parser.add_argument(
-        "--geo",
-        type=cli_boolean,
-        default=None,
-        metavar="TRUE/FALSE",
-        help="absolute obstacle/debug geometry visibility for set",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="show exact deploy differences without writing or stopping Godot",
@@ -1705,16 +1740,12 @@ def main() -> None:
         if args.action == "list":
             if args.regime:
                 parser.error("list does not accept --regime")
-            if args.geo is not None:
-                parser.error("list does not accept --geo")
             print_regime_catalog()
             return
-        if args.action == "set" and not args.regime and args.geo is None:
-            parser.error("set requires at least one --regime or --geo TRUE/FALSE")
+        if args.action == "set" and not args.regime:
+            parser.error("set requires at least one --regime")
         if args.action != "set" and args.regime:
             parser.error(f"{args.action} does not accept --regime")
-        if args.action != "set" and args.geo is not None:
-            parser.error(f"{args.action} does not accept --geo")
         try:
             if args.action == "regime-console":
                 run_regime_console()
@@ -1722,54 +1753,25 @@ def main() -> None:
             if args.action == "chairs":
                 run_chair_control()
                 return
-            require_saved_state = args.action == "set" and not args.regime
-            saved_regime_ids, saved_geometry_visible = load_controller_state(
-                require_exists=require_saved_state,
-            )
             if args.action == "set":
-                regime_ids = (
-                    args.regime
-                    if args.regime
-                    else [
-                        regime_id
-                        for regime_id, _name in REGIMES
-                        if regime_id in saved_regime_ids
-                    ]
-                )
-                geometry_visible = (
-                    args.geo
-                    if args.geo is not None
-                    else (
-                        default_geometry_visibility(regime_ids)
-                        if args.regime
-                        else saved_geometry_visible
-                    )
-                )
+                regime_ids = args.regime
+                geometry_visible = True
                 command = "set"
             else:
                 regime_ids = []
-                geometry_visible = saved_geometry_visible
+                geometry_visible = True
                 command = "regime-clear"
             regime_ids = enforce_watershed_exclusivity(regime_ids)
-            activate_watershed_ai = is_exclusive_watershed_activation(
-                saved_regime_ids,
-                regime_ids,
-            )
+            activate_watershed_ai = regime_ids == ["watershed"]
             if activate_watershed_ai:
                 # Fail before changing the fleet when the studio runtime is absent.
                 validate_watershed_ai_runtime()
             sends = send_fleet_regimes(
                 regime_ids,
                 command,
-                geometry_visible=geometry_visible,
             )
-            save_controller_state(regime_ids, geometry_visible)
             active = ", ".join(regime_ids) if regime_ids else "none"
-            geometry_state = (
-                str(geometry_visible).lower()
-                if geometry_visible is not None
-                else "unchanged"
-            )
+            geometry_state = str(geometry_visible).lower()
             print(
                 f"APPLIED  {format_regime_send(sends)}; "
                 f"active={active}; geo={geometry_state}"
@@ -1779,7 +1781,7 @@ def main() -> None:
                     ai_result = run_watershed_ai_once()
                 except (OSError, ValueError) as error:
                     print(
-                        "ERROR Watershed is active and saved, but its one-shot "
+                        "ERROR Watershed is active, but its one-shot "
                         f"AI setting failed: {error}",
                         file=sys.stderr,
                     )
@@ -1792,8 +1794,6 @@ def main() -> None:
 
     if args.regime:
         parser.error(f"{args.action} does not accept --regime")
-    if args.geo is not None:
-        parser.error(f"{args.action} does not accept --geo")
 
     selected_targets = args.targets or list(COMPUTERS)
     invalid_targets = [name for name in selected_targets if name not in COMPUTERS]
@@ -1814,15 +1814,14 @@ def main() -> None:
             failed = failed or not ok
         raise SystemExit(1 if failed else 0)
 
-    startup_state = None
-    if args.action in {"start", "restart"}:
-        try:
-            startup_state = load_controller_state(require_exists=True)
-        except (OSError, ValueError) as error:
-            parser.error(
-                "could not load the authoritative regime state before launch; "
-                f"left running processes untouched: {error}"
-            )
+    # Every process launch is a hard installation baseline. Controller state is
+    # deliberately stateless between invocations, so startup always establishes
+    # Kinship explicitly instead of attempting to reconstruct an earlier state.
+    startup_state = (
+        ({"kinship"}, True)
+        if args.action in {"start", "restart"}
+        else None
+    )
 
     effective_action = "start" if args.action == "restart" else args.action
     with ThreadPoolExecutor(max_workers=len(targets)) as pool:
@@ -1832,6 +1831,15 @@ def main() -> None:
     for ip_address, ok, message in results:
         print(f"{'OK' if ok else 'ERROR':5} {ip_address}: {message}")
         failed = failed or not ok
+    if args.action == "stop":
+        successful_ips = {ip_address for ip_address, ok, _message in results if ok}
+        if COMPUTERS["11"]["ip"] in successful_ips and "11" in targets:
+            telemetry_ok, telemetry_message = stop_governator_telemetry()
+            print(
+                f"{'OK' if telemetry_ok else 'ERROR':5} "
+                f"{COMPUTERS['11']['ip']} telemetry: {telemetry_message}"
+            )
+            failed = failed or not telemetry_ok
     if args.action in {"start", "restart"}:
         successful_ips = {ip_address for ip_address, ok, _message in results if ok}
         successful_targets = [
@@ -1839,6 +1847,7 @@ def main() -> None:
             for target in targets
             if COMPUTERS[target]["ip"] in successful_ips
         ]
+        startup_sync_succeeded = False
         if successful_targets:
             try:
                 active_ids, geometry_visible = startup_state
@@ -1847,34 +1856,44 @@ def main() -> None:
                     for regime_id, _name in REGIMES
                     if regime_id in active_ids
                 ]
+                date_sends = send_fleet_regimes(
+                    ordered_active,
+                    "startup-date-sync",
+                    successful_targets,
+                    model_date=STARTUP_MODEL_DATE,
+                    expected_model_date=STARTUP_MODEL_DATE,
+                )
+                print(
+                    f"SYNCHRONIZED  {format_regime_send(date_sends)}; "
+                    f"date={STARTUP_MODEL_DATE}; held=true"
+                )
                 sends = send_fleet_regimes(
                     ordered_active,
                     "startup-sync",
                     successful_targets,
-                    geometry_visible=geometry_visible,
+                    model_calendar_auto_advance=True,
                 )
                 active = ", ".join(ordered_active) if ordered_active else "none"
-                geometry_state = (
-                    str(geometry_visible).lower()
-                    if geometry_visible is not None
-                    else "unchanged"
-                )
+                geometry_state = str(geometry_visible).lower()
                 print(
                     f"APPLIED  {format_regime_send(sends)}; "
-                    f"startup active={active}; geo={geometry_state}"
+                    f"startup active={active}; geo={geometry_state}; "
+                    "calendar_auto_advance=true"
                 )
-                if ordered_active == ["watershed"]:
-                    replay_result = run_watershed_ai_once(
-                        WATERSHED_AI_LATEST_DECISION
-                    )
-                    if replay_result:
-                        print("RESTORED " + replay_result)
+                startup_sync_succeeded = True
             except (OSError, ValueError) as error:
                 print(
-                    "ERROR startup regime/Watershed replay verification: "
+                    "ERROR startup Kinship baseline verification: "
                     f"{error}"
                 )
                 failed = True
+        if "11" in successful_targets and startup_sync_succeeded:
+            telemetry_ok, telemetry_message = restart_governator_telemetry()
+            print(
+                f"{'OK' if telemetry_ok else 'ERROR':5} "
+                f"{COMPUTERS['11']['ip']} telemetry: {telemetry_message}"
+            )
+            failed = failed or not telemetry_ok
     raise SystemExit(1 if failed else 0)
 
 

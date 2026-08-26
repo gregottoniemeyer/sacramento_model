@@ -935,10 +935,10 @@ func _ready() -> void:
 		errors.append("closed gate does not produce release probability 0.0")
 	if not bool(summary.get("paused", false)):
 		errors.append("runtime pause did not change")
-	if bool(summary.get("debug_visible", true)):
-		errors.append("debug overlay did not hide")
-	if bool(summary.get("debug_overlay_visible", true)):
-		errors.append("V/debug state did not hide polygon and reservoir outlines")
+	if not bool(summary.get("debug_visible", false)):
+		errors.append("geometry visibility accepted a hidden state")
+	if not bool(summary.get("debug_overlay_visible", false)):
+		errors.append("polygon and reservoir geometry did not remain visible")
 	for speed_scale: Variant in Array(summary.get("head_layer_speed_scales", [])):
 		if not is_zero_approx(float(speed_scale)):
 			errors.append("pause did not stop every head palette layer")
@@ -1513,6 +1513,15 @@ func _check_watershed_ai_control(
 		errors.append("Watershed AI packet was accepted while Watershed was inactive")
 
 	regimes.call(&"set_active_names", ["Watershed"])
+	await get_tree().process_frame
+	var budget_overlay := stage.get_node_or_null(
+		"BasinBudgetCanvas/BasinBudgetOverlay"
+	)
+	if (
+		budget_overlay == null
+		or String(budget_overlay.call(&"_formatted_extraction_percentage")) != "—"
+	):
+		errors.append("pending Watershed AI state misleadingly reports 0% extraction")
 	var unloaded_target_packet: Dictionary = packet.duplicate(true)
 	unloaded_target_packet["target"] = "feather_river"
 	if bool(bus.call(
@@ -1591,9 +1600,23 @@ func _check_watershed_ai_control(
 		and applied_state == state
 		and not bool(applied.get("watershed_data_drives_flow_rate", true))
 		and is_equal_approx(float(applied.get("flow_rate", -1.0)), 0.42)
+		and is_equal_approx(
+			float(applied.get("total_extraction_fraction", -1.0)),
+			0.40,
+		)
+		and is_equal_approx(
+			float(applied.get("basin_remaining_rate", -1.0)),
+			0.42,
+		)
 		and bool(applied.get("gate_open", false))
 	):
 		errors.append("valid Watershed AI state did not apply atomically")
+	if (
+		budget_overlay == null
+		or String(budget_overlay.call(&"_formatted_extraction_percentage"))
+		!= "40.0%"
+	):
+		errors.append("applied Watershed AI extraction is absent from the Delta budget")
 	var applied_budgets: Dictionary = applied.get(
 		"regime_applied_feature_budgets",
 		{},
@@ -1997,7 +2020,7 @@ func _check_regime_panel(
 	)) != Vector2(28.0, 1052.0):
 		errors.append("inactive shoreline unexpectedly narrowed the water inlet")
 	if not bool(summary.get("regime_state_shared", false)):
-		errors.append("stage is not bound to the persistent ModelRegimes autoload")
+		errors.append("stage is not bound to the in-memory ModelRegimes autoload")
 	if not (
 		bool(summary.get("regime_profiles_loaded", false))
 		and int(summary.get("regime_profile_count", 0)) == 7
@@ -2034,7 +2057,10 @@ func _check_regime_panel(
 		if label == null:
 			errors.append("active-regime label %d is missing" % (index + 1))
 			continue
-		if label.text != EXPECTED_REGIME_NAMES[index]:
+		var expected_label: String = (
+			"AI Watershed" if index == 6 else EXPECTED_REGIME_NAMES[index]
+		)
+		if label.text != expected_label:
 			errors.append("active-regime label order is incorrect")
 		if label.get_theme_font_size(&"font_size") != EXPECTED_TITLE_FONT_SIZE:
 			errors.append("regime name font does not match the title/date")
@@ -3519,8 +3545,8 @@ func _check_stage_title_runtime_independence(
 	v_key.keycode = KEY_V
 	stage.call(&"_unhandled_input", v_key)
 	var debug_toggled: Dictionary = stage.call(&"runtime_summary")
-	if bool(debug_toggled.get("debug_visible", true)):
-		errors.append("V key did not toggle debug geometry for title independence test")
+	if not bool(debug_toggled.get("debug_visible", false)):
+		errors.append("V key hid geometry despite the always-visible invariant")
 	if not title_label.visible or title_label.text != expected_base_title_text:
 		errors.append("V/debug toggle changed the stage title")
 	stage.call(&"_unhandled_input", v_key)

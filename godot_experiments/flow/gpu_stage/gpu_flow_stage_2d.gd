@@ -210,12 +210,12 @@ const MODEL_DATE_FONT_SIZE := 48
 const MODEL_DATE_OPENTYPE_FEATURE := "tnum"
 const MODEL_DATE_POSITION := Vector2(1860.0, 540.0)
 const WATER_TEMPERATURE_EXPECTED_ROW_COUNT := 720
-const DELTA_TIDE_EXPECTED_ROW_COUNT := 720
+const DELTA_TIDE_EXPECTED_ROW_COUNT := 8760
 const FLOW_DENSITY_LOW_RATE := 0.01
 const FLOW_DENSITY_LOW_LINE_COUNT := 20
 const FLOW_DENSITY_FULL_LINE_COUNT := 1000
 const DELTA_TIDE_DATA_PATH := (
-	"res://flow/data/tide/sf_bay_9414290_tide_720.txt"
+	"res://flow/data/tide/sf_bay_9414290_tide_hourly_2025_2026.txt"
 )
 const WATER_TEMPERATURE_INTERPOLATION_MODE := (
 	"HALF_OPEN_ANNUAL_LINEAR_WRAP"
@@ -229,6 +229,7 @@ const REGIME_NAME_START_Y := 60.0
 const REGIME_NAME_ROW_HEIGHT := 72.0
 const REGIME_ACTIVE_ALPHA := 1.0
 const REGIME_INACTIVE_ALPHA := 0.25
+const DELTA_WATERSHED_DISPLAY_NAME := "AI Watershed"
 const MODEL_CALENDAR_DAY_COUNT := 365
 const MODEL_MINUTES_PER_DAY := 1440
 const MODEL_YEAR_MINUTE_COUNT := MODEL_CALENDAR_DAY_COUNT * MODEL_MINUTES_PER_DAY
@@ -338,8 +339,8 @@ const DEFAULT_GRID_COLOR := Color(
 @export var auto_start: bool = true
 @export var accept_keyboard_input: bool = true
 @export var debug_visible: bool = true:
-	set(value):
-		debug_visible = value
+	set(_value):
+		debug_visible = true
 		_apply_debug_visibility()
 
 @export_group("Particles")
@@ -703,6 +704,13 @@ func get_screen_id() -> StringName:
 	return screen_id
 
 
+func get_model_date_time() -> String:
+	return _format_model_date_time(
+		_model_day_index,
+		_model_minute_of_day,
+	)
+
+
 func get_native_size() -> Vector2:
 	return STAGE_SIZE
 
@@ -905,11 +913,7 @@ func _validated_watershed_ai_state(state_variant: Variant) -> Dictionary:
 			"ok": false,
 			"error": "Watershed AI allocation fractions must sum to one.",
 		}
-	var extraction_sum := (
-		float(canonical_state["agriculture_fraction"])
-		+ float(canonical_state["data_center_fraction"])
-		+ float(canonical_state["city_fraction"])
-	)
+	var extraction_sum := _watershed_ai_consumptive_fraction(canonical_state)
 	if absf(
 		float(canonical_state["extraction_fraction"]) - extraction_sum
 	) > 0.000001:
@@ -980,6 +984,16 @@ func _watershed_ai_state_hash(state: Dictionary) -> String:
 	return "\n".join(parts).sha256_text()
 
 
+func _watershed_ai_consumptive_fraction(state: Dictionary) -> float:
+	return clampf(
+		float(state.get("agriculture_fraction", 0.0))
+		+ float(state.get("data_center_fraction", 0.0))
+		+ float(state.get("city_fraction", 0.0)),
+		0.0,
+		1.0,
+	)
+
+
 func _watershed_ai_current_observation() -> Dictionary:
 	var temperature_value: Variant = (
 		_temperature_current_value_c if _temperature_value_valid else null
@@ -1046,11 +1060,17 @@ func _recalculate_basin_budget(apply_water_parameters: bool = true) -> void:
 		_basin_input_rate = float(
 			_watershed_ai_applied_state["atmospheric_input_rate"]
 		)
-		_basin_extraction_fraction = float(
-			_watershed_ai_applied_state["extraction_fraction"]
+		# Derive the displayed budget from the same three allocations that
+		# activate the field, data-center, and city systems. The aggregate on
+		# the wire remains an audited invariant, not a second source of truth.
+		_basin_extraction_fraction = _watershed_ai_consumptive_fraction(
+			_watershed_ai_applied_state
 		)
-		_basin_remaining_rate = float(
-			_watershed_ai_applied_state["remaining_rate"]
+		_basin_remaining_rate = clampf(
+			float(_watershed_ai_applied_state["available_supply_rate"])
+			* (1.0 - _basin_extraction_fraction),
+			0.0,
+			1.0,
 		)
 	else:
 		var active_states := Array(_regime_snapshot.get("active_states", []))
@@ -1192,23 +1212,22 @@ func is_paused() -> bool:
 	return _paused
 
 
-func set_debug_visible(value: bool) -> void:
-	debug_visible = value
+func set_debug_visible(_value: bool) -> void:
+	debug_visible = true
 
 
 func toggle_debug_visibility() -> void:
-	debug_visible = not debug_visible
+	debug_visible = true
 
 
 func _toggle_debug_visibility_for_all_stages() -> void:
-	var next_visibility := not debug_visible
 	for model: Node in get_tree().get_nodes_in_group(&"flow_models"):
 		if (
 			is_instance_valid(model)
 			and not model.is_queued_for_deletion()
 			and model.has_method(&"set_debug_visible")
 		):
-			model.call(&"set_debug_visible", next_visibility)
+			model.call(&"set_debug_visible", true)
 
 
 func apply_runtime_parameters() -> void:
@@ -3537,37 +3556,44 @@ func runtime_summary() -> Dictionary:
 		),
 		"delta_tide_animation_direction": "BOTTOM_TO_TOP",
 		"delta_tide_origin_side": "RIGHT",
-		"delta_tide_render_style": "BOTTOM_TO_TOP_FIFO_TIMESERIES_BARS",
-		"delta_tide_area_shape": "RIGHT_ANCHORED_LENGTH_PROFILE",
+		"delta_tide_render_style": "RIGHT_ANCHORED_CENTERED_96H_FIFO_HATCHED_AREA",
+		"delta_tide_area_shape": "RIGHT_ANCHORED_HOURLY_TIDE_POLYGON",
 		"delta_tide_series_sample_count": _delta_tide_normalized_heights.size(),
 		"delta_tide_series_sample_position": (
 			float(_delta_tide_row_index) + _delta_tide_row_fraction
 		),
-		"delta_tide_visible_line_count": 35,
-		"delta_tide_first_line_y": 30.0,
-		"delta_tide_last_line_y": 1050.0,
-		"delta_tide_current_sample_screen_y": (
-			1050.0 - _delta_tide_row_fraction * 30.0
-		),
-		"delta_tide_current_sample_centered": false,
-		"delta_tide_history_capacity": 35,
-		"delta_tide_history_update_mode": "ARRAY_POP_FRONT_PUSH_BACK",
+		"delta_tide_visible_line_count": 120,
+		"delta_tide_first_line_y": 4.5,
+		"delta_tide_last_line_y": 1075.5,
+		"delta_tide_current_sample_screen_y": 540.0,
+		"delta_tide_current_sample_centered": true,
+		"delta_tide_history_capacity": 97,
+		"delta_tide_history_update_mode": "WRAPPED_LINEAR_HOURLY_FIFO_WINDOW",
 		"delta_tide_history_order": "OLDEST_TOP_NEWEST_BOTTOM",
-		"delta_tide_migration_pixels_per_sample": 30.0,
-		"delta_tide_bar_value_dimension": "HORIZONTAL_LENGTH_FROM_TIDE_HEIGHT",
+		"delta_tide_migration_pixels_per_sample": 11.25,
+		"delta_tide_bar_value_dimension": "POLYGON_LEFT_BOUNDARY_X_FROM_TIDE_HEIGHT",
 		"delta_tide_line_length_range_pixels": Vector2(40.8, 306.0),
 		"delta_tide_line_length_scale": 0.34,
 		"delta_tide_line_length_reduction_percent": 66.0,
 		"delta_tide_length_source": "NORMALIZED_TIDE_HEIGHT",
-		"delta_tide_line_color": Color("1e90ff"),
-		"delta_tide_line_color_name": "DODGER_BLUE",
+		"delta_tide_line_color": Color.WHITE,
+		"delta_tide_line_color_name": "WHITE",
+		"delta_tide_line_alpha": 0.20,
+		"delta_budget_percentage_font_resource": STAGE_TITLE_FONT.resource_path,
+		"delta_budget_percentage_tabular_numerals": true,
 		"delta_tide_fill_line_orientation": "HORIZONTAL",
 		"delta_tide_fill_line_width_pixels": 3.0,
-		"delta_tide_fill_line_gap_pixels": 27.0,
-		"delta_tide_fill_line_period_pixels": 30.0,
+		"delta_tide_fill_line_gap_pixels": 6.0,
+		"delta_tide_fill_line_period_pixels": 9.0,
 		"delta_tide_skips_screen_boundary_gridlines": true,
 		"delta_tide_boundary_visible": false,
 		"delta_tide_label_visible": false,
+		"delta_tide_window_hours": 96.0,
+		"delta_tide_window_past_hours": 48.0,
+		"delta_tide_window_future_hours": 48.0,
+		"delta_tide_window_sample_count": 97,
+		"delta_tide_wrap_enabled": true,
+		"delta_tide_timeline_source": "SHARED_MODEL_YEAR_PROGRESS",
 		"delta_tide_antialiasing_profile": "PIXEL_ALIGNED_HORIZONTAL_STRIPES",
 		"delta_tide_z_index": TIDE_OVERLAY_Z_INDEX,
 		"delta_tide_below_text": TIDE_OVERLAY_Z_INDEX < STAGE_TITLE_Z_INDEX,
@@ -5578,9 +5604,9 @@ func _stable_interaction_seed(element_id: StringName) -> float:
 
 func _apply_debug_visibility() -> void:
 	if _overlay != null:
-		_overlay.visible = debug_visible
+		_overlay.visible = true
 	if is_node_ready():
-		debug_visibility_changed.emit(screen_id, debug_visible)
+		debug_visibility_changed.emit(screen_id, true)
 
 
 func _defer_trail_recording_until_after_preprocess() -> void:
@@ -6093,13 +6119,19 @@ func _apply_regime_panel() -> void:
 	var active_states := Array(_regime_snapshot.get("active_states", []))
 	for index in range(_regime_name_labels.size()):
 		var label := _regime_name_labels[index]
-		label.text = String(names[index]) if index < names.size() else ""
+		label.text = _regime_display_name(names, index)
 		var active := index < active_states.size() and bool(active_states[index])
 		var label_color := STAGE_TITLE_COLOR
 		label_color.a = (
 			REGIME_ACTIVE_ALPHA if active else REGIME_INACTIVE_ALPHA
 		)
 		label.add_theme_color_override(&"font_color", label_color)
+
+
+func _regime_display_name(names: Array, index: int) -> String:
+	if screen_id == &"delta" and index == WATERSHED_REGIME_INDEX:
+		return DELTA_WATERSHED_DISPLAY_NAME
+	return String(names[index]) if index < names.size() else ""
 
 
 func _apply_stage_title(emit_title_signal: bool = true) -> void:

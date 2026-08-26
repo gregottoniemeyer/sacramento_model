@@ -691,6 +691,9 @@ func _protocol_acknowledgement(
 		"recipient_debug_geometry_visible": _recipient_debug_geometry_visibility(
 			message.get("target", "*")
 		),
+		"recipient_model_date_times": _recipient_model_date_times(
+			message.get("target", "*")
+		),
 		"recipient_watershed_ai_state": _recipient_watershed_ai_state(
 			message.get("target", "*")
 		),
@@ -746,6 +749,34 @@ func _recipient_debug_geometry_visibility(target: Variant) -> Dictionary:
 		if not screen_id.is_empty() and visibility_variant != null:
 			visibility_by_screen[screen_id] = bool(visibility_variant)
 	return visibility_by_screen
+
+
+func _recipient_model_date_times(target: Variant) -> Dictionary:
+	## Report the applied process-global calendar state for every addressed stage.
+	## Date changes are queued to stage frame boundaries, so controller retries
+	## converge only after every stage exposes the requested canonical value.
+	var date_time_by_screen: Dictionary = {}
+	for candidate in get_tree().get_nodes_in_group(FLOW_MODELS_GROUP):
+		var model := candidate as Node
+		if (
+			model == null
+			or not is_instance_valid(model)
+			or not _target_matches_model(target, model)
+			or not model.has_method(&"get_model_date_time")
+		):
+			continue
+		var screen_id := ""
+		if model.has_method(&"get_screen_id"):
+			screen_id = String(model.call(&"get_screen_id"))
+		else:
+			var screen_variant: Variant = _property_value(model, "screen_id")
+			if screen_variant != null:
+				screen_id = String(screen_variant)
+		if not screen_id.is_empty():
+			date_time_by_screen[screen_id] = String(
+				model.call(&"get_model_date_time")
+			)
+	return date_time_by_screen
 
 
 func _recipient_watershed_ai_state(target: Variant) -> Dictionary:

@@ -34,10 +34,20 @@ and whether its latest packet contains major motion.
 **Nothing needs starting first.** Occupancy is computed and published
 continuously, whether or not anything is watching. This just displays it.
 
-The diagnostic vote is `1` while a packet's rolling peak reports major motion
-and `0` otherwise. Major motion turns a chair on for 60 seconds. More major
-motion renews the complete 60-second interval; there is no separate attempt to
-classify a stand-up.
+The diagnostic vote is `1` while the sensor reports strong motion and `0`
+otherwise. Strong motion is either an impact peak at or above `1500`, or two
+consecutive rotation packets whose largest acceleration-axis standard deviation
+is at least `300`. Each chair is a separate binary signal. Strong motion turns
+only that chair on for 30 seconds, later strong packets from that same chair
+renew its own interval, and its timer turns off exactly when the interval
+expires.
+
+Watershed (chair 7) clears every other chair when strong motion activates it.
+A newer strong signal from chairs 1-6 immediately cancels Watershed and starts
+that chair's independent timer. If nothing supersedes Watershed, its own timer
+expires after 30 seconds and all chairs are released. All of these transitions
+use the same strong-motion threshold of `1500`; there is no lower handoff
+threshold.
 
 Add `--plain` for a terminal version that needs no packages.
 
@@ -180,8 +190,10 @@ To read a board's MAC:
 tools/flash_chair.sh /dev/cu.YOUR_PORT
 ```
 
-**Slot 8 is not a chair.** It is the spare, for testing a sensor without
-unmounting an installed chair. The controller ignores it.
+**Slot 8 is currently the replacement sensor for chair 3.** The controller
+maps receiver slot 8 to logical chair 3 and ignores the retired slot 3. Update
+`SENSOR_TO_LOGICAL_CHAIR` in `controller.py` when the physical assignment
+changes again.
 
 ## Reflashing firmware
 
@@ -216,16 +228,23 @@ To run unattended, put `tools/pull_and_refresh.sh` on a timer. Step-by-step in
 
 ## The model
 
-Each chair reports a rolling one-second peak-motion value. A peak at or above
-`1500` is major motion: it turns occupancy on and sets a deadline 60 seconds in
-the future. Every later major-motion packet moves that deadline to 60 seconds
-from the new detection. The chair becomes free only when the deadline expires.
+Each chair reports its own rolling one-second peak-motion value and per-axis
+acceleration variation. A peak at or above `1500` recognizes a tap or impact.
+Two consecutive packets with maximum axis variation at or above `300` recognize
+steady rotation; the confirmation rejects an isolated noisy sample. Either
+signal turns that chair's binary state on and sets its deadline 30 seconds in
+the future. Every later strong packet from the same chair moves only that
+chair's deadline to 30 seconds from the new detection. The chair becomes free
+exactly when its deadline expires. Watershed clears the other chair timers when
+it activates, and a newer strong non-Watershed signal cancels it immediately.
 
 It lives in `controller.py`, in the constants block marked `occupancy model`.
 
 | Change | To |
 |---|---|
 | `PEAK_JUMP_RAW` | how much motion starts or renews occupancy |
+| `ROTATION_STD_RAW` | per-axis variation needed for a rotation candidate |
+| `ROTATION_CONFIRM_PACKETS` | consecutive rotation candidates required |
 | `OCCUPANCY_HOLD_S` | seconds occupancy remains after the latest major motion |
 | `STALE_S` | how long a silent chair waits before it reads offline |
 

@@ -16,7 +16,7 @@ The production GPU milestone includes immutable water trails, coherent noise,
 addressable absorb/repel polygons, reservoirs, live gates, GPU salmon, GPU
 leaves, a screen-fixed model grid and calendar, runtime
 geometry replacement, measured water temperature integrated into every stage
-title except Cottonwood Creek, a process-persistent historical-regime switcher,
+title except Cottonwood Creek, an in-memory historical-regime switcher,
 UDP control, and debug
 drawing. The GPU stage implements both `release_salmon` and `release_leaves`.
 
@@ -88,8 +88,8 @@ macOS Spaces behavior of native fullscreen while still covering each display.
 On a one-monitor machine, both selected stages remain independent but render
 into two 1920 x 1080 `SubViewport` instances shown side by side. Clicking a
 preview selects which stage receives local keyboard controls. Keyboard `V` is
-the exception: from the selected preview it applies one synchronized absolute
-debug-visibility state to every active stage. Running previews do not consume
+retained for compatibility, but geometry remains visible on every active stage.
+Running previews do not consume
 `1`–`7`; the Governator controller owns regime test input. The timeline and
 controller remain common. Escape or either native close request returns the
 whole host to the selector. The selector also retains a Display-A-only button
@@ -174,7 +174,7 @@ defined contributor, an opted-in GPU stage preserves its authored baseline
 instead of applying a zero override. All seven production scene wrappers now
 opt in; the active-regime panel remains Delta-only presentation.
 
-Screen abbreviations below are S = Mount Shasta, Mc = McCloud/Pit, C =
+Screen abbreviations below are S = Lake Shasta, Mc = McCloud/Pit, C =
 Cottonwood Creek, Mi = Mill Creek, F = Feather River, A = American River, and
 D = Delta. `R`, `Dr`, `Ob`, and `Sh` mean reservoir area, drain area, obstacle
 area, and shoreline randomness; `c` is desired reservoir count and `p` is
@@ -333,7 +333,7 @@ and should remain stable even if scene files or display labels are renamed.
 
 | Scene | Stage title | `screen_id` |
 |---|---|---|
-| `scene_1.tscn` | Mount Shasta | `mount_shasta` |
+| `scene_1.tscn` | Lake Shasta | `mount_shasta` |
 | `scene_2.tscn` | McCloud-Pit Rivers | `mccloud_pit` |
 | `scene_3.tscn` | Cottonwood Creek | `cottonwood_creek` |
 | `scene_4.tscn` | Mill Creek | `mill_creek` |
@@ -366,9 +366,11 @@ degrees, and uses the same Barlow Condensed Medium font and `#4AB0E1` color.
 The Delta wrapper hides the optional `Regime` heading, leaving only the seven
 60-pixel names at their existing positions beginning on X `1420` with 72-pixel
 centerline spacing. They follow the historical order—Kinship,
-Agriculture, Gold Rush, Water Projects, Hydropower, Tech, Watershed—with a
+Agriculture, Gold Rush, Water Projects, Hydropower, Tech, AI Watershed—with a
 72-pixel column interval. Active names are opaque; inactive names remain
 visible at `0.25` alpha.
+`AI Watershed` is a Delta-only presentation label; the stable internal regime
+name and ID remain `Watershed` and `watershed`.
 The panel listens to the shared `ModelRegimes` authority, so a received
 absolute-state packet immediately highlights Kinship or any other active name,
 including state received before the Delta stage was loaded.
@@ -429,24 +431,28 @@ remainder. The raw and scaled columns never multiply the normalized input.
 
 On the Delta, Kinship floods the central floodplain using borderless 45-degree
 blue hatching with 3-pixel round-capped lines, 6-pixel gaps, fixed 33% alpha,
-and a 6-pixel label knockout. Every regime shows incoming
-Bay tide water from screen-right. Tide height and velocity
-come from `res://flow/data/tide/sf_bay_9414290_tide_720.txt`: 720 resampled NOAA
+and a 6-pixel label knockout. Every regime shows incoming Bay tide water as a
+right-anchored area. Tide height and velocity come from
+`res://flow/data/tide/sf_bay_9414290_tide_hourly_2025_2026.txt`: all 8,760 NOAA
 CO-OPS hourly predictions for San Francisco station `9414290`, covering the
-same half-open July 1, 2025–June 30, 2026 annual window. The tide is a
-right-anchored FIFO time-series history of 35 pixel-aligned horizontal bars.
-The current value enters at the bottom and every stored value migrates upward
-by 30 pixels over one sample interval. At the interval boundary, the oldest top
-value is popped and the next value is pushed onto the bottom. Normalized tide
-height controls each bar's 41–306 pixel horizontal length, a 66% reach
-reduction. Every bar is solid Dodger Blue and 3 pixels wide, with no boundary,
-label, or arrowhead. The tide renders at Z=-60 below all text. Active extractor and
+same half-open July 1, 2025–June 30, 2026 annual window. The wrapped FIFO window
+shows exactly 96 hours, with 48 past hours above the centered current time and
+48 future hours below it. Its polygon has a tide-shaped left boundary and a
+41–306 pixel reach. White horizontal hatches fill the area at fixed 20% alpha;
+they are 3 pixels wide with 6-pixel gaps. No solid fill, outline, label, or
+arrowhead is drawn. The tide renders at Z=-60 below all text and advances with
+the shared model-year timeline. Delta budget percentages use the Barlow
+Condensed font's tabular-numeral OpenType feature. Active extractor and
 city geometry is borderless 45-degree hatching with 3-pixel round-capped lines,
 6-pixel gaps, and fixed 33% alpha, rendered below the water; every overlay
 label is rotated -90 degrees. The internal physics name remains `obstacle` for
 protocol compatibility, but the visible term is City. The Delta budget legend
 has no background fill. Geometry labels use transparent hatch knockouts, with
 every hatch segment stopping six pixels before the measured text bounds.
+During exclusive Watershed, the extraction percentage is derived directly
+from the applied agriculture, data-center, and city allocation fractions. If
+no AI allocation has been applied, the panel displays an em dash instead of
+the misleading authored-fallback value `0%`.
 
 The seven water-color head emitters keep native `amount_ratio = 1`, zero timing
 randomness, and zero explosiveness. An exact global-slot selector distributes
@@ -491,7 +497,7 @@ The production scene-to-data assignments are:
 
 | Scene | Display | Watershed data | Temperature series |
 |---|---|---|---|
-| `scene_1.tscn` | Mount Shasta | `shasta_720.txt` | `shasta_keswick_release_temp_c` |
+| `scene_1.tscn` | Lake Shasta | `shasta_720.txt` | `shasta_keswick_release_temp_c` |
 | `scene_2.tscn` | McCloud-Pit Rivers | `mccloud_720.txt` | `mccloud_above_shasta_lake_temp_c` |
 | `scene_3.tscn` | Cottonwood Creek | `cottonwood_720.txt` | none |
 | `scene_4.tscn` | Mill Creek | `mill_creek_720.txt` | `mill_creek_temp_c` |
@@ -946,7 +952,7 @@ paths are:
 
 | Runtime path | Compatibility alias | Value/effect |
 |---|---|---|
-| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir and drain/obstacle debug geometry without changing physics |
+| `debug.geometry_visible` | `debug_visible` | Compatibility path; production geometry remains visible |
 | `stage.title` | `stage_title` | River display text |
 | `stage.title_visible` | `stage_title_visible` | Title visibility |
 | `stage.regime_panel_visible` | `regime_panel_visible` | Active-regime panel visibility on this screen |
@@ -977,17 +983,9 @@ paths are:
 | `regimes.watershed` | none | Set Watershed active/inactive |
 | `shoreline.randomness` | `shoreline_randomness`, `shorelines.randomness` | Direct per-stage top/bottom edge-turbulence override `0…1`; a later regime change reapplies the normalized shared value |
 
-From the repository root, the fleet controller sends that visibility as an
-absolute state to every configured screen and persists it across fleet starts:
-
-```sh
-python3 fleet/godot_controller.py set --geo FALSE
-python3 fleet/godot_controller.py set --geo TRUE
-```
-
-`FALSE` hides guides/outlines only; reservoirs, drains, obstacles, and the
-non-geometric edge-turbulence field keep their current physics. `--geo` can
-be combined with one or more `--regime` arguments in the same `set` command.
+The fleet controller always sends visible geometry to every configured screen.
+It exposes no geometry-hiding option. No controller state is saved; `start` and
+`restart` restore Kinship with visible geometry.
 
 The public `set_model_date_time(model_date_time)` method provides the same
 validated external-time handoff as `calendar.date` and `stage.date`;
@@ -1661,7 +1659,7 @@ Or dictionaries with future-facing arguments:
 
 Common implemented action names are:
 
-- `toggle_debug_geometry`
+- `toggle_debug_geometry` (compatibility no-op; geometry remains visible)
 - `reset`
 - `pause`
 - `resume`
@@ -1728,7 +1726,7 @@ When `accept_keyboard_input` is enabled on a model:
 | Key | Runtime effect |
 |---|---|
 | `0`, `8`, `9` | Production GPU: set `flow_rate` to `0/9`, `8/9`, or `9/9` |
-| `V` | Apply one synchronized absolute drain/obstacle and reservoir debug-visibility state to every active stage in the process; edge turbulence has no geometry guide |
+| `V` | Compatibility key; drain/obstacle and reservoir geometry remains visible on every active stage |
 | `G` | Toggle the first reservoir's gate |
 | `[` | Narrow the first reservoir gate by `gate_width_step` |
 | `]` | Widen the first reservoir gate by `gate_width_step` |
@@ -1749,15 +1747,13 @@ resize their segment pools. `S` releases only salmon, and `L` releases only
 leaves. Every recognized stage key is marked handled so another scene node
 cannot process the same event a second time. Use absolute regime state, ecology
 runtime paths, and release actions when a controller changes those systems.
-Keyboard `V` is process-wide: pressing it from either focused native window or
-the selected one-monitor preview updates every active stage. Controller-targeted
-debug actions remain target-specific.
+Keyboard `V` and controller-targeted debug actions are compatibility no-ops;
+geometry remains visible on every active stage.
 
-In the production GPU host, `V` computes one absolute debug-visibility state and
-applies it to all active stages together: the reservoir guide is cyan,
-and absorb/repel polygons are gold. Disabled polygons use a faint version of
-that color so they can still be found while debugging. The background grid,
-stage title, and model date remain visible because they are not debug geometry.
+In the production GPU host, the reservoir guide remains cyan and absorb/repel
+polygons remain gold. Disabled polygons use a faint version of that color so
+they can still be found while debugging. The background grid, stage title, and
+model date remain visible because they are not debug geometry.
 
 ## Screenshots
 

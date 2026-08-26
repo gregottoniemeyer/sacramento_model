@@ -58,7 +58,7 @@ class StageStation:
 STATIONS = (
     StageStation(
         "shasta",
-        "Mount Shasta",
+        "Lake Shasta",
         "USC00045983",
         "MOUNT SHASTA, CA US",
         41.3217,

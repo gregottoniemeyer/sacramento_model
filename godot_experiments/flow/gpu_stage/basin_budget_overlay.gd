@@ -7,7 +7,6 @@ const STAGE_SIZE := Vector2(1920.0, 1080.0)
 const FONT := preload("res://flow/assets/fonts/BarlowCondensed-Medium.ttf")
 
 const BLUE := Color("4ab0e1")
-const DODGER_BLUE := Color("1e90ff")
 const WHITE := Color(1.0, 1.0, 1.0, 0.95)
 const TYPE_ROTATION_RADIANS := -PI * 0.5
 const HATCH_LINE_WIDTH_PIXELS := 3.0
@@ -16,15 +15,23 @@ const HATCH_ALPHA := 0.33
 const HATCH_PERIOD_PIXELS := HATCH_LINE_WIDTH_PIXELS + HATCH_GAP_PIXELS
 const HATCH_AXIS_SCALE := 1.4142135623730951
 const LABEL_HATCH_CLEARANCE_PIXELS := 6.0
-const TIDE_FILL_LINE_WIDTH_PIXELS := 3.0
-const TIDE_LINE_SPACING_PIXELS := 30.0
-const TIDE_FIRST_LINE_Y := 30.0
-const TIDE_VISIBLE_LINE_COUNT := 35
+const TIDE_HATCH_LINE_WIDTH_PIXELS := 3.0
+const TIDE_HATCH_GAP_PIXELS := 6.0
+const TIDE_HATCH_ALPHA := 0.20
+const TIDE_HATCH_PERIOD_PIXELS := (
+	TIDE_HATCH_LINE_WIDTH_PIXELS + TIDE_HATCH_GAP_PIXELS
+)
+const TIDE_FIRST_HATCH_Y := TIDE_HATCH_PERIOD_PIXELS * 0.5
+const TIDE_HATCH_LINE_COUNT := 120
+const TIDE_WINDOW_HOURS := 96.0
+const TIDE_WINDOW_HALF_HOURS := TIDE_WINDOW_HOURS * 0.5
+const TIDE_WINDOW_SAMPLE_COUNT := 97
 const TIDE_LINE_MIN_LENGTH_PIXELS := 40.8
 const TIDE_LINE_MAX_LENGTH_PIXELS := 306.0
 const KINSHIP_FLOOD_LABEL := "KINSHIP FLOODPLAIN"
 const KINSHIP_FLOOD_LABEL_ANCHOR := Vector2(690.0, 860.0)
 const KINSHIP_FLOOD_LABEL_FONT_SIZE := 34
+const WATERSHED_REGIME_INDEX := 6
 
 var screen_id: StringName = &"screen"
 var input_rate: float = 0.0
@@ -33,13 +40,20 @@ var remaining_rate: float = 0.0
 var active_states: Array = []
 var tide_series := PackedFloat32Array()
 var tide_sample_position: float = 0.0
-var tide_row_fraction: float = 0.0
-var tide_history: Array[float] = []
-var tide_history_row_index: int = -1
+var tide_fifo_values: Array[float] = []
 var render_tide: bool = true
 var render_floodplain: bool = true
 var render_budget: bool = true
 var watershed_allocation_state: Dictionary = {}
+var _tabular_font: FontVariation
+
+
+func _ready() -> void:
+	_tabular_font = FontVariation.new()
+	_tabular_font.base_font = FONT
+	_tabular_font.opentype_features = {
+		TextServerManager.get_primary_interface().name_to_tag("tnum"): 1,
+	}
 
 
 func set_render_roles(
@@ -70,7 +84,7 @@ func configure(
 	active_states = p_active_states.duplicate()
 	watershed_allocation_state = p_watershed_allocation_state.duplicate(true)
 	if render_tide:
-		_update_tide_history(p_tide_series, p_tide_sample_position)
+		_update_tide_fifo(p_tide_series, p_tide_sample_position)
 	queue_redraw()
 
 
@@ -245,102 +259,120 @@ func _draw_capped_line(
 
 
 func _draw_incoming_tide() -> void:
-	if tide_series.is_empty() or tide_history.is_empty():
+	if tide_series.is_empty() or tide_fifo_values.size() != TIDE_WINDOW_SAMPLE_COUNT:
 		return
-	var migration_offset := tide_row_fraction * TIDE_LINE_SPACING_PIXELS
-	for history_index in range(tide_history.size()):
-		var line_y := (
-			TIDE_FIRST_LINE_Y
-			+ float(history_index) * TIDE_LINE_SPACING_PIXELS
-			- migration_offset
+	_draw_horizontal_hatched_tide_polygon(_tide_area_polygon())
+
+
+func _tide_area_polygon() -> PackedVector2Array:
+	var polygon := PackedVector2Array([Vector2(STAGE_SIZE.x, 0.0)])
+	for sample_index in range(TIDE_WINDOW_SAMPLE_COUNT):
+		var sample_fraction := float(sample_index) / float(
+			TIDE_WINDOW_SAMPLE_COUNT - 1
 		)
-		_draw_tide_bar(float(tide_history[history_index]), line_y)
-	var next_row_index := (tide_history_row_index + 1) % tide_series.size()
-	_draw_tide_bar(
-		float(tide_series[next_row_index]),
-		STAGE_SIZE.y - migration_offset,
-	)
+		polygon.append(Vector2(
+			STAGE_SIZE.x - _tide_line_length(tide_fifo_values[sample_index]),
+			sample_fraction * STAGE_SIZE.y,
+		))
+	polygon.append(Vector2(STAGE_SIZE.x, STAGE_SIZE.y))
+	return polygon
 
 
-func _draw_tide_bar(normalized_height: float, line_y: float) -> void:
-	if line_y <= 0.0 or line_y >= STAGE_SIZE.y:
-		return
-	var line_length := lerpf(
+func _draw_horizontal_hatched_tide_polygon(
+	polygon: PackedVector2Array,
+) -> void:
+	var hatch_color := Color.WHITE
+	hatch_color.a = TIDE_HATCH_ALPHA
+	for hatch_index in range(TIDE_HATCH_LINE_COUNT):
+		var line_y := (
+			TIDE_FIRST_HATCH_Y
+			+ float(hatch_index) * TIDE_HATCH_PERIOD_PIXELS
+		)
+		var minimum_x := INF
+		var maximum_x := -INF
+		for vertex_index in range(polygon.size()):
+			var start: Vector2 = polygon[vertex_index]
+			var finish: Vector2 = polygon[(vertex_index + 1) % polygon.size()]
+			if not (
+				(start.y <= line_y and finish.y > line_y)
+				or (finish.y <= line_y and start.y > line_y)
+			):
+				continue
+			var edge_fraction := (line_y - start.y) / (finish.y - start.y)
+			var intersection_x := lerpf(start.x, finish.x, edge_fraction)
+			minimum_x = minf(minimum_x, intersection_x)
+			maximum_x = maxf(maximum_x, intersection_x)
+		if is_finite(minimum_x) and maximum_x > minimum_x:
+			_draw_capped_line(
+				Vector2(minimum_x, line_y),
+				Vector2(maximum_x, line_y),
+				hatch_color,
+				TIDE_HATCH_LINE_WIDTH_PIXELS,
+			)
+
+
+func _tide_line_length(normalized_height: float) -> float:
+	return lerpf(
 		TIDE_LINE_MIN_LENGTH_PIXELS,
 		TIDE_LINE_MAX_LENGTH_PIXELS,
 		clampf(normalized_height, 0.0, 1.0),
 	)
-	draw_line(
-		Vector2(STAGE_SIZE.x - line_length, line_y),
-		Vector2(STAGE_SIZE.x, line_y),
-		DODGER_BLUE,
-		TIDE_FILL_LINE_WIDTH_PIXELS,
-		false,
-	)
 
 
-func _update_tide_history(
+func _update_tide_fifo(
 	p_tide_series: PackedFloat32Array,
 	p_tide_sample_position: float,
 ) -> void:
 	if p_tide_series.is_empty():
 		tide_series = PackedFloat32Array()
-		tide_history.clear()
-		tide_history_row_index = -1
-		tide_row_fraction = 0.0
+		tide_fifo_values.clear()
+		tide_sample_position = 0.0
 		return
 	if tide_series.size() != p_tide_series.size():
 		tide_series = p_tide_series.duplicate()
-		tide_history.clear()
-		tide_history_row_index = -1
 	tide_sample_position = fposmod(
 		p_tide_sample_position,
 		float(tide_series.size()),
 	)
-	var current_row_index := floori(tide_sample_position)
-	tide_row_fraction = tide_sample_position - floorf(tide_sample_position)
-	if tide_history_row_index < 0:
-		_rebuild_tide_history(current_row_index)
-		return
-	if current_row_index == tide_history_row_index:
-		return
-	var forward_rows := posmod(
-		current_row_index - tide_history_row_index,
-		tide_series.size(),
+	tide_fifo_values.clear()
+	for sample_index in range(TIDE_WINDOW_SAMPLE_COUNT):
+		var hour_offset := float(sample_index) - TIDE_WINDOW_HALF_HOURS
+		tide_fifo_values.append(_wrapped_tide_sample(
+			tide_sample_position + hour_offset
+		))
+
+
+func _wrapped_tide_sample(sample_position: float) -> float:
+	var wrapped_position := fposmod(sample_position, float(tide_series.size()))
+	var first_index := floori(wrapped_position)
+	var second_index := (first_index + 1) % tide_series.size()
+	var fraction := wrapped_position - floorf(wrapped_position)
+	return lerpf(
+		float(tide_series[first_index]),
+		float(tide_series[second_index]),
+		fraction,
 	)
-	if forward_rows <= 0 or forward_rows > TIDE_VISIBLE_LINE_COUNT:
-		_rebuild_tide_history(current_row_index)
-		return
-	for row_step in range(1, forward_rows + 1):
-		if not tide_history.is_empty():
-			tide_history.pop_front()
-		var pushed_row_index := posmod(
-			tide_history_row_index + row_step,
-			tide_series.size(),
-		)
-		tide_history.push_back(float(tide_series[pushed_row_index]))
-	tide_history_row_index = current_row_index
-
-
-func _rebuild_tide_history(current_row_index: int) -> void:
-	tide_history.clear()
-	for history_offset in range(TIDE_VISIBLE_LINE_COUNT - 1, -1, -1):
-		var row_index := posmod(
-			current_row_index - history_offset,
-			tide_series.size(),
-		)
-		tide_history.push_back(float(tide_series[row_index]))
-	tide_history_row_index = current_row_index
 
 
 func _draw_budget_panel() -> void:
 	_draw_vertical_text(Vector2(1405.0, 205.0), "BASIN WATER BUDGET", -1.0, 24, BLUE)
 	_draw_vertical_text(Vector2(1510.0, 205.0), "INPUT", -1.0, 24, WHITE)
-	_draw_vertical_text(Vector2(1545.0, 205.0), "%5.1f%%" % (input_rate * 100.0), -1.0, 24, WHITE)
+	_draw_vertical_text(Vector2(1545.0, 205.0), "%.1f%%" % (input_rate * 100.0), -1.0, 24, WHITE, _tabular_font)
 	_draw_vertical_text(Vector2(1640.0, 205.0), "TOTAL EXTRACTION", -1.0, 24, WHITE)
-	_draw_vertical_text(Vector2(1675.0, 205.0), "%5.1f%%" % (extraction_fraction * 100.0), -1.0, 24, WHITE)
+	_draw_vertical_text(Vector2(1675.0, 205.0), _formatted_extraction_percentage(), -1.0, 24, WHITE, _tabular_font)
 	_draw_vertical_text(Vector2(1770.0, 205.0), "DELTA REMAINDER", -1.0, 24, BLUE)
-	_draw_vertical_text(Vector2(1805.0, 205.0), "%5.1f%%" % (remaining_rate * 100.0), -1.0, 24, BLUE)
+	_draw_vertical_text(Vector2(1805.0, 205.0), "%.1f%%" % (remaining_rate * 100.0), -1.0, 24, BLUE, _tabular_font)
+
+
+func _formatted_extraction_percentage() -> String:
+	# Exclusive Watershed without an applied AI allocation has no defensible
+	# extraction percentage. Render a pending value instead of a misleading 0%.
+	if (
+		_regime_active(WATERSHED_REGIME_INDEX)
+		and watershed_allocation_state.is_empty()
+	):
+		return "—"
+	return "%.1f%%" % (extraction_fraction * 100.0)
 
 
 func _draw_vertical_text(
@@ -349,10 +381,11 @@ func _draw_vertical_text(
 	width: float,
 	font_size: int,
 	color: Color,
+	font: Font = FONT,
 ) -> void:
 	draw_set_transform(anchor, TYPE_ROTATION_RADIANS, Vector2.ONE)
 	draw_string(
-		FONT,
+		font,
 		Vector2.ZERO,
 		text,
 		HORIZONTAL_ALIGNMENT_LEFT,

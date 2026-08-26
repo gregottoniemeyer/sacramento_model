@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Delta's 720-sample SF Bay tide series from NOAA predictions."""
+"""Build the Delta's complete hourly SF Bay tide series from NOAA predictions."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ STATION_ID = "9414290"
 STATION_NAME = "San Francisco, CA"
 START = datetime(2025, 7, 1, tzinfo=timezone.utc)
 END_EXCLUSIVE = datetime(2026, 7, 1, tzinfo=timezone.utc)
-SAMPLE_COUNT = 720
 API_ENDPOINT = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
 
 
@@ -77,22 +76,12 @@ def validated_hourly_values(payload: dict) -> list[float]:
     return values
 
 
-def linear_sample(values: list[float], position: float) -> float:
-    first = min(int(math.floor(position)), len(values) - 1)
-    second = min(first + 1, len(values) - 1)
-    fraction = position - math.floor(position)
-    return values[first] + (values[second] - values[first]) * fraction
-
-
 def source_velocity(values: list[float]) -> list[float]:
     result: list[float] = []
     for index in range(len(values)):
-        if index == 0:
-            velocity = values[1] - values[0]
-        elif index == len(values) - 1:
-            velocity = values[-1] - values[-2]
-        else:
-            velocity = (values[index + 1] - values[index - 1]) * 0.5
+        previous = values[(index - 1) % len(values)]
+        following = values[(index + 1) % len(values)]
+        velocity = (following - previous) * 0.5
         result.append(velocity)
     return result
 
@@ -108,11 +97,9 @@ def build_rows(values: list[float]) -> list[tuple[int, datetime, float, float, f
     if max_velocity <= 0.0:
         raise ValueError("NOAA tide series has no velocity variation")
     result: list[tuple[int, datetime, float, float, float]] = []
-    for frame in range(SAMPLE_COUNT):
-        position = float(frame) * float(len(values)) / float(SAMPLE_COUNT)
-        height = linear_sample(values, position)
-        velocity = linear_sample(velocities, position)
-        timestamp = START + timedelta(hours=position)
+    for frame, height in enumerate(values):
+        velocity = velocities[frame]
+        timestamp = START + timedelta(hours=frame)
         result.append(
             (
                 frame,
@@ -150,7 +137,9 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(__file__).with_name("sf_bay_9414290_tide_720.txt"),
+        default=Path(__file__).with_name(
+            "sf_bay_9414290_tide_hourly_2025_2026.txt"
+        ),
     )
     parser.add_argument(
         "--raw-output",
@@ -162,8 +151,9 @@ def main() -> None:
     payload = load_payload(args.input_json)
     values = validated_hourly_values(payload)
     rows = build_rows(values)
-    if len(rows) != SAMPLE_COUNT:
-        raise AssertionError(f"built {len(rows)} rows, expected {SAMPLE_COUNT}")
+    expected_count = int((END_EXCLUSIVE - START).total_seconds() // 3600)
+    if len(rows) != expected_count:
+        raise AssertionError(f"built {len(rows)} rows, expected {expected_count}")
     write_output(args.output, rows)
     args.raw_output.parent.mkdir(parents=True, exist_ok=True)
     args.raw_output.write_text(

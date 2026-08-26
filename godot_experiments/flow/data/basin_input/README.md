@@ -18,7 +18,7 @@ NOAA describes the Access Data Service and its station/date subsetting at
 
 | Stage | NOAA station | Observational role |
 |---|---|---|
-| Mount Shasta | USC00045983, Mount Shasta | Upper Sacramento rain/snow proxy |
+| Lake Shasta | USC00045983, Mount Shasta | Upper Sacramento rain/snow proxy |
 | McCloud-Pit | USC00045449, McCloud | McCloud-Pit rain/snow proxy |
 | Cottonwood Creek | USW00024216, Red Bluff | Lower watershed precipitation proxy |
 | Mill Creek | USC00045679, Mineral | Upper Mill Creek/Lassen rain/snow proxy |

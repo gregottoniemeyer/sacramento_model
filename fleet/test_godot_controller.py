@@ -36,12 +36,15 @@ class ControllerTests(unittest.TestCase):
             controller.enforce_watershed_exclusivity(["tech", "watershed"]),
         )
 
-    def test_extractive_regimes_show_geometry_by_default(self):
-        self.assertFalse(controller.default_geometry_visibility(["kinship"]))
-        self.assertTrue(controller.default_geometry_visibility(["ranch"]))
-        self.assertTrue(
-            controller.default_geometry_visibility(["kinship", "tech"])
-        )
+    def test_controller_has_no_geometry_hiding_helpers(self):
+        self.assertFalse(hasattr(controller, "cli_boolean"))
+        self.assertFalse(hasattr(controller, "default_geometry_visibility"))
+        with self.assertRaises(TypeError):
+            controller.send_fleet_regimes(
+                ["kinship"],
+                "test",
+                geometry_visible=False,
+            )
 
     def test_chair_regime_ids_validate_shape_and_binary_values(self):
         with self.assertRaisesRegex(ValueError, "exactly 7"):
@@ -117,34 +120,17 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("pkill -TERM", remote.call_args.args[1])
         local.assert_not_called()
 
-    def test_central_state_reads_and_writes_on_11_over_ssh_from_studio(self):
-        self.configure_studio()
-        state_json = (
-            '{"active_regime_ids":["kinship"],'
-            '"debug_geometry_visible":false}\n'
-        )
-        with mock.patch.object(
-            controller,
-            "ssh",
-            side_effect=[completed(stdout=state_json), completed()],
-        ) as remote:
-            regimes, geometry = controller.load_controller_state()
-            controller.save_controller_state(["kinship"], False)
-        self.assertEqual({"kinship"}, regimes)
-        self.assertFalse(geometry)
-        self.assertEqual(2, remote.call_count)
-        self.assertIn(controller.REGIME_STATE_PATH, remote.call_args_list[0].args[1])
-        write_command = remote.call_args_list[1].args[1]
-        self.assertIn("umask 077", write_command)
-        self.assertIn("mv", write_command)
-
-    def test_required_central_state_refuses_missing_file(self):
-        self.configure_studio()
-        with mock.patch.object(controller, "_read_controller_state_text", return_value=None):
-            with self.assertRaisesRegex(ValueError, "does not exist"):
-                controller.load_controller_state(require_exists=True)
-        with mock.patch.object(controller, "_read_controller_state_text", return_value=None):
-            self.assertEqual((set(), None), controller.load_controller_state())
+    def test_controller_exposes_no_legacy_saved_regime_state_api(self):
+        for name in (
+            "REGIME_STATE_PATH",
+            "_read_controller_state_text",
+            "load_controller_state",
+            "load_controller_regime_state",
+            "save_controller_state",
+            "save_controller_regime_state",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(controller, name))
 
     def test_backup_cleanup_accepts_only_exact_generated_path(self):
         self.configure_studio()
@@ -284,7 +270,128 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.CAFFEINATE_BIN, command[0])
         self.assertEqual(list(controller.CAFFEINATE_FLAGS), command[1:4])
         self.assertEqual(controller.GODOT_BIN, command[4])
+        screen_argument = command.index("--screen")
+        self.assertEqual("1", command[screen_argument + 1])
         self.assertEqual(["--", "--stages=7"], command[-2:])
+
+    def test_governator_status_requires_extended_screen_one(self):
+        self.configure_studio()
+        expected = (
+            "100 /Applications/Godot.app/Contents/MacOS/Godot "
+            "--path /Users/francescospagnolo/Documents/watercouncil/code "
+            "--screen 1 -- --stages=7\n"
+        )
+        with mock.patch.object(
+            controller,
+            "ssh",
+            return_value=completed(stdout=expected),
+        ):
+            ok, _message = controller.all_godot_status(controller.COMPUTERS["11"])
+        self.assertTrue(ok)
+
+    def test_governator_telemetry_restart_is_exact_and_self_verifying(self):
+        self.configure_studio()
+        with mock.patch.object(
+            controller,
+            "ssh",
+            return_value=completed(
+                stdout="telemetry restarted: publisher=1 bridge=1\n"
+            ),
+        ) as remote:
+            ok, message = controller.restart_governator_telemetry()
+        self.assertTrue(ok)
+        self.assertEqual("telemetry restarted: publisher=1 bridge=1", message)
+        remote.assert_called_once()
+        computer, command = remote.call_args.args[:2]
+        self.assertIs(controller.COMPUTERS["11"], computer)
+        self.assertIn("cp -p", command)
+        self.assertIn("controller[.]py --source sensors --port 5006 --quiet$", command)
+        self.assertIn("godot_controller[.]py chairs$", command)
+        self.assertIn("launchctl bootstrap", command)
+        self.assertIn("launchctl kickstart -k", command)
+        self.assertIn("com.watercouncil.telemetry", command)
+        self.assertIn("publisher=1 bridge=1", command)
+
+    def test_start_of_governator_restarts_telemetry_after_kinship(self):
+        self.configure_studio()
+        argv = ["godot_controller.py", "start", "11"]
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(
+                controller,
+                "configure_operator",
+                return_value={
+                    "name": "studio",
+                    "ip": "196.168.50.51",
+                    "local_target": None,
+                },
+            ):
+                with mock.patch.object(
+                    controller,
+                    "perform",
+                    return_value=("196.168.50.11", True, "started"),
+                ):
+                    with mock.patch.object(
+                        controller,
+                        "send_fleet_regimes",
+                        return_value=[("196.168.50.11", 20, 1)],
+                    ):
+                        with mock.patch.object(
+                            controller,
+                            "restart_governator_telemetry",
+                            return_value=(True, "publisher=1 bridge=1"),
+                        ) as restart_telemetry:
+                            with mock.patch("builtins.print"):
+                                with self.assertRaises(SystemExit) as raised:
+                                    controller.main()
+        self.assertEqual(0, raised.exception.code)
+        restart_telemetry.assert_called_once_with()
+
+    def test_governator_telemetry_stop_unloads_agent_and_verifies_zero(self):
+        self.configure_studio()
+        with mock.patch.object(
+            controller,
+            "ssh",
+            return_value=completed(
+                stdout="telemetry stopped: publisher=0 bridge=0\n"
+            ),
+        ) as remote:
+            ok, message = controller.stop_governator_telemetry()
+        self.assertTrue(ok)
+        self.assertEqual("telemetry stopped: publisher=0 bridge=0", message)
+        command = remote.call_args.args[1]
+        self.assertIn("launchctl bootout", command)
+        self.assertIn("pkill -TERM", command)
+        self.assertIn("publisher=0 bridge=0", command)
+        self.assertNotIn("launchctl kickstart", command)
+
+    def test_stop_of_governator_also_stops_telemetry(self):
+        self.configure_studio()
+        argv = ["godot_controller.py", "stop", "11"]
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(
+                controller,
+                "configure_operator",
+                return_value={
+                    "name": "studio",
+                    "ip": "196.168.50.51",
+                    "local_target": None,
+                },
+            ):
+                with mock.patch.object(
+                    controller,
+                    "perform",
+                    return_value=("196.168.50.11", True, "stopped"),
+                ):
+                    with mock.patch.object(
+                        controller,
+                        "stop_governator_telemetry",
+                        return_value=(True, "publisher=0 bridge=0"),
+                    ) as stop_telemetry:
+                        with mock.patch("builtins.print"):
+                            with self.assertRaises(SystemExit) as raised:
+                                controller.main()
+        self.assertEqual(0, raised.exception.code)
+        stop_telemetry.assert_called_once_with()
 
     def test_status_requires_exact_project_and_stage_arguments(self):
         self.configure_studio()
@@ -365,26 +472,37 @@ class ControllerTests(unittest.TestCase):
             ):
                 with mock.patch.object(
                     controller,
-                    "load_controller_state",
-                    return_value=(set(), None),
-                ):
+                    "perform",
+                    return_value=("196.168.50.21", True, "started"),
+                ) as perform:
                     with mock.patch.object(
                         controller,
-                        "perform",
-                        return_value=("196.168.50.21", True, "started"),
-                    ) as perform:
-                        with mock.patch.object(
-                            controller,
-                            "send_fleet_regimes",
-                            return_value=[("196.168.50.21", 20, 2)],
-                        ):
-                            with mock.patch("builtins.print"):
-                                with self.assertRaises(SystemExit) as exit_context:
-                                    controller.main()
+                        "send_fleet_regimes",
+                        return_value=[("196.168.50.21", 20, 2)],
+                    ) as send:
+                        with mock.patch("builtins.print"):
+                            with self.assertRaises(SystemExit) as exit_context:
+                                controller.main()
         self.assertEqual(0, exit_context.exception.code)
         perform.assert_called_once_with("21", "start")
+        self.assertEqual(2, send.call_count)
+        send.assert_has_calls([
+            mock.call(
+                ["kinship"],
+                "startup-date-sync",
+                ["21"],
+                model_date="07/01-00:00",
+                expected_model_date="07/01-00:00",
+            ),
+            mock.call(
+                ["kinship"],
+                "startup-sync",
+                ["21"],
+                model_calendar_auto_advance=True,
+            ),
+        ])
 
-    def test_start_replays_latest_watershed_decision_without_new_ai(self):
+    def test_start_always_establishes_stateless_kinship_baseline(self):
         self.configure_studio()
         argv = ["godot_controller.py", "start", "21"]
         with mock.patch.object(sys, "argv", argv):
@@ -399,69 +517,39 @@ class ControllerTests(unittest.TestCase):
             ):
                 with mock.patch.object(
                     controller,
-                    "load_controller_state",
-                    return_value=({"watershed"}, False),
+                    "perform",
+                    return_value=("196.168.50.21", True, "started"),
                 ):
                     with mock.patch.object(
                         controller,
-                        "perform",
-                        return_value=("196.168.50.21", True, "started"),
-                    ):
+                        "send_fleet_regimes",
+                        return_value=[("196.168.50.21", 20, 2)],
+                    ) as send:
                         with mock.patch.object(
                             controller,
-                            "send_fleet_regimes",
-                            return_value=[("196.168.50.21", 20, 2)],
-                        ):
-                            with mock.patch.object(
-                                controller,
-                                "run_watershed_ai_once",
-                                return_value="APPLIED replay",
-                            ) as replay:
-                                with mock.patch("builtins.print"):
-                                    with self.assertRaises(SystemExit) as raised:
-                                        controller.main()
+                            "run_watershed_ai_once",
+                        ) as replay:
+                            with mock.patch("builtins.print"):
+                                with self.assertRaises(SystemExit) as raised:
+                                    controller.main()
         self.assertEqual(raised.exception.code, 0)
-        replay.assert_called_once_with(controller.WATERSHED_AI_LATEST_DECISION)
-
-    def test_missing_saved_watershed_decision_marks_start_incomplete(self):
-        self.configure_studio()
-        argv = ["godot_controller.py", "start", "21"]
-        with mock.patch.object(sys, "argv", argv):
-            with mock.patch.object(
-                controller,
-                "configure_operator",
-                return_value={
-                    "name": "studio",
-                    "ip": "196.168.50.51",
-                    "local_target": None,
-                },
-            ):
-                with mock.patch.object(
-                    controller,
-                    "load_controller_state",
-                    return_value=({"watershed"}, False),
-                ):
-                    with mock.patch.object(
-                        controller,
-                        "perform",
-                        return_value=("196.168.50.21", True, "started"),
-                    ):
-                        with mock.patch.object(
-                            controller,
-                            "send_fleet_regimes",
-                            return_value=[("196.168.50.21", 20, 2)],
-                        ):
-                            with mock.patch.object(
-                                controller,
-                                "run_watershed_ai_once",
-                                side_effect=ValueError("saved decision not found"),
-                            ):
-                                with mock.patch("builtins.print") as output:
-                                    with self.assertRaises(SystemExit) as raised:
-                                        controller.main()
-        self.assertEqual(raised.exception.code, 1)
-        rendered = " ".join(str(call) for call in output.call_args_list)
-        self.assertIn("Watershed replay verification", rendered)
+        self.assertEqual(2, send.call_count)
+        send.assert_has_calls([
+            mock.call(
+                ["kinship"],
+                "startup-date-sync",
+                ["21"],
+                model_date="07/01-00:00",
+                expected_model_date="07/01-00:00",
+            ),
+            mock.call(
+                ["kinship"],
+                "startup-sync",
+                ["21"],
+                model_calendar_auto_advance=True,
+            ),
+        ])
+        replay.assert_not_called()
 
     def test_rsync_commands_exactly_cover_project_root_and_fleet_subtree(self):
         self.configure_studio()
@@ -533,7 +621,7 @@ class ControllerTests(unittest.TestCase):
                 "flow/data/water_pipeline/feather_720.txt",
                 "flow/data/water_pipeline/american_720.txt",
                 "flow/data/water_pipeline/delta_720.txt",
-                "flow/data/tide/sf_bay_9414290_tide_720.txt",
+                "flow/data/tide/sf_bay_9414290_tide_hourly_2025_2026.txt",
             }.issubset(required)
         )
 
@@ -561,6 +649,31 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("changes required", changed[0][2])
         self.assertFalse(failed[0][1])
         self.assertIn("connection timed out", failed[0][2])
+
+    def test_governator_can_deploy_only_remote_gallery_targets(self):
+        controller.configure_operator(
+            "en0: flags\n\tinet 196.168.50.11 netmask 0xffffff00\n"
+        )
+        with mock.patch.object(
+            controller,
+            "validate_deploy_source",
+            return_value=Path("/source/project"),
+        ):
+            with mock.patch.object(os.path, "isfile", return_value=True):
+                with mock.patch.object(
+                    controller,
+                    "_compare_tree",
+                    return_value=(True, False, "tree differs"),
+                ):
+                    remote = controller.deploy_targets(
+                        ["21", "31", "41"],
+                        dry_run=True,
+                    )
+                    local = controller.deploy_targets(["11"], dry_run=True)
+        self.assertTrue(all(ok for _ip, ok, _message in remote))
+        self.assertTrue(all("changes required" in message for _ip, _ok, message in remote))
+        self.assertFalse(local[0][1])
+        self.assertIn("install target 11 locally", local[0][2])
 
     def test_tree_comparison_ignores_only_rsync_metadata_notices(self):
         self.configure_studio()
@@ -606,7 +719,7 @@ class ControllerTests(unittest.TestCase):
                 self.assertFalse(matches)
                 self.assertIn(substantive_output.strip(), message)
 
-    def test_geometry_only_set_requires_existing_authoritative_state(self):
+    def test_geometry_hiding_flag_is_not_supported(self):
         self.configure_studio()
         argv = ["godot_controller.py", "set", "--geo", "FALSE"]
         with mock.patch.object(sys, "argv", argv):
@@ -619,35 +732,13 @@ class ControllerTests(unittest.TestCase):
                     "local_target": None,
                 },
             ):
-                with mock.patch.object(
-                    controller,
-                    "load_controller_state",
-                    side_effect=ValueError("does not exist"),
-                ) as load:
-                    with mock.patch.object(controller, "send_fleet_regimes") as send:
-                        with self.assertRaises(SystemExit) as exit_context:
-                            controller.main()
-        self.assertEqual(2, exit_context.exception.code)
-        load.assert_called_once_with(require_exists=True)
+                with mock.patch.object(controller, "send_fleet_regimes") as send:
+                    with self.assertRaises(SystemExit) as raised:
+                        controller.main()
+        self.assertEqual(2, raised.exception.code)
         send.assert_not_called()
 
-    def test_exclusive_watershed_transition_matrix(self):
-        cases = (
-            (set(), ["watershed"], True),
-            ({"tech"}, ["watershed"], True),
-            ({"tech", "watershed"}, ["watershed"], True),
-            ({"watershed"}, ["watershed"], False),
-            ({"tech"}, ["tech", "watershed"], False),
-            ({"watershed"}, [], False),
-        )
-        for previous, next_ids, expected in cases:
-            with self.subTest(previous=previous, next_ids=next_ids):
-                self.assertEqual(
-                    expected,
-                    controller.is_exclusive_watershed_activation(previous, next_ids),
-                )
-
-    def test_fresh_watershed_activation_orders_send_save_then_one_ai_call(self):
+    def test_explicit_watershed_activation_orders_send_then_one_ai_call(self):
         self.configure_studio()
         events = []
         argv = ["godot_controller.py", "set", "--regime", "watershed"]
@@ -663,110 +754,88 @@ class ControllerTests(unittest.TestCase):
             ):
                 with mock.patch.object(
                     controller,
-                    "load_controller_state",
-                    return_value=({"tech"}, False),
-                ):
-                    with mock.patch.object(
-                        controller,
-                        "validate_watershed_ai_runtime",
-                        side_effect=lambda: events.append("ready"),
-                    ):
-                        with mock.patch.object(
-                            controller,
-                            "send_fleet_regimes",
-                            side_effect=lambda *_args, **_kwargs: (
-                                events.append("send")
-                                or [("196.168.50.11", 10, 1)]
-                            ),
-                        ):
-                            with mock.patch.object(
-                                controller,
-                                "save_controller_state",
-                                side_effect=lambda *_args: events.append("save"),
-                            ):
-                                with mock.patch.object(
-                                    controller,
-                                    "run_watershed_ai_once",
-                                    side_effect=lambda: events.append("ai") or "APPLIED AI",
-                                ) as run_ai:
-                                    with mock.patch("builtins.print"):
-                                        controller.main()
-        self.assertEqual(events, ["ready", "send", "save", "ai"])
-        run_ai.assert_called_once_with()
-
-    def test_duplicate_watershed_set_spends_no_ai_call(self):
-        self.configure_studio()
-        argv = ["godot_controller.py", "set", "--regime", "watershed"]
-        with mock.patch.object(sys, "argv", argv):
-            with mock.patch.object(
-                controller,
-                "configure_operator",
-                return_value={
-                    "name": "studio",
-                    "ip": "196.168.50.51",
-                    "local_target": None,
-                },
-            ):
-                with mock.patch.object(
-                    controller,
-                    "load_controller_state",
-                    return_value=({"watershed"}, False),
+                    "validate_watershed_ai_runtime",
+                    side_effect=lambda: events.append("ready"),
                 ):
                     with mock.patch.object(
                         controller,
                         "send_fleet_regimes",
-                        return_value=[("196.168.50.11", 10, 1)],
+                        side_effect=lambda *_args, **_kwargs: (
+                            events.append("send")
+                            or [("196.168.50.11", 10, 1)]
+                        ),
                     ):
-                        with mock.patch.object(controller, "save_controller_state"):
-                            with mock.patch.object(
-                                controller,
-                                "run_watershed_ai_once",
-                            ) as run_ai:
-                                with mock.patch("builtins.print"):
-                                    controller.main()
-        run_ai.assert_not_called()
+                        with mock.patch.object(
+                            controller,
+                            "run_watershed_ai_once",
+                            side_effect=lambda: events.append("ai") or "APPLIED AI",
+                        ) as run_ai:
+                            with mock.patch("builtins.print"):
+                                controller.main()
+        self.assertEqual(events, ["ready", "send", "ai"])
+        run_ai.assert_called_once_with()
 
-    def test_ai_failure_leaves_watershed_saved_and_returns_nonzero(self):
+    def test_each_explicit_watershed_command_runs_one_ai_decision(self):
         self.configure_studio()
         argv = ["godot_controller.py", "set", "--regime", "watershed"]
-        with mock.patch.object(sys, "argv", argv):
-            with mock.patch.object(
-                controller,
-                "configure_operator",
-                return_value={
-                    "name": "studio",
-                    "ip": "196.168.50.51",
-                    "local_target": None,
-                },
-            ):
+        for _invocation in range(2):
+            with mock.patch.object(sys, "argv", argv):
                 with mock.patch.object(
                     controller,
-                    "load_controller_state",
-                    return_value=({"tech"}, False),
+                    "configure_operator",
+                    return_value={
+                        "name": "studio",
+                        "ip": "196.168.50.51",
+                        "local_target": None,
+                    },
                 ):
                     with mock.patch.object(controller, "validate_watershed_ai_runtime"):
                         with mock.patch.object(
                             controller,
                             "send_fleet_regimes",
                             return_value=[("196.168.50.11", 10, 1)],
-                        ) as send:
+                        ):
                             with mock.patch.object(
                                 controller,
-                                "save_controller_state",
-                            ) as save:
-                                with mock.patch.object(
-                                    controller,
-                                    "run_watershed_ai_once",
-                                    side_effect=OSError("model unavailable"),
-                                ):
-                                    with mock.patch("builtins.print") as output:
-                                        with self.assertRaises(SystemExit) as raised:
-                                            controller.main()
+                                "run_watershed_ai_once",
+                                return_value="APPLIED AI",
+                            ) as run_ai:
+                                with mock.patch("builtins.print"):
+                                    controller.main()
+            run_ai.assert_called_once_with()
+
+    def test_ai_failure_leaves_watershed_live_and_returns_nonzero(self):
+        self.configure_studio()
+        argv = ["godot_controller.py", "set", "--regime", "watershed"]
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(
+                controller,
+                "configure_operator",
+                return_value={
+                    "name": "studio",
+                    "ip": "196.168.50.51",
+                    "local_target": None,
+                },
+            ):
+                with mock.patch.object(controller, "validate_watershed_ai_runtime"):
+                    with mock.patch.object(
+                        controller,
+                        "send_fleet_regimes",
+                        return_value=[("196.168.50.11", 10, 1)],
+                    ) as send:
+                        with mock.patch.object(
+                            controller,
+                            "run_watershed_ai_once",
+                            side_effect=OSError("model unavailable"),
+                        ):
+                            with mock.patch("builtins.print") as output:
+                                with self.assertRaises(SystemExit) as raised:
+                                    controller.main()
         self.assertEqual(raised.exception.code, 1)
         send.assert_called_once()
-        save.assert_called_once_with(["watershed"], True)
         rendered = " ".join(str(call) for call in output.call_args_list)
-        self.assertIn("Watershed is active and saved", rendered)
+        self.assertIn("Watershed is active, but", rendered)
+        self.assertNotIn("saved", rendered)
 
     def test_watershed_ai_subprocess_uses_current_phase_without_shell(self):
         self.configure_studio()

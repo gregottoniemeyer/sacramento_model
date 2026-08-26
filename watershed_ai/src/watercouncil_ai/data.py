@@ -33,7 +33,7 @@ class StageDataSpec:
 
 STAGE_DATA: dict[str, StageDataSpec] = {
     "mount_shasta": StageDataSpec(
-        "Mount Shasta", "shasta_720.txt", "shasta_keswick_release_temp_c",
+        "Lake Shasta", "shasta_720.txt", "shasta_keswick_release_temp_c",
         ("POINT_STATION_PROXY", "FLOW_TEMP_LOCATION_MISMATCH", "SPECULATIVE_BASIN_MODEL"),
     ),
     "mccloud_pit": StageDataSpec(

@@ -59,8 +59,8 @@ const MAX_INTERACTION_POLYGONS := 8
 @export var auto_start: bool = true
 @export var accept_keyboard_input: bool = true
 @export var debug_visible: bool = true:
-	set(value):
-		debug_visible = value
+	set(_value):
+		debug_visible = true
 		_apply_debug_visibility()
 @export var background_color: Color = Color("05090d"):
 	set(value):
@@ -184,7 +184,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		KEY_BRACKETRIGHT:
 			adjust_gate_width(0.10)
 		KEY_V:
-			set_debug_visible(not debug_visible)
+			set_debug_visible(true)
 		KEY_S:
 			release_salmon()
 		_:
@@ -287,12 +287,12 @@ func is_paused() -> bool:
 	return _paused
 
 
-func set_debug_visible(value: bool) -> void:
-	debug_visible = value
+func set_debug_visible(_value: bool) -> void:
+	debug_visible = true
 
 
 func toggle_debug_visibility() -> void:
-	set_debug_visible(not debug_visible)
+	set_debug_visible(true)
 
 
 func release_salmon(count: int = -1) -> int:
@@ -399,7 +399,7 @@ func set_runtime_parameter(
 		"salmon.fade_seconds", "salmon_fade_seconds":
 			salmon_fade_seconds = clampf(float(value), 0.05, 4.0)
 		"debug_visible":
-			debug_visible = bool(value)
+			debug_visible = true
 		"background_color":
 			background_color = Color(value)
 		_:
@@ -555,9 +555,9 @@ func _apply_gate() -> void:
 
 func _apply_debug_visibility() -> void:
 	if _overlay != null:
-		_overlay.visible = debug_visible
+		_overlay.visible = true
 	if is_node_ready():
-		debug_visibility_changed.emit(screen_id, debug_visible)
+		debug_visibility_changed.emit(screen_id, true)
 
 
 func _bind_geometry_signals() -> void:

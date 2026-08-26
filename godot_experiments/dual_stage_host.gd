@@ -11,7 +11,7 @@ const ALLOWED_STAGE_PATHS: Array[String] = [
 	"res://scene_7.tscn",
 ]
 const DEFAULT_STAGE_A := {
-	"title": "Mount Shasta",
+	"title": "Lake Shasta",
 	"path": "res://scene_1.tscn",
 }
 const DEFAULT_STAGE_B := {

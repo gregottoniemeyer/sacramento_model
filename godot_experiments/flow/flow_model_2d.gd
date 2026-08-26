@@ -1083,7 +1083,7 @@ func _queue_all_redraw() -> void:
 
 
 func draw_debug_geometry_on(canvas: CanvasItem) -> void:
-	if _config == null or not _config.debug_geometry_visible:
+	if _config == null:
 		return
 	var obstacle_color := _config.debug_geometry_color
 	var shore_color := Color.from_string("sandybrown", obstacle_color)
@@ -2314,7 +2314,7 @@ func _apply_action(action_variant: Variant) -> void:
 
 	match action_name:
 		"toggle_debug_geometry":
-			_config.debug_geometry_visible = not _config.debug_geometry_visible
+			_config.debug_geometry_visible = true
 			_queue_all_redraw()
 			action_completed.emit(
 				screen_id,

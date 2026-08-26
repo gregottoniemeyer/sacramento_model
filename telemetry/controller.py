@@ -31,6 +31,20 @@ UDP_PORT = 5006
 HZ = 60
 STALE_S = 3.0
 NUM_CHAIRS = 7
+WATERSHED_CHAIR = 7
+
+# Receiver slot 8 is currently installed as the physical replacement for
+# logical chair 3. Keep this mapping explicit so a stray packet from the
+# retired slot 3 cannot drive the same artwork chair.
+SENSOR_TO_LOGICAL_CHAIR = {
+    1: 1,
+    2: 2,
+    4: 4,
+    5: 5,
+    6: 6,
+    7: 7,
+    8: 3,
+}
 
 REGIMES = [
     "Yurok Kinship",
@@ -63,6 +77,11 @@ V3_RE = re.compile(_COMMON + _STATS +
 V2_RE = re.compile(_COMMON + _STATS + _TAIL)
 V1_RE = re.compile(_COMMON + r"\s+Rssi:(-?\d+)")
 BAD_RE = re.compile(r"Chair:(\d+)\s+BAD PACKET len:(\d+)")
+
+
+def logical_chair(sensor_slot):
+    """Return the artwork chair driven by a receiver slot, or None."""
+    return SENSOR_TO_LOGICAL_CHAIR.get(int(sensor_slot))
 
 
 def parse(line):
@@ -132,11 +151,13 @@ def follow(path, stop=None):
 # separate classification problem.
 
 PEAK_JUMP_RAW = 1500
-OCCUPANCY_HOLD_S = 60.0
+ROTATION_STD_RAW = 300
+ROTATION_CONFIRM_PACKETS = 2
+OCCUPANCY_HOLD_S = 30.0
 
 
 class ChairModel:
-    """Hold occupancy until 60 seconds after the latest major motion."""
+    """Hold occupancy for the configured interval after the latest major motion."""
 
     def __init__(self):
         self.occupied = False
@@ -145,14 +166,20 @@ class ChairModel:
         self.last_peak = 0
         self.reason = "no data"
 
-    def update(self, t, peak_jump):
+    def update(self, t, peak_jump, rotation_motion=False):
         self.last_peak = max(int(peak_jump or 0), 0)
-        major_motion = self.last_peak >= PEAK_JUMP_RAW
+        major_motion = (
+            self.last_peak >= PEAK_JUMP_RAW
+            or bool(rotation_motion)
+        )
         self.vote_frac = 1.0 if major_motion else 0.0
         if major_motion:
             self.occupied = True
             self.occupied_until = float(t) + OCCUPANCY_HOLD_S
-            self.reason = "major motion; 60s interval renewed"
+            self.reason = (
+                ("confirmed rotation" if rotation_motion else "major motion")
+                + f"; {OCCUPANCY_HOLD_S:g}s interval renewed"
+            )
             return
         self.advance(t)
 
@@ -160,10 +187,17 @@ class ChairModel:
         """Expire a held chair even when no fresh sensor packet arrives."""
         if self.occupied and float(t) >= self.occupied_until:
             self.occupied = False
-            self.reason = "60s interval expired"
+            self.reason = f"{OCCUPANCY_HOLD_S:g}s interval expired"
         elif self.occupied:
             remaining = max(self.occupied_until - float(t), 0.0)
             self.reason = f"held {remaining:.1f}s"
+
+    def cancel(self, reason):
+        """End a held interval immediately because a newer input superseded it."""
+        self.occupied = False
+        self.occupied_until = 0.0
+        self.vote_frac = 0.0
+        self.reason = str(reason)
 
 
 # ------------------------------------------------------------------- controller
@@ -206,8 +240,12 @@ class Source:
 class SensorSource(Source):
     """The real chairs.
 
-    A stale chair remains marked offline but any prior major-motion interval is
-    allowed to expire normally. It can therefore never latch forever.
+    Every chair is an independent binary 30-second timer. Watershed clears all
+    other timers when it activates; a newer strong non-Watershed signal cancels
+    Watershed and starts only its own timer.
+
+    A stale chair remains marked offline but any prior strong-motion interval
+    is allowed to expire normally. It can therefore never latch forever.
     """
 
     def __init__(self):
@@ -219,29 +257,80 @@ class SensorSource(Source):
         self.log = LOG
         self.models = {c: ChairModel() for c in range(1, NUM_CHAIRS + 1)}
         self.last_seen = {c: None for c in range(1, NUM_CHAIRS + 1)}
+        self.last_peak = {c: 0 for c in range(1, NUM_CHAIRS + 1)}
+        self.rotation_count = {c: 0 for c in range(1, NUM_CHAIRS + 1)}
+        self.watershed_armed = True
         self.lock = threading.Lock()
         threading.Thread(target=self._read, daemon=True).start()
+
+    def _ingest_summary_packet(self, c, peak, temp, now, std_axis=0):
+        """Apply one mapped sensor packet while holding ``self.lock``."""
+        self.last_seen[c] = now
+        peak = max(int(peak or 0), 0)
+        std_axis = max(int(std_axis or 0), 0)
+        model = self.models[c]
+        self.last_peak[c] = peak
+        if std_axis >= ROTATION_STD_RAW:
+            self.rotation_count[c] += 1
+        else:
+            self.rotation_count[c] = 0
+        rotation_motion = (
+            self.rotation_count[c] >= ROTATION_CONFIRM_PACKETS
+        )
+        strong_motion = peak >= PEAK_JUMP_RAW or rotation_motion
+
+        if c == WATERSHED_CHAIR:
+            # A packet from the same rolling peak must not immediately restore
+            # Watershed after a newer chair has canceled it. A quiet Watershed
+            # packet rearms the next genuinely new strong event.
+            if not self.watershed_armed:
+                if not strong_motion:
+                    self.watershed_armed = True
+                model.update(now, 0)
+            else:
+                model.update(now, peak, rotation_motion)
+                if strong_motion:
+                    for other_c, other_model in self.models.items():
+                        if other_c == WATERSHED_CHAIR:
+                            continue
+                        if other_model.occupied:
+                            other_model.cancel("cleared by Watershed")
+                        self._mark(other_c - 1, False)
+                        self.vote[other_c - 1] = 0.0
+        else:
+            watershed = self.models[WATERSHED_CHAIR]
+            if strong_motion and watershed.occupied:
+                watershed.cancel("ended by newer strong chair input")
+                self._mark(WATERSHED_CHAIR - 1, False)
+                self.vote[WATERSHED_CHAIR - 1] = 0.0
+                self.watershed_armed = False
+            model.update(now, peak, rotation_motion)
+
+        self._mark(c - 1, model.occupied)
+        # MPU-6050 datasheet conversion.
+        self.temp_c[c - 1] = round(temp / 340.0 + 36.53, 1)
+        self.vote[c - 1] = round(model.vote_frac, 3)
 
     def _read(self):
         for line in follow(self.log):
             pkt = parse(line)
             if pkt is None or pkt.get("fmt") != "sum":
                 continue
-            c = pkt["chair"]
-            if not (1 <= c <= NUM_CHAIRS):
-                continue                      # slot 8 is the bench spare
+            c = logical_chair(pkt["chair"])
+            if c is None:
+                continue
             now = time.time()
             with self.lock:
-                self.last_seen[c] = now
-                m = self.models[c]
-                m.update(now, pkt["peak"] or 0)
-                self._mark(c - 1, m.occupied)
-                # MPU-6050 datasheet conversion.
-                self.temp_c[c - 1] = round(pkt["temp"] / 340.0 + 36.53, 1)
-                self.vote[c - 1] = round(m.vote_frac, 3)
+                self._ingest_summary_packet(
+                    c,
+                    pkt["peak"],
+                    pkt["temp"],
+                    now,
+                    max(pkt["stdX"], pkt["stdY"], pkt["stdZ"]),
+                )
 
-    def poll(self):
-        now = time.time()
+    def poll(self, now=None):
+        now = time.time() if now is None else float(now)
         with self.lock:
             self.stale = []
             for c in range(1, NUM_CHAIRS + 1):

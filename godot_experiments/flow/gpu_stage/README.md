@@ -23,8 +23,8 @@ the selector.
 
 With one monitor, the same host renders both independent 1920 x 1080 stages in
 side-by-side `SubViewport` previews. Click a preview to direct its local G/S/L
-and water controls. `V` is process-wide: pressing it from the selected preview
-applies one synchronized debug-visibility state to every active stage. Shared
+and water controls. `V` is retained as a compatibility key but geometry remains
+visible on every active stage. Shared
 timeline and regime state still advance only once. Running previews do not
 consume `1`–`7`; the Governator controller owns regime test input. This fallback
 is for configuration and rehearsal; installation performance must still be
@@ -136,16 +136,16 @@ process. A stage keeps a synchronized local view only for its label, watershed
 interpolation, signals, and `runtime_summary()`. It never advances or resets the
 production clock independently.
 
-`ModelRegimes` is a second process-persistent autoload and is the single
+`ModelRegimes` is a second in-memory process autoload and is the single live
 authority for the seven historical regime toggles. Its authoritative order is
 Kinship, Agriculture, Gold Rush, Water Projects, Hydropower, Tech, and
 Watershed. Agriculture keeps the stable internal ID `ranch`; the preferred UI
 path is `regimes.agriculture`, while `regimes.ranch` remains compatible.
-The initial active set is empty. Any number of regimes may be active
+The initial active set is Kinship. Any number of regimes may be active
 simultaneously, and changing scenes or passing through the selector preserves
 that set. A separate Godot process has a separate `ModelRegimes` authority, so
 an installation controller must synchronize separate executables explicitly.
-Incoming regime paths are applied to that persistent authority by
+Incoming regime paths are applied to that in-memory authority by
 `FlowControlBus` before the packet is routed to stages. This keeps packets sent
 on the selector or during startup and prevents a dual-stage process from applying
 the same global change once per hosted stage.
@@ -176,7 +176,7 @@ baseline instead of applying a zero override. All seven production wrappers opt
 in to this per-river physics. Only Delta shows the active-regime panel; that is
 a presentation choice, not a Delta-only physics scope.
 
-The current matrix uses `S` = Mount Shasta, `Mc` = McCloud/Pit, `C` =
+The current matrix uses `S` = Lake Shasta, `Mc` = McCloud/Pit, `C` =
 Cottonwood Creek, `Mi` = Mill Creek, `F` = Feather River, `A` = American River,
 and `D` = Delta. `R`, `Dr`, `Ob`, and `Sh` below mean reservoir area, drain
 area, obstacle area, and shoreline randomness; `c` is the desired reservoir
@@ -298,7 +298,8 @@ The main-canvas presentation stack is fixed around the animated content:
   existing typography. Only the Delta wrapper enables the regime panel. It hides the
   optional 48-pixel `Regime` heading and leaves the seven 60-pixel names at
   their existing positions beginning on X `1420` with 72-pixel centerline
-  spacing.
+  spacing. Its last visible name is `AI Watershed`; this Delta-only label does
+  not change the stable internal `Watershed` name or `watershed` ID.
   Active names are opaque and inactive names are shown at `0.25` alpha.
   The panel follows the shared `ModelRegimes` state, so matching active names
   highlight immediately even when that state arrived before Delta was loaded.
@@ -384,7 +385,7 @@ identity and may change without changing the stable `screen_id` or `model_id`.
 
 | Scene | `screen_id` | Stage title | Watershed data | Temperature series |
 |---|---|---|---|---|
-| `scene_1.tscn` | `mount_shasta` | Mount Shasta | `shasta_720.txt` | Keswick release |
+| `scene_1.tscn` | `mount_shasta` | Lake Shasta | `shasta_720.txt` | Keswick release |
 | `scene_2.tscn` | `mccloud_pit` | McCloud-Pit Rivers | `mccloud_720.txt` | none |
 | `scene_3.tscn` | `cottonwood_creek` | Cottonwood Creek | `cottonwood_720.txt` | none |
 | `scene_4.tscn` | `mill_creek` | Mill Creek | `mill_creek_720.txt` | none |
@@ -415,20 +416,23 @@ telemetry; only the buffered value drives the one input to the budget.
 
 Regime fractions are Kinship 0%, Agriculture 45%, Gold Rush 30%, Water
 Projects/export 40%, Hydropower/reservoir loss 15%, Tech/data-center cooling
-25%, and Watershed 0%, capped at 100%. The Delta panel displays input, total
+25%, and the authored Watershed fallback 0%, capped at 100%. An applied
+Watershed AI state instead derives extraction from its agriculture,
+data-center, and city allocations. Until that state arrives, the Delta panel
+shows an em dash rather than claiming `0%`. The panel displays input, total
 extraction, and remainder. Kinship floods the Delta with borderless 45-degree
 blue hatching: 3-pixel round-capped lines, 6-pixel gaps, fixed 33% alpha, and a
-6-pixel label knockout. Every regime draws the
-incoming tide from the Bay at screen-right. The tide uses 720 samples of
-NOAA CO-OPS hourly predictions for San Francisco station `9414290` over the same
-July 1, 2025–June 30, 2026 window. In every regime, 35 right-anchored,
-pixel-aligned horizontal bars form a FIFO history. The oldest value is at the
-top and the current value enters at the bottom. During each sample interval the
-whole array migrates upward by 30 pixels; at the boundary, the top value is
-popped and the next data value is pushed onto the bottom. Tide height maps to
-each bar's 41–306 pixel horizontal length, a 66% reach reduction. Every bar is
-solid Dodger Blue and 3 pixels wide. The tide has no label, boundary, or
-arrowheads and renders at Z=-60 below all text.
+6-pixel label knockout. Every regime draws the incoming Bay tide as a
+right-anchored area using all 8,760 hourly NOAA CO-OPS predictions for San
+Francisco station `9414290` over the same July 1, 2025–June 30, 2026 window.
+The wrapped FIFO window covers exactly 96 hours: 48 past hours above screen
+center and 48 future hours below it, with current model time fixed at `y=540`.
+The polygon's left boundary follows interpolated hourly tide height; its
+41–306 pixel reach preserves the earlier 66% scale reduction. It has no solid
+fill, outline, label, or arrowhead. White, pixel-aligned horizontal hatches are
+3 pixels wide with 6-pixel gaps and fixed 20% alpha. The tide renders at Z=-60
+below all text and advances on the shared model-year clock. Delta budget
+percentages use Barlow Condensed with its tabular-numeral OpenType feature.
 The seven water-color head emitters keep native `amount_ratio = 1`, zero timing
 randomness, and zero explosiveness. The shader selects the requested logical
 population at evenly spaced global phases, while small deterministic layer
@@ -450,7 +454,7 @@ Cottonwood Creek intentionally has no temperature series:
 
 | Stage | Temperature column |
 |---|---|
-| Mount Shasta | `shasta_keswick_release_temp_c` |
+| Lake Shasta | `shasta_keswick_release_temp_c` |
 | McCloud-Pit Rivers | `mccloud_above_shasta_lake_temp_c` |
 | Mill Creek | `mill_creek_temp_c` |
 | Feather River | `feather_below_thermalito_temp_c` |
@@ -479,7 +483,7 @@ paths are:
 
 | Runtime path | Compatibility alias | Effect |
 |---|---|---|
-| `debug.geometry_visible` | `debug_visible` | Show/hide reservoir and drain/obstacle debug geometry without changing physics |
+| `debug.geometry_visible` | `debug_visible` | Compatibility path; production geometry remains visible |
 | `stage.title` | `stage_title` | River display text |
 | `stage.title_visible` | `stage_title_visible` | Title visibility |
 | `stage.regime_panel_visible` | `regime_panel_visible` | Active-regime panel visibility for this screen |
@@ -510,17 +514,9 @@ paths are:
 | `regimes.watershed` | none | Set Watershed active/inactive |
 | `shoreline.randomness` | `shoreline_randomness`, `shorelines.randomness` | Directly set this stage's top/bottom edge-turbulence amount `0…1`; the next shared regime change reapplies the normalized profile value |
 
-The fleet controller exposes the same absolute visibility state from the
-repository root:
-
-```sh
-python3 fleet/godot_controller.py set --geo FALSE
-python3 fleet/godot_controller.py set --geo TRUE
-```
-
-It applies to all configured screens, persists across `start`/`restart`, and
-may be combined with `--regime` in one `set` command. `FALSE` hides only the
-guides and outlines; feature physics is unchanged.
+The fleet controller always sends visible geometry to every configured screen
+and exposes no geometry-hiding option. The controller saves no state; `start`
+and `restart` restore Kinship with visible geometry.
 
 Presentation paths do not change `screen_id`, `model_id`, debug visibility, or
 water occupancy. Calendar paths mutate the shared `ModelTimeline` and are
@@ -1323,25 +1319,23 @@ still forms long lines; `flow_speed_pixels` is the maximum speed at `1.0`.
 - `Space`: globally pause/resume the timeline and every active stage in this process
 - `S`: release 25 salmon
 - `L`: release 15 leaves from the top and 15 from the bottom (30 total)
-- `V`: set one absolute, synchronized debug-visibility state on every active
-  stage in this Godot process, whether the key comes from either focused native
-  window or the selected one-monitor preview; this shows/hides the cyan
-  reservoir guide and gold interaction-polygon outlines, while the grid, river
-  title, and model date remain visible
+- `V`: compatibility key; the cyan reservoir guide and gold interaction-polygon
+  geometry remain visible on every active stage
 - `Escape`: return to the seven-scene selector; the shared clock is preserved
 
 Running production stages intentionally ignore `1`–`7`. The Governator's
 `fleet/godot_controller.py regime-console` owns those keys and sends an absolute
 active set to every configured Godot process with target `*`. On
 `startup_selector.tscn`, `1`–`7` still select scenes before a stage launches.
-The active set starts empty, survives scene replacement within a process, and
+The active set starts in Kinship, survives scene replacement within a process, and
 can contain several regimes at once. Keys `0`, `8`, and `9` update only water
 `flow_rate`; no digit rebuilds, retunes, or releases the salmon/leaf systems or
 resizes their segment pools. `S` releases only salmon, and `L` releases only
 leaves. Every recognized stage key is marked handled so another scene node
 cannot process the same event a second time. Use absolute regime state, ecology
 runtime paths, and release actions when a controller changes those systems.
-Unlike keyboard `V`, controller-targeted debug actions remain target-specific.
+Controller-targeted debug actions are also compatibility no-ops; geometry
+remains visible.
 
 Set `accept_keyboard_input = false` when a scene must respond only to the
 external controller.

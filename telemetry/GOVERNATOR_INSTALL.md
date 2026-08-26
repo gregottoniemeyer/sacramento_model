@@ -15,7 +15,7 @@ live `motion_log.txt` and processes.
 ## Runtime chain
 
 1. The USB ESP32 receiver writes raw serial lines to `telemetry/motion_log.txt`.
-2. `telemetry/controller.py` treats a major-motion peak as a 60-second chair
+2. `telemetry/controller.py` treats a major-motion peak as a 30-second chair
    interval; later major motion renews that interval.
 3. `fleet/godot_controller.py chairs` loads that `SensorSource` state directly.
 4. Occupied chairs become the absolute active Godot regime set on UDP 5005.
