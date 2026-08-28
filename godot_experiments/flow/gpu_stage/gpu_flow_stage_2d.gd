@@ -50,6 +50,14 @@ signal salmon_released(
 	scheduled_count: int,
 	release_serial: int
 )
+signal salmon_cohorts_released(
+	screen_id: StringName,
+	cohorts: Array,
+	requested_count: int,
+	scheduled_count: int,
+	survivor_count: int,
+	release_serial: int
+)
 signal leaves_released(
 	screen_id: StringName,
 	requested_count_per_side: int,
@@ -57,6 +65,13 @@ signal leaves_released(
 	scheduled_bottom_count: int,
 	scheduled_total_count: int,
 	release_serial: int
+)
+signal pollution_released(
+	screen_id: StringName,
+	requested_count: int,
+	scheduled_count: int,
+	release_serial: int,
+	source_ids: Array
 )
 
 const PARTICLE_SHADER := preload(
@@ -83,6 +98,9 @@ const SALMON_SCRIPT := preload(
 const LEAF_SCRIPT := preload(
 	"res://flow/gpu_stage/gpu_leaf_2d.gd"
 )
+const POLLUTION_SCRIPT := preload(
+	"res://flow/gpu_stage/gpu_pollution_2d.gd"
+)
 const BasinBudgetModel := preload("res://flow/basin_budget.gd")
 const BASIN_BUDGET_OVERLAY_SCRIPT := preload(
 	"res://flow/gpu_stage/basin_budget_overlay.gd"
@@ -104,6 +122,7 @@ const HEAD_EMISSION_RANDOMNESS := 0.0
 const TRAIL_SEGMENT_BUDGET_FPS := 30
 const TRAIL_SEGMENT_CAPACITY_MARGIN := 1.25
 const TRAIL_PREWARM_GUARD_FRAMES := 2
+const EXTRACTOR_REVEAL_INITIAL_FRACTION := 0.50
 const PALETTE_LAYER_COUNT := 7
 const FLOW_PALETTE := [
 	Color(1.0, 1.0, 1.0, 1.0),
@@ -118,6 +137,11 @@ const MAX_PENDING_CONTROL_MESSAGES := 256
 const WATERSHED_AI_CONTROL_SCOPE := "watershed-ai/2"
 const WATERSHED_AI_STATE_PATH := "watershed.ai.state"
 const WATERSHED_AI_STATE_SCHEMA_VERSION := 2
+const WATERSHED_AI_LAST_SUCCESSFUL_CACHE_SCHEMA_VERSION := 1
+const WATERSHED_AI_LAST_SUCCESSFUL_CACHE_DEFAULT_DIRECTORY := (
+	"user://watershed_ai/last_successful"
+)
+const WATERSHED_AI_LAST_SUCCESSFUL_CACHE_MAX_BYTES := 32768
 const WATERSHED_REGIME_INDEX := 6
 const WATER_PROJECTS_REGIME_INDEX := 3
 const WATERSHED_AI_TOP_LEVEL_FIELDS: Array[String] = [
@@ -237,6 +261,8 @@ const MODEL_MINUTES_PER_DAY := 1440
 const MODEL_YEAR_MINUTE_COUNT := MODEL_CALENDAR_DAY_COUNT * MODEL_MINUTES_PER_DAY
 const MODEL_YEAR_FRAMES_AT_30_FPS := 21600
 const MODEL_MONTH_LENGTHS := [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+const MODEL_DISPLAY_WATER_YEAR_START := 2025
+const MODEL_DISPLAY_WATER_YEAR_START_DAY_INDEX := 181
 const BACKGROUND_Z_INDEX := -100
 const BACKGROUND_GRID_Z_INDEX := -75
 const TIDE_OVERLAY_Z_INDEX := -60
@@ -260,6 +286,46 @@ const DEFAULT_GRID_COLOR := Color(
 	225.0 / 255.0,
 	0.25
 )
+const CONFLUENCE_DELTA_SCREEN_ID := &"delta"
+const CONFLUENCE_SOURCE_IDS: Array[StringName] = [
+	&"mount_shasta",
+	&"mccloud_pit",
+	&"cottonwood_creek",
+	&"mill_creek",
+	&"feather_river",
+	&"american_river",
+]
+# Fixed grid topology in native 1920 x 1080 canvas pixels. Grid numbering uses
+# the artwork's lower-left world origin. After the world-to-canvas Y flip,
+# Shasta's left gridline 8 is y=120, McCloud's left gridline 2 is y=840, and
+# Feather's top gridline 5 is x=600.
+const CONFLUENCE_SOURCE_RECORDS: Array[Vector4] = [
+	Vector4(0.0, 120.0, 1.0, 0.0),
+	Vector4(0.0, 840.0, 1.0, 0.0),
+	Vector4(1200.0, 1080.0, 0.0, -1.0),
+	Vector4(360.0, 1080.0, 0.0, -1.0),
+	Vector4(600.0, 0.0, 0.0, 1.0),
+	Vector4(1440.0, 0.0, 0.0, 1.0),
+]
+const CONFLUENCE_MERGE_X_PIXELS: Array[float] = [
+	480.0,
+	480.0,
+	1440.0,
+	720.0,
+	960.0,
+	1680.0,
+]
+const CONFLUENCE_SOURCE_COUNT := 6
+const CONFLUENCE_MAX_SOURCE_WIDTH_PIXELS := (
+	STAGE_SIZE.y - SHORELINE_INLET_BASE_MARGIN_PIXELS * 2.0
+)
+const CONFLUENCE_WATER_STALE_SECONDS := 2.0
+const CONFLUENCE_WATER_PUBLISH_INTERVAL_SECONDS := 0.20
+const CONFLUENCE_EVENT_CACHE_LIMIT := 512
+const CONFLUENCE_SALMON_COHORT_SIZE := 25
+const CONFLUENCE_SALMON_HANDOFF_LIMIT := 128
+const CONFLUENCE_SALMON_ROUTE_ARC_SAMPLES := 32
+const CONFLUENCE_SALMON_GPU_START_GUARD_SECONDS := 0.50
 
 @export_group("Identity")
 @export var stage_index: int = 0:
@@ -318,10 +384,24 @@ const DEFAULT_GRID_COLOR := Color(
 @export_range(0, MODEL_CALENDAR_DAY_COUNT - 1, 1) var model_start_day_index: int = 0
 @export var model_calendar_auto_advance: bool = true
 
+@export_group("Delta Confluence")
+@export var delta_confluence_enabled: bool = false
+@export_range(60.0, 300.0, 1.0) var confluence_entry_turn_pixels: float = 240.0
+@export_range(0.0, 240.0, 1.0) var confluence_inlet_spread_pixels: float = 42.0
+@export_range(0.0, 1080.0, 1.0) var confluence_trunk_center_y_pixels: float = 540.0
+@export_range(1.0, 480.0, 1.0) var confluence_trunk_base_width_pixels: float = 42.0
+@export_range(30.0, 480.0, 1.0) var confluence_trunk_width_transition_pixels: float = 120.0
+@export_range(0.1, 20.0, 0.1) var confluence_curve_follow_strength: float = 6.0
+@export var confluence_stale_uses_delta_fallback: bool = false
+
 @export_group("Watershed Data")
 @export_file("*.txt") var watershed_data_path: String = ""
 @export var watershed_data_drives_flow_rate: bool = true
 @export var watershed_interpolate_flow_rate: bool = true
+@export var watershed_ai_persist_last_successful: bool = true
+@export var watershed_ai_last_successful_cache_directory: String = (
+	WATERSHED_AI_LAST_SUCCESSFUL_CACHE_DEFAULT_DIRECTORY
+)
 
 @export_group("Water Temperature")
 @export_file("*.txt") var temperature_data_path: String = "":
@@ -446,6 +526,39 @@ var _requested_gate_width: float = 0.25
 @export_range(0.0, 1.0, 0.01) var leaf_line_width_variation: float = 1.0
 @export_range(0.0, 1.0, 0.01) var leaf_alpha: float = 1.0
 
+@export_group("Pollution")
+@export var pollution_enabled: bool = true
+## Each active Mine/Data Center mouth emits this many opaque source-colored
+## disks per cadence. The independent fixed GPU pool bounds memory and reuse.
+@export_range(1, 12, 1) var pollution_particles_per_source: int = 1
+@export_range(0.10, 10.0, 0.01) var pollution_release_interval_seconds: float = 1.0
+@export_range(1.0, 2400.0, 1.0) var pollution_free_speed_pixels: float = 120.0
+@export_range(1.0, 480.0, 1.0) var pollution_free_water_search_radius_pixels: float = 120.0
+@export_range(0.0, 1.0, 0.01) var pollution_free_water_steering_strength: float = 0.35
+@export_range(1.0, 2400.0, 1.0) var pollution_flow_speed_pixels: float = 300.0
+@export_range(0.0, 1.0, 0.01) var pollution_speed_variation: float = 0.12
+@export_range(0.0, 30.0, 0.1) var pollution_velocity_response: float = 8.0
+@export_range(0.0, 1.0, 0.001) var pollution_water_alpha_threshold: float = 0.001
+@export_range(1.0, 120.0, 1.0) var pollution_contact_radius_pixels: float = 12.0
+@export_range(1.0, 240.0, 1.0) var pollution_follow_probe_min_pixels: float = 8.0
+@export_range(1.0, 480.0, 1.0) var pollution_follow_probe_max_pixels: float = 56.0
+@export_range(1.0, 80.0, 1.0) var pollution_follow_turn_degrees: float = 35.0
+@export_range(0.01, 1.0, 0.001) var pollution_follow_resample_interval_seconds: float = 0.12
+@export var pollution_occupancy_flip_y: bool = false
+@export_range(1.0, 20.0, 0.1) var pollution_disk_diameter_pixels: float = 10.0
+@export_range(0.0, 1.0, 0.01) var pollution_radius_variation: float = 1.0
+@export var pollution_color: Color = Color("7f858a")
+@export var pollution_data_center_color: Color = Color("ff0000")
+@export_range(0.05, 5.0, 0.05) var pollution_center_recheck_interval_seconds: float = 0.50
+@export_range(0.0, 60.0, 0.1) var pollution_center_hold_seconds: float = 8.0
+@export_range(0.1, 10.0, 0.1) var pollution_center_fade_seconds: float = 2.0
+
+@export_group("Extractor Site Reveal")
+## Historical Mine/Data Center regions use full-size, discrete sites. Half of
+## the authored fleet/site cohort is visible immediately; the rest appears in
+## one step after the regime has remained active for 30 unpaused seconds.
+@export_range(1.0, 600.0, 1.0) var extractor_reveal_delay_seconds: float = 30.0
+
 var particles: GPUParticles2D
 var _trail_segments: GPUParticles2D
 var _process_material: ShaderMaterial
@@ -480,6 +593,7 @@ var _water_viewport: SubViewport
 var _water_canvas: Node2D
 var _salmon_school: GPUSalmon2D
 var _leaf_field: GPULeaf2D
+var _pollution_field: GPUPollution2D
 var _interaction_data_texture: ImageTexture
 var _shoreline_obstacles: Array[Dictionary] = []
 var _shoreline_randomness: float = 0.0
@@ -508,6 +622,13 @@ var _regime_salmon_activity: float = 0.0
 var _regime_leaf_activity: float = 0.0
 var _last_regime_salmon_release_day: int = -1
 var _last_regime_leaf_release_day: int = -1
+var _pollution_sources: Array[Dictionary] = []
+var _pollution_source_signature: String = ""
+var _pollution_source_identity_signature: String = ""
+var _pollution_emission_accumulator: float = 0.0
+var _pollution_emission_serial: int = 0
+var _extractor_reveal_elapsed_by_regime: Dictionary = {}
+var _extractor_reveal_update_count: int = 0
 var _regime_geometry_initialized: bool = false
 var _authored_reservoir_center_pixels := Vector2.ZERO
 var _authored_interaction_vertices: Dictionary = {}
@@ -534,6 +655,18 @@ var _regime_ecology_evaluation_count: int = 0
 var _gate_state_upload_count: int = 0
 var _shoreline_geometry_upload_count: int = 0
 var _pending_messages: Array[Dictionary] = []
+var _pending_particle_transfer_messages: Array[Dictionary] = []
+var _confluence_water_state_by_source: Dictionary = {}
+var _confluence_water_seen_msec_by_source: Dictionary = {}
+var _confluence_water_publish_elapsed: float = (
+	CONFLUENCE_WATER_PUBLISH_INTERVAL_SECONDS
+)
+var _confluence_last_stale_signature: String = ""
+var _confluence_seen_event_ids: Dictionary = {}
+var _confluence_import_in_progress: bool = false
+var _pending_salmon_handoffs: Array[Dictionary] = []
+var _confluence_last_salmon_handoffs: Array[Dictionary] = []
+var _confluence_salmon_handoffs_published: int = 0
 var _trail_recording_warmup_frames: int = 0
 var _model_year_elapsed_seconds: float = 0.0
 var _model_day_index: int = 0
@@ -575,6 +708,13 @@ var _delta_tide_current_normalized_velocity: float = 0.0
 var _watershed_ai_applied_state: Dictionary = {}
 var _watershed_ai_applied_decision_id: String = ""
 var _watershed_ai_applied_state_hash: String = ""
+var _watershed_ai_applied_source: String = "NONE"
+var _watershed_ai_last_successful_state: Dictionary = {}
+var _watershed_ai_last_successful_decision_id: String = ""
+var _watershed_ai_last_successful_state_hash: String = ""
+var _watershed_ai_last_successful_cache_status: String = "NOT_LOADED"
+var _watershed_ai_last_successful_cache_error: String = ""
+var _watershed_ai_fallback_replay_count: int = 0
 var _watershed_ai_last_error: String = ""
 var _watershed_ai_apply_count: int = 0
 var _watershed_ai_deduplicated_count: int = 0
@@ -587,6 +727,8 @@ var _watershed_ai_baseline_gate_open: bool = true
 
 func _ready() -> void:
 	add_to_group(&"flow_models")
+	_register_with_particle_confluence_bus()
+	_load_watershed_ai_last_successful_cache()
 	_bind_model_timeline()
 	_bind_model_regimes()
 	_install_regime_extractor_polygons()
@@ -600,12 +742,17 @@ func _ready() -> void:
 	_load_temperature_data()
 	_load_delta_tide_data()
 	_sync_from_model_timeline(false)
+	if _activate_watershed_ai_last_successful_state():
+		_recalculate_basin_budget(false)
+		_apply_regime_features_from_state(_regime_snapshot)
+		_install_regime_extractor_polygons()
 	_build_background()
 	_build_background_grid()
 	_build_water_render_surface()
 	_build_particles()
 	_build_salmon()
 	_build_leaves()
+	_build_pollution()
 	_build_overlay()
 	_build_basin_budget_overlay()
 	_build_stage_title()
@@ -625,12 +772,24 @@ func _ready() -> void:
 		_sync_from_model_timeline(false)
 
 
+func _exit_tree() -> void:
+	var confluence_bus := get_node_or_null("/root/ParticleConfluenceBus")
+	if (
+		confluence_bus != null
+		and confluence_bus.has_method(&"unregister_stage")
+	):
+		confluence_bus.call(&"unregister_stage", self)
+
+
 func _process(delta: float) -> void:
 	# ModelTimeline is the sole clock owner in the production project. Retain the
 	# local advance only as a fallback when this reusable scene is embedded in a
 	# project that has not installed the autoload.
 	if _model_timeline == null:
 		_advance_model_calendar(delta)
+	_advance_extractor_reveal(delta)
+	_advance_pollution_emission(delta)
+	_advance_particle_confluence(delta)
 	if _trail_recording_warmup_frames > 0:
 		_trail_recording_warmup_frames -= 1
 		if _trail_recording_warmup_frames == 0:
@@ -644,6 +803,11 @@ func _process(delta: float) -> void:
 				process_material.set_shader_parameter(
 					&"interaction_admission_enabled", true
 				)
+	if not _pending_particle_transfer_messages.is_empty():
+		var transfer_messages := _pending_particle_transfer_messages
+		_pending_particle_transfer_messages = []
+		for transfer_message in transfer_messages:
+			_apply_particle_transfer_message(transfer_message)
 	if _pending_messages.is_empty():
 		return
 	# Swap the queue in O(1) so a controller burst never pays Array.pop_front()
@@ -675,7 +839,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		KEY_V:
 			_toggle_debug_visibility_for_all_stages()
 		KEY_S:
-			release_salmon()
+			if screen_id == CONFLUENCE_DELTA_SCREEN_ID:
+				release_delta_salmon_cohorts()
 		KEY_L:
 			release_leaves()
 		_:
@@ -831,6 +996,23 @@ func get_watershed_ai_ack_state() -> Dictionary:
 		"applied_decision_id": _watershed_ai_applied_decision_id,
 		"applied_state_hash": _watershed_ai_applied_state_hash,
 		"applied_state": _watershed_ai_applied_state.duplicate(true),
+		"applied_source": _watershed_ai_applied_source,
+		"last_successful_available": (
+			not _watershed_ai_last_successful_state.is_empty()
+		),
+		"last_successful_decision_id": (
+			_watershed_ai_last_successful_decision_id
+		),
+		"last_successful_state_hash": (
+			_watershed_ai_last_successful_state_hash
+		),
+		"last_successful_cache_status": (
+			_watershed_ai_last_successful_cache_status
+		),
+		"last_successful_cache_error": (
+			_watershed_ai_last_successful_cache_error
+		),
+		"fallback_replay_count": _watershed_ai_fallback_replay_count,
 		"last_error": _watershed_ai_last_error,
 		"apply_count": _watershed_ai_apply_count,
 		"deduplicated_count": _watershed_ai_deduplicated_count,
@@ -991,6 +1173,193 @@ func _watershed_ai_state_hash(state: Dictionary) -> String:
 	return "\n".join(parts).sha256_text()
 
 
+func _watershed_ai_last_successful_cache_path() -> String:
+	var screen_name := String(screen_id).strip_edges()
+	var directory := watershed_ai_last_successful_cache_directory.strip_edges()
+	directory = directory.trim_suffix("/")
+	if (
+		screen_name.is_empty()
+		or screen_name.contains("/")
+		or screen_name.contains("\\")
+		or screen_name.contains("..")
+		or not directory.begins_with("user://")
+		or directory.contains("\\")
+		or directory.contains("..")
+	):
+		return ""
+	return "%s/%s.json" % [
+		directory,
+		screen_name,
+	]
+
+
+func _load_watershed_ai_last_successful_cache() -> void:
+	_watershed_ai_last_successful_state = {}
+	_watershed_ai_last_successful_decision_id = ""
+	_watershed_ai_last_successful_state_hash = ""
+	_watershed_ai_last_successful_cache_error = ""
+	if not watershed_ai_persist_last_successful:
+		_watershed_ai_last_successful_cache_status = "DISABLED"
+		return
+	var path := _watershed_ai_last_successful_cache_path()
+	if path.is_empty():
+		_watershed_ai_last_successful_cache_status = "ERROR"
+		_watershed_ai_last_successful_cache_error = (
+			"The stage screen ID cannot form a safe last-successful cache path."
+		)
+		return
+	if not FileAccess.file_exists(path):
+		_watershed_ai_last_successful_cache_status = "MISSING"
+		return
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		_watershed_ai_last_successful_cache_status = "ERROR"
+		_watershed_ai_last_successful_cache_error = (
+			"Could not open the last-successful cache (error %d)."
+			% FileAccess.get_open_error()
+		)
+		return
+	if file.get_length() > WATERSHED_AI_LAST_SUCCESSFUL_CACHE_MAX_BYTES:
+		file.close()
+		_watershed_ai_last_successful_cache_status = "INVALID"
+		_watershed_ai_last_successful_cache_error = (
+			"The last-successful cache exceeds its size limit."
+		)
+		return
+	var parsed: Variant = JSON.parse_string(file.get_as_text())
+	file.close()
+	if not parsed is Dictionary:
+		_watershed_ai_last_successful_cache_status = "INVALID"
+		_watershed_ai_last_successful_cache_error = (
+			"The last-successful cache is not a JSON object."
+		)
+		return
+	var record: Dictionary = parsed
+	var expected_fields := ["schema_version", "screen_id", "state_hash", "state"]
+	if record.size() != expected_fields.size():
+		_watershed_ai_last_successful_cache_status = "INVALID"
+		_watershed_ai_last_successful_cache_error = (
+			"The last-successful cache has an unexpected field set."
+		)
+		return
+	for field: String in expected_fields:
+		if not record.has(field):
+			_watershed_ai_last_successful_cache_status = "INVALID"
+			_watershed_ai_last_successful_cache_error = (
+				"The last-successful cache is missing field '%s'." % field
+			)
+			return
+	if (
+		_strict_nonnegative_int(record["schema_version"])
+		!= WATERSHED_AI_LAST_SUCCESSFUL_CACHE_SCHEMA_VERSION
+	):
+		_watershed_ai_last_successful_cache_status = "INVALID"
+		_watershed_ai_last_successful_cache_error = (
+			"The last-successful cache has an incompatible schema."
+		)
+		return
+	if String(record["screen_id"]) != String(screen_id):
+		_watershed_ai_last_successful_cache_status = "INVALID"
+		_watershed_ai_last_successful_cache_error = (
+			"The last-successful cache belongs to another screen."
+		)
+		return
+	var validation := _validated_watershed_ai_state(record["state"])
+	if not bool(validation.get("ok", false)):
+		_watershed_ai_last_successful_cache_status = "INVALID"
+		_watershed_ai_last_successful_cache_error = String(validation.get(
+			"error",
+			"The cached Watershed AI state is invalid.",
+		))
+		return
+	var state_hash := String(validation.get("state_hash", ""))
+	if state_hash != String(record["state_hash"]):
+		_watershed_ai_last_successful_cache_status = "INVALID"
+		_watershed_ai_last_successful_cache_error = (
+			"The last-successful cache state hash does not match its state."
+		)
+		return
+	var state: Dictionary = Dictionary(validation.get("state", {})).duplicate(true)
+	_watershed_ai_last_successful_state = state
+	_watershed_ai_last_successful_decision_id = String(state["decision_id"])
+	_watershed_ai_last_successful_state_hash = state_hash
+	_watershed_ai_last_successful_cache_status = "LOADED"
+
+
+func _save_watershed_ai_last_successful_cache() -> bool:
+	if not watershed_ai_persist_last_successful:
+		_watershed_ai_last_successful_cache_status = "DISABLED"
+		_watershed_ai_last_successful_cache_error = ""
+		return true
+	var path := _watershed_ai_last_successful_cache_path()
+	if path.is_empty():
+		_watershed_ai_last_successful_cache_status = "ERROR"
+		_watershed_ai_last_successful_cache_error = (
+			"The stage screen ID cannot form a safe last-successful cache path."
+		)
+		return false
+	var directory_error := DirAccess.make_dir_recursive_absolute(
+		ProjectSettings.globalize_path(path.get_base_dir())
+	)
+	if directory_error != OK:
+		_watershed_ai_last_successful_cache_status = "ERROR"
+		_watershed_ai_last_successful_cache_error = (
+			"Could not create the last-successful cache directory (error %d)."
+			% directory_error
+		)
+		return false
+	var temporary_path := path + ".tmp"
+	var file := FileAccess.open(temporary_path, FileAccess.WRITE)
+	if file == null:
+		_watershed_ai_last_successful_cache_status = "ERROR"
+		_watershed_ai_last_successful_cache_error = (
+			"Could not write the last-successful cache (error %d)."
+			% FileAccess.get_open_error()
+		)
+		return false
+	var record := {
+		"schema_version": WATERSHED_AI_LAST_SUCCESSFUL_CACHE_SCHEMA_VERSION,
+		"screen_id": String(screen_id),
+		"state_hash": _watershed_ai_last_successful_state_hash,
+		"state": _watershed_ai_last_successful_state.duplicate(true),
+	}
+	file.store_string(JSON.stringify(record, "\t") + "\n")
+	file.flush()
+	var write_error := file.get_error()
+	file.close()
+	if write_error != OK:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(temporary_path))
+		_watershed_ai_last_successful_cache_status = "ERROR"
+		_watershed_ai_last_successful_cache_error = (
+			"Could not flush the last-successful cache (error %d)." % write_error
+		)
+		return false
+	var rename_error := DirAccess.rename_absolute(
+		ProjectSettings.globalize_path(temporary_path),
+		ProjectSettings.globalize_path(path),
+	)
+	if rename_error != OK:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(temporary_path))
+		_watershed_ai_last_successful_cache_status = "ERROR"
+		_watershed_ai_last_successful_cache_error = (
+			"Could not replace the last-successful cache (error %d)." % rename_error
+		)
+		return false
+	_watershed_ai_last_successful_cache_status = "SAVED"
+	_watershed_ai_last_successful_cache_error = ""
+	return true
+
+
+func _remember_watershed_ai_last_successful_state(
+	state: Dictionary,
+	state_hash: String,
+) -> void:
+	_watershed_ai_last_successful_state = state.duplicate(true)
+	_watershed_ai_last_successful_decision_id = String(state["decision_id"])
+	_watershed_ai_last_successful_state_hash = state_hash
+	_save_watershed_ai_last_successful_cache()
+
+
 func _watershed_ai_consumptive_fraction(state: Dictionary) -> float:
 	return clampf(
 		float(state.get("agriculture_fraction", 0.0))
@@ -1038,6 +1407,527 @@ func queue_control_message(message: Dictionary) -> void:
 		# modern-protocol senders that do not.
 		_pending_messages.remove_at(0)
 	_pending_messages.append(message.duplicate(true))
+
+
+func queue_particle_transfer_message(message: Dictionary) -> void:
+	if _pending_particle_transfer_messages.size() >= MAX_PENDING_CONTROL_MESSAGES:
+		_pending_particle_transfer_messages.remove_at(0)
+	_pending_particle_transfer_messages.append(message.duplicate(true))
+
+
+func set_confluence_water_state(
+	source_screen: String,
+	state: Dictionary,
+) -> bool:
+	if not delta_confluence_enabled or screen_id != CONFLUENCE_DELTA_SCREEN_ID:
+		return false
+	var source_index := _confluence_source_index(source_screen)
+	if source_index < 0:
+		return false
+	var flow_variant: Variant = state.get("flow_rate", null)
+	var speed_variant: Variant = state.get("speed_pixels", null)
+	if not _is_finite_number(flow_variant) or not _is_finite_number(speed_variant):
+		return false
+	var normalized_flow := clampf(float(flow_variant), 0.0, 1.0)
+	var exit_width_variant: Variant = state.get("exit_width_pixels", null)
+	if (
+		typeof(exit_width_variant) != TYPE_NIL
+		and not _is_finite_number(exit_width_variant)
+	):
+		return false
+	var exit_width_pixels := (
+		_confluence_exit_width_for_flow_rate(normalized_flow)
+		if typeof(exit_width_variant) == TYPE_NIL
+		else clampf(
+			float(exit_width_variant),
+			0.0,
+			CONFLUENCE_MAX_SOURCE_WIDTH_PIXELS,
+		)
+	)
+	var canonical_state := {
+		"flow_rate": normalized_flow,
+		"speed_pixels": clampf(float(speed_variant), 1.0, 2400.0),
+		"exit_width_pixels": exit_width_pixels,
+		"paused": bool(state.get("paused", false)),
+		"active_heads": clampi(
+			int(state.get(
+				"active_heads",
+				_flow_line_target_count(float(flow_variant)),
+			)),
+			0,
+			maxi(particle_slots, 1),
+		),
+	}
+	_confluence_water_state_by_source[source_screen] = canonical_state
+	_confluence_water_seen_msec_by_source[source_screen] = Time.get_ticks_msec()
+	_apply_confluence_water_parameters()
+	return true
+
+
+func queue_confluence_batch(
+	source_screen: String,
+	particle_type: String,
+	subtype: String,
+	count: int,
+	event_id: String = "",
+) -> bool:
+	var message := {
+		"kind": "particle_batch",
+		"source_screen": source_screen,
+		"target_screen": String(screen_id),
+		"particle_type": particle_type,
+		"subtype": subtype,
+		"count": count,
+		"event_id": event_id,
+	}
+	return _apply_particle_transfer_message(message)
+
+
+func particle_confluence_water_state() -> Dictionary:
+	return {
+		"flow_rate": clampf(flow_rate, 0.0, 1.0),
+		"active_heads": _flow_line_target_count(flow_rate),
+		"speed_pixels": (
+			flow_speed_pixels * maxf(flow_rate, min_active_flow)
+		),
+		"paused": _paused,
+	}
+
+
+func get_confluence_runtime_summary() -> Dictionary:
+	var sources: Dictionary = {}
+	for source_index in range(CONFLUENCE_SOURCE_COUNT):
+		var source_id := String(CONFLUENCE_SOURCE_IDS[source_index])
+		var source_record := CONFLUENCE_SOURCE_RECORDS[source_index]
+		var effective := _effective_confluence_water_state(source_id)
+		sources[source_id] = {
+			"anchor_pixels": Vector2(source_record.x, source_record.y),
+			"inward_direction_pixels": Vector2(source_record.z, source_record.w),
+			"merge_x_pixels": CONFLUENCE_MERGE_X_PIXELS[source_index],
+			"flow_rate": float(effective["flow_rate"]),
+			"speed_pixels": float(effective["speed_pixels"]),
+			"exit_width_pixels": float(effective["exit_width_pixels"]),
+			"active_heads": _confluence_active_count_for_source(
+				source_index,
+				float(effective["flow_rate"]),
+			),
+			"live": bool(effective["live"]),
+			"fallback": bool(effective["fallback"]),
+		}
+	return {
+		"enabled": delta_confluence_enabled,
+		"is_delta": screen_id == CONFLUENCE_DELTA_SCREEN_ID,
+		"source_count": CONFLUENCE_SOURCE_COUNT,
+		"cohort_size": CONFLUENCE_SALMON_COHORT_SIZE,
+		"water_stale_seconds": CONFLUENCE_WATER_STALE_SECONDS,
+		"entry_turn_pixels": confluence_entry_turn_pixels,
+		"inlet_spread_pixels": confluence_inlet_spread_pixels,
+		"source_width_model": "DELAYED_UPSTREAM_EXIT_WIDTH_PIXELS",
+		"source_width_legacy_fallback": "1024_X_FLOW_RATE",
+		"maximum_source_width_pixels": CONFLUENCE_MAX_SOURCE_WIDTH_PIXELS,
+		"curve_mode": "CUBIC_BEZIER_TO_SHARED_TRUNK",
+		"trunk_center_y_pixels": confluence_trunk_center_y_pixels,
+		"trunk_base_width_pixels": confluence_trunk_base_width_pixels,
+		"trunk_width_transition_pixels": (
+			confluence_trunk_width_transition_pixels
+		),
+		"trunk_width_model": "BOUNDED_QUADRATURE_SOURCE_WIDTHS",
+		"trunk_maximum_full_flow_width_pixels": (
+			CONFLUENCE_MAX_SOURCE_WIDTH_PIXELS
+		),
+		"curve_follow_strength": confluence_curve_follow_strength,
+		"sources": sources,
+		"seen_event_count": _confluence_seen_event_ids.size(),
+		"pending_salmon_handoffs": _pending_salmon_handoffs.size(),
+		"salmon_handoffs_published": _confluence_salmon_handoffs_published,
+		"last_salmon_handoffs": _confluence_last_salmon_handoffs.duplicate(true),
+	}
+
+
+func _register_with_particle_confluence_bus() -> void:
+	var confluence_bus := get_node_or_null("/root/ParticleConfluenceBus")
+	if confluence_bus != null and confluence_bus.has_method(&"register_stage"):
+		confluence_bus.call(&"register_stage", self)
+
+
+func _publish_confluence_particle_batch(
+	particle_type: String,
+	subtype: String,
+	count: int,
+) -> String:
+	if (
+		count <= 0
+		or _confluence_import_in_progress
+		or screen_id == CONFLUENCE_DELTA_SCREEN_ID
+		or _confluence_source_index(String(screen_id)) < 0
+	):
+		return ""
+	var confluence_bus := get_node_or_null("/root/ParticleConfluenceBus")
+	if (
+		confluence_bus == null
+		or not confluence_bus.has_method(&"publish_particle_batch")
+	):
+		return ""
+	var transit_speed := maxf(
+		flow_speed_pixels * maxf(flow_rate, min_active_flow),
+		1.0,
+	)
+	var transit_delay_seconds := STAGE_SIZE.x / transit_speed
+	return String(confluence_bus.call(
+		&"publish_particle_batch",
+		screen_id,
+		StringName(particle_type),
+		StringName(subtype),
+		count,
+		transit_delay_seconds,
+	))
+
+
+func _advance_particle_confluence(delta: float) -> void:
+	if delta <= 0.0:
+		return
+	if screen_id != CONFLUENCE_DELTA_SCREEN_ID:
+		_confluence_water_publish_elapsed += delta
+		if (
+			_confluence_water_publish_elapsed
+			>= CONFLUENCE_WATER_PUBLISH_INTERVAL_SECONDS
+		):
+			_confluence_water_publish_elapsed = fmod(
+				_confluence_water_publish_elapsed,
+				CONFLUENCE_WATER_PUBLISH_INTERVAL_SECONDS,
+			)
+			var confluence_bus := get_node_or_null("/root/ParticleConfluenceBus")
+			if (
+				confluence_bus != null
+				and confluence_bus.has_method(&"publish_water_state")
+			):
+				confluence_bus.call(
+					&"publish_water_state",
+					String(screen_id),
+					particle_confluence_water_state(),
+				)
+		return
+	_advance_pending_salmon_handoffs(delta)
+	if not delta_confluence_enabled:
+		return
+	var stale_parts := PackedStringArray()
+	for source_id_variant: StringName in CONFLUENCE_SOURCE_IDS:
+		var source_id := String(source_id_variant)
+		var effective := _effective_confluence_water_state(source_id)
+		stale_parts.append("%s:%d" % [source_id, int(bool(effective["live"]))])
+	var stale_signature := "|".join(stale_parts)
+	if stale_signature != _confluence_last_stale_signature:
+		_confluence_last_stale_signature = stale_signature
+		_apply_confluence_water_parameters()
+
+
+func _apply_particle_transfer_message(message: Dictionary) -> bool:
+	var kind := String(message.get("kind", "")).strip_edges().to_lower()
+	if kind == "water_state":
+		var water_variant: Variant = message.get("water", {})
+		if not water_variant is Dictionary:
+			return false
+		return set_confluence_water_state(
+			String(message.get("source_screen", "")),
+			water_variant,
+		)
+	if kind != "particle_batch":
+		return false
+	var event_id := String(message.get("event_id", "")).strip_edges()
+	if not event_id.is_empty():
+		if _confluence_seen_event_ids.has(event_id):
+			return true
+	var source_screen := String(message.get("source_screen", ""))
+	var particle_type := String(message.get(
+		"particle_type",
+		"",
+	)).strip_edges().to_lower()
+	var subtype := String(message.get("subtype", "")).strip_edges().to_lower()
+	var count := clampi(int(message.get("count", 0)), 0, 300)
+	if count <= 0:
+		return false
+	if particle_type == "salmon":
+		if source_screen != String(CONFLUENCE_DELTA_SCREEN_ID):
+			return false
+		if _salmon_school == null:
+			return false
+		_confluence_import_in_progress = true
+		var salmon_scheduled := _salmon_school.release_salmon(count)
+		_confluence_import_in_progress = false
+		var salmon_applied := salmon_scheduled == count
+		if salmon_applied:
+			_remember_confluence_event(event_id)
+		return salmon_applied
+	if (
+		not delta_confluence_enabled
+		or screen_id != CONFLUENCE_DELTA_SCREEN_ID
+		or _confluence_source_index(source_screen) < 0
+	):
+		return false
+	var source := _confluence_particle_source(source_screen, count)
+	if source.is_empty():
+		return false
+	var imported_sources: Array[Dictionary] = [source]
+	_confluence_import_in_progress = true
+	var scheduled := 0
+	match particle_type:
+		"leaf", "leaves":
+			if _leaf_field != null and _leaf_field.has_method(&"release_from_sources"):
+				scheduled = int(_leaf_field.call(
+					&"release_from_sources",
+					imported_sources,
+				))
+		"pollution":
+			if _pollution_field != null:
+				source["pollution_class"] = (
+					"heat" if subtype == "heat" else "material"
+				)
+				scheduled = _pollution_field.release_from_sources(imported_sources)
+	_confluence_import_in_progress = false
+	var applied := scheduled > 0
+	if applied:
+		_remember_confluence_event(event_id)
+	return applied
+
+
+func _remember_confluence_event(event_id: String) -> void:
+	if event_id.is_empty():
+		return
+	_confluence_seen_event_ids[event_id] = Time.get_ticks_msec()
+	while _confluence_seen_event_ids.size() > CONFLUENCE_EVENT_CACHE_LIMIT:
+		_confluence_seen_event_ids.erase(_confluence_seen_event_ids.keys()[0])
+
+
+func _advance_pending_salmon_handoffs(delta: float) -> void:
+	if _paused or delta <= 0.0 or _pending_salmon_handoffs.is_empty():
+		return
+	var confluence_bus := get_node_or_null("/root/ParticleConfluenceBus")
+	var retained: Array[Dictionary] = []
+	for handoff: Dictionary in _pending_salmon_handoffs:
+		handoff["remaining_seconds"] = maxf(
+			float(handoff.get("remaining_seconds", 0.0)) - delta,
+			0.0,
+		)
+		if float(handoff["remaining_seconds"]) > 0.0:
+			retained.append(handoff)
+			continue
+		if (
+			confluence_bus == null
+			or not confluence_bus.has_method(&"publish_salmon_cohort")
+		):
+			retained.append(handoff)
+			continue
+		var event_id := String(confluence_bus.call(
+			&"publish_salmon_cohort",
+			StringName(String(handoff["destination_screen"])),
+			int(handoff["survivor_count"]),
+			0.0,
+		))
+		if event_id.is_empty():
+			retained.append(handoff)
+			continue
+		handoff["event_id"] = event_id
+		_confluence_salmon_handoffs_published += 1
+	_pending_salmon_handoffs = retained
+
+
+func _confluence_particle_source(source_screen: String, count: int) -> Dictionary:
+	var source_index := _confluence_source_index(source_screen)
+	if source_index < 0:
+		return {}
+	var record := CONFLUENCE_SOURCE_RECORDS[source_index]
+	var inward := Vector2(record.z, record.w).normalized()
+	return {
+		"source_id": "confluence_%s" % source_screen,
+		"position_pixels": Vector2(record.x, record.y) + inward * 12.0,
+		"inward_direction_pixels": inward,
+		"start_latched": true,
+		"count": count,
+	}
+
+
+func _confluence_source_index(source_screen: String) -> int:
+	return CONFLUENCE_SOURCE_IDS.find(StringName(source_screen))
+
+
+func _effective_confluence_water_state(source_screen: String) -> Dictionary:
+	var fallback_speed := flow_speed_pixels * maxf(flow_rate, min_active_flow)
+	var fallback_rate := flow_rate if confluence_stale_uses_delta_fallback else 0.0
+	var fallback := {
+		"flow_rate": fallback_rate,
+		"speed_pixels": fallback_speed,
+		"exit_width_pixels": _confluence_exit_width_for_flow_rate(fallback_rate),
+		"paused": _paused,
+		"live": false,
+		"fallback": true,
+	}
+	if (
+		not _confluence_water_state_by_source.has(source_screen)
+		or not _confluence_water_seen_msec_by_source.has(source_screen)
+	):
+		return fallback
+	var age_seconds := (
+		float(
+			Time.get_ticks_msec()
+			- int(_confluence_water_seen_msec_by_source[source_screen])
+		)
+		/ 1000.0
+	)
+	if age_seconds > CONFLUENCE_WATER_STALE_SECONDS:
+		return fallback
+	var state: Dictionary = _confluence_water_state_by_source[source_screen]
+	var state_paused := bool(state.get("paused", false))
+	return {
+		"flow_rate": 0.0 if state_paused else float(state["flow_rate"]),
+		"speed_pixels": float(state["speed_pixels"]),
+		"exit_width_pixels": (
+			0.0 if state_paused else float(state["exit_width_pixels"])
+		),
+		"paused": state_paused,
+		"live": true,
+		"fallback": false,
+	}
+
+
+func _confluence_exit_width_for_flow_rate(normalized_rate: float) -> float:
+	return (
+		CONFLUENCE_MAX_SOURCE_WIDTH_PIXELS
+		* clampf(normalized_rate, 0.0, 1.0)
+	)
+
+
+func _confluence_source_slot_capacity(source_index: int) -> int:
+	if source_index < 0 or source_index >= CONFLUENCE_SOURCE_COUNT:
+		return 0
+	var capacity := maxi(particle_slots, 1)
+	if source_index >= capacity:
+		return 0
+	return floori(
+		float(capacity - 1 - source_index) / float(CONFLUENCE_SOURCE_COUNT)
+	) + 1
+
+
+func _confluence_active_count_for_source(
+	source_index: int,
+	normalized_rate: float,
+) -> int:
+	var source_capacity := _confluence_source_slot_capacity(source_index)
+	if source_capacity <= 0:
+		return 0
+	return clampi(
+		roundi(
+			float(_flow_line_target_count(normalized_rate))
+			* float(source_capacity)
+			/ float(maxi(particle_slots, 1))
+		),
+		0,
+		source_capacity,
+	)
+
+
+func _apply_confluence_water_parameters() -> void:
+	if _process_material_layers.is_empty():
+		return
+	var active_counts: Array[float] = []
+	var speeds: Array[float] = []
+	var source_widths: Array[float] = []
+	for source_index in range(CONFLUENCE_SOURCE_COUNT):
+		var source_id := String(CONFLUENCE_SOURCE_IDS[source_index])
+		var state := _effective_confluence_water_state(source_id)
+		active_counts.append(float(_confluence_active_count_for_source(
+			source_index,
+			float(state["flow_rate"]),
+		)))
+		speeds.append(float(state["speed_pixels"]))
+		source_widths.append(float(state["exit_width_pixels"]))
+	for process_material in _process_material_layers:
+		process_material.set_shader_parameter(
+			&"confluence_mode",
+			delta_confluence_enabled and screen_id == CONFLUENCE_DELTA_SCREEN_ID,
+		)
+		process_material.set_shader_parameter(
+			&"confluence_active_counts_0",
+			Vector4(active_counts[0], active_counts[1], active_counts[2], active_counts[3]),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_active_counts_1",
+			Vector4(active_counts[4], active_counts[5], 0.0, 0.0),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_source_speeds_0",
+			Vector4(speeds[0], speeds[1], speeds[2], speeds[3]),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_source_speeds_1",
+			Vector4(speeds[4], speeds[5], 1.0, 1.0),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_source_widths_0",
+			Vector4(
+				source_widths[0],
+				source_widths[1],
+				source_widths[2],
+				source_widths[3],
+			),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_source_widths_1",
+			Vector4(source_widths[4], source_widths[5], 0.0, 0.0),
+		)
+		for source_index in range(CONFLUENCE_SOURCE_COUNT):
+			process_material.set_shader_parameter(
+				StringName("confluence_source_%d" % source_index),
+				CONFLUENCE_SOURCE_RECORDS[source_index],
+			)
+		process_material.set_shader_parameter(
+			&"confluence_entry_turn_pixels",
+			maxf(confluence_entry_turn_pixels, 60.0),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_inlet_spread_pixels",
+			maxf(confluence_inlet_spread_pixels, 0.0),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_merge_x_0",
+			Vector4(
+				CONFLUENCE_MERGE_X_PIXELS[0],
+				CONFLUENCE_MERGE_X_PIXELS[1],
+				CONFLUENCE_MERGE_X_PIXELS[2],
+				CONFLUENCE_MERGE_X_PIXELS[3],
+			),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_merge_x_1",
+			Vector4(
+				CONFLUENCE_MERGE_X_PIXELS[4],
+				CONFLUENCE_MERGE_X_PIXELS[5],
+				0.0,
+				0.0,
+			),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_trunk_center_y_pixels",
+			clampf(confluence_trunk_center_y_pixels, 0.0, STAGE_SIZE.y),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_trunk_base_width_pixels",
+			maxf(confluence_trunk_base_width_pixels, 1.0),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_trunk_width_transition_pixels",
+			maxf(confluence_trunk_width_transition_pixels, 30.0),
+		)
+		process_material.set_shader_parameter(
+			&"confluence_curve_follow_strength",
+			maxf(confluence_curve_follow_strength, 0.1),
+		)
+
+
+func _is_finite_number(value: Variant) -> bool:
+	return (
+		(typeof(value) == TYPE_INT or typeof(value) == TYPE_FLOAT)
+		and is_finite(float(value))
+	)
 
 
 func set_gate_open(reservoir_or_value: Variant, value: Variant = null) -> void:
@@ -1205,11 +2095,14 @@ func _apply_local_paused(value: bool) -> void:
 		_salmon_school.set_paused(_paused)
 	if _leaf_field != null:
 		_leaf_field.set_paused(_paused)
+	if _pollution_field != null:
+		_pollution_field.set_paused(_paused)
 	_pause_state_applied_to_runtime = (
 		not _head_layers.is_empty()
 		or not _trail_segment_layers.is_empty()
 		or _salmon_school != null
 		or _leaf_field != null
+		or _pollution_field != null
 	)
 	if pause_state_changed and is_node_ready():
 		pause_changed.emit(screen_id, _paused)
@@ -1260,6 +2153,101 @@ func release_salmon(count: int = -1) -> int:
 	if requested < 1 or requested > GPUSalmon2D.CAPACITY:
 		return 0
 	return _salmon_school.release_salmon(requested)
+
+
+func release_salmon_cohort(
+	destination_screen: StringName,
+	survivor_count: int = -1,
+) -> int:
+	## Release one fixed 25-fish Delta cohort with a named upstream branch.
+	## survivor_count is authoritative; omitted values survive only when that
+	## branch currently has live incoming water.
+	if (
+		not salmon_enabled
+		or _salmon_school == null
+		or screen_id != CONFLUENCE_DELTA_SCREEN_ID
+		or not delta_confluence_enabled
+	):
+		return 0
+	var source_index := _confluence_source_index(String(destination_screen))
+	if source_index < 0:
+		return 0
+	var resolved_survivors := _resolved_delta_salmon_survivor_count(
+		String(destination_screen),
+		survivor_count,
+	)
+	if resolved_survivors < 0:
+		return 0
+	var record := CONFLUENCE_SOURCE_RECORDS[source_index]
+	return _salmon_school.release_salmon_cohorts([{
+		"source_screen": String(destination_screen),
+		"destination_screen": String(destination_screen),
+		"destination_anchor_pixels": Vector2(record.x, record.y),
+		"count": CONFLUENCE_SALMON_COHORT_SIZE,
+		"survivor_count": resolved_survivors,
+	}])
+
+
+func release_delta_salmon_cohorts(
+	survivor_counts_by_destination: Dictionary = {},
+) -> int:
+	## Jointly release all six preordained 25-fish cohorts in one fixed-pool
+	## update. Each optional dictionary value is an exact survivor count 0..25.
+	if (
+		not salmon_enabled
+		or _salmon_school == null
+		or screen_id != CONFLUENCE_DELTA_SCREEN_ID
+		or not delta_confluence_enabled
+	):
+		return 0
+	var cohorts: Array[Dictionary] = []
+	for source_index in range(CONFLUENCE_SOURCE_COUNT):
+		var destination := String(CONFLUENCE_SOURCE_IDS[source_index])
+		var requested_survivors := -1
+		var has_explicit_survivors := false
+		if survivor_counts_by_destination.has(destination):
+			has_explicit_survivors = true
+			requested_survivors = _strict_nonnegative_int(
+				survivor_counts_by_destination[destination]
+			)
+		elif survivor_counts_by_destination.has(StringName(destination)):
+			has_explicit_survivors = true
+			requested_survivors = _strict_nonnegative_int(
+				survivor_counts_by_destination[StringName(destination)]
+			)
+		if has_explicit_survivors and requested_survivors < 0:
+			return 0
+		var resolved_survivors := _resolved_delta_salmon_survivor_count(
+			destination,
+			requested_survivors,
+		)
+		if resolved_survivors < 0:
+			return 0
+		var record := CONFLUENCE_SOURCE_RECORDS[source_index]
+		cohorts.append({
+			"source_screen": destination,
+			"destination_screen": destination,
+			"destination_anchor_pixels": Vector2(record.x, record.y),
+			"count": CONFLUENCE_SALMON_COHORT_SIZE,
+			"survivor_count": resolved_survivors,
+		})
+	return _salmon_school.release_salmon_cohorts(cohorts)
+
+
+func _resolved_delta_salmon_survivor_count(
+	destination_screen: String,
+	requested_survivors: int,
+) -> int:
+	if requested_survivors >= 0:
+		return (
+			requested_survivors
+			if requested_survivors <= CONFLUENCE_SALMON_COHORT_SIZE
+			else -1
+		)
+	var water_state := _effective_confluence_water_state(destination_screen)
+	if _paused or float(water_state.get("flow_rate", 0.0)) <= 0.0:
+		return 0
+	return CONFLUENCE_SALMON_COHORT_SIZE
 
 
 func release_leaves(count_per_side: int = -1) -> int:
@@ -1327,6 +2315,10 @@ func _bind_model_regimes() -> void:
 
 
 func _on_model_regimes_changed(state: Dictionary) -> void:
+	var was_watershed_exclusive := _watershed_ai_regime_is_exclusive(
+		_regime_snapshot
+	)
+	var replayed_last_successful := false
 	var next_regime_revision := int(state.get("revision", 0))
 	var next_active_signature := _regime_active_signature(state)
 	if (
@@ -1350,9 +2342,21 @@ func _on_model_regimes_changed(state: Dictionary) -> void:
 		and not _watershed_ai_regime_is_exclusive(_regime_snapshot)
 	):
 		_restore_watershed_ai_baseline()
+	elif (
+		_watershed_ai_regime_is_exclusive(_regime_snapshot)
+		and (
+			not was_watershed_exclusive
+			or _watershed_ai_applied_state.is_empty()
+		)
+	):
+		replayed_last_successful = (
+			_activate_watershed_ai_last_successful_state()
+		)
 	_apply_regime_features_from_state(_regime_snapshot)
 	_install_regime_extractor_polygons()
 	_recalculate_basin_budget(false)
+	if replayed_last_successful and not _process_material_layers.is_empty():
+		_apply_water_rate_parameters()
 	_apply_interaction_geometry()
 	_apply_regime_panel()
 	_apply_regime_ecology_schedule()
@@ -1405,6 +2409,7 @@ func _restore_watershed_ai_baseline() -> void:
 	_watershed_ai_applied_state = {}
 	_watershed_ai_applied_decision_id = ""
 	_watershed_ai_applied_state_hash = ""
+	_watershed_ai_applied_source = "NONE"
 	_watershed_ai_last_error = ""
 	_watershed_ai_baseline_captured = false
 	watershed_data_drives_flow_rate = restore_data_drive
@@ -1415,6 +2420,37 @@ func _restore_watershed_ai_baseline() -> void:
 		_update_model_data_timelines()
 	elif not _process_material_layers.is_empty():
 		_apply_water_rate_parameters()
+
+
+func _activate_watershed_ai_last_successful_state() -> bool:
+	if (
+		not _watershed_ai_regime_is_exclusive(_regime_snapshot)
+		or not _watershed_ai_applied_state.is_empty()
+		or _watershed_ai_last_successful_state.is_empty()
+	):
+		return false
+	_capture_watershed_ai_baseline()
+	_watershed_ai_applied_state = (
+		_watershed_ai_last_successful_state.duplicate(true)
+	)
+	_watershed_ai_applied_decision_id = (
+		_watershed_ai_last_successful_decision_id
+	)
+	_watershed_ai_applied_state_hash = (
+		_watershed_ai_last_successful_state_hash
+	)
+	_watershed_ai_applied_source = "LAST_SUCCESSFUL_FALLBACK"
+	_watershed_ai_last_error = ""
+	watershed_data_drives_flow_rate = false
+	_basin_input_rate = float(
+		_watershed_ai_applied_state["atmospheric_input_rate"]
+	)
+	gate_open = (
+		float(_watershed_ai_applied_state["reservoir_release_rate"])
+		> 0.000001
+	)
+	_watershed_ai_fallback_replay_count += 1
+	return true
 
 
 func _apply_watershed_ai_feature_overlay() -> void:
@@ -1468,8 +2504,20 @@ func _apply_watershed_ai_control_message(message: Dictionary) -> bool:
 		next_decision_id == _watershed_ai_applied_decision_id
 		and next_hash == _watershed_ai_applied_state_hash
 	):
+		_watershed_ai_applied_source = "CURRENT_DECISION"
 		_watershed_ai_last_error = ""
 		_watershed_ai_deduplicated_count += 1
+		if (
+			_watershed_ai_last_successful_decision_id != next_decision_id
+			or _watershed_ai_last_successful_state_hash != next_hash
+			or _watershed_ai_last_successful_cache_status in [
+				"ERROR",
+				"INVALID",
+				"MISSING",
+				"NOT_LOADED",
+			]
+		):
+			_remember_watershed_ai_last_successful_state(next_state, next_hash)
 		return true
 	if (
 		not _watershed_ai_applied_state_hash.is_empty()
@@ -1477,13 +2525,19 @@ func _apply_watershed_ai_control_message(message: Dictionary) -> bool:
 	):
 		_watershed_ai_applied_decision_id = next_decision_id
 		_watershed_ai_applied_state["decision_id"] = next_decision_id
+		_watershed_ai_applied_source = "CURRENT_DECISION"
 		_watershed_ai_last_error = ""
 		_watershed_ai_deduplicated_count += 1
+		_remember_watershed_ai_last_successful_state(
+			_watershed_ai_applied_state,
+			next_hash,
+		)
 		return true
 	_capture_watershed_ai_baseline()
 	_watershed_ai_applied_state = next_state
 	_watershed_ai_applied_decision_id = next_decision_id
 	_watershed_ai_applied_state_hash = next_hash
+	_watershed_ai_applied_source = "CURRENT_DECISION"
 	_watershed_ai_last_error = ""
 	watershed_data_drives_flow_rate = false
 	_basin_input_rate = float(next_state["atmospheric_input_rate"])
@@ -1497,6 +2551,7 @@ func _apply_watershed_ai_control_message(message: Dictionary) -> bool:
 	if not _process_material_layers.is_empty():
 		_apply_water_rate_parameters()
 	_watershed_ai_apply_count += 1
+	_remember_watershed_ai_last_successful_state(next_state, next_hash)
 	return true
 
 
@@ -2469,8 +3524,14 @@ func _apply_regime_ecology_schedule() -> void:
 				salmon_per_release,
 				_regime_salmon_activity,
 			)
-			if salmon_count > 0 and release_salmon(salmon_count) > 0:
-				_last_regime_salmon_release_day = _model_day_index
+			if salmon_count > 0:
+				if screen_id == CONFLUENCE_DELTA_SCREEN_ID:
+					if release_delta_salmon_cohorts() > 0:
+						_last_regime_salmon_release_day = _model_day_index
+				else:
+					# Upstream stages no longer originate scheduled salmon. Their
+					# destination-specific survivors arrive from the Delta bus.
+					_last_regime_salmon_release_day = _model_day_index
 	else:
 		_rearm_regime_release_days_after_date_change()
 	if leaf_in_season:
@@ -3437,6 +4498,15 @@ func runtime_summary() -> Dictionary:
 		if _leaf_field != null
 		else {}
 	)
+	var pollution_summary: Dictionary = (
+		_pollution_field.runtime_summary()
+		if _pollution_field != null
+		else {}
+	)
+	var pollution_source_ids: Array[String] = []
+	for pollution_source: Dictionary in _pollution_sources:
+		pollution_source_ids.append(String(pollution_source["source_id"]))
+	var extractor_reveal_states := _extractor_reveal_runtime_states()
 	var watershed_row := get_current_watershed_data_row()
 	var watershed_row_count := _watershed_normalized_flow.size()
 	var regime_state := get_regime_state()
@@ -3513,15 +4583,31 @@ func runtime_summary() -> Dictionary:
 		"extractor_hatch_gap_pixels": 6.0,
 		"extractor_hatch_spacing_pixels": 6.0,
 		"extractor_hatch_max_alpha": 0.33,
+		"extractor_reveal_scope": "GOLD_RUSH_MINE_AND_TECH_DATA_CENTERS",
+		"extractor_reveal_mode": "DISCRETE_FULL_SIZE_SITE_COHORT",
+		"extractor_reveal_initial_fraction": EXTRACTOR_REVEAL_INITIAL_FRACTION,
+		"extractor_reveal_delay_seconds": extractor_reveal_delay_seconds,
+		"extractor_reveal_initial_site_cap_per_type_per_screen": 1,
+		"extractor_reveal_mine_fleet_rounding": "CEIL_HALF_EVEN_STAGE_RANKS",
+		"extractor_reveal_data_center_selection": "ALTERNATING_NORTH_EAST",
+		"extractor_reveal_ai_watershed_bypass": true,
+		"extractor_reveal_states": extractor_reveal_states,
+		"extractor_reveal_update_count": _extractor_reveal_update_count,
 		"geometry_hatch_alpha": 0.33,
 		"geometry_hatch_alpha_mode": "FIXED_UNIFORM",
 		"geometry_label_background": "TRANSPARENT_HATCH_KNOCKOUT",
 		"geometry_label_hatch_clearance_pixels": 6.0,
 		"field_hatch_color": Color("6fbf73"),
-		"data_center_hatch_color": Color.WHITE,
+		"data_center_hatch_color": Color(
+			pollution_data_center_color.r,
+			pollution_data_center_color.g,
+			pollution_data_center_color.b,
+			1.0,
+		),
 		"geometry_hatching_visible_when_active": debug_visible,
 		"geometry_outline_borders": false,
 		"geometry_hatch_line_caps": "ROUND",
+		"geometry_hatch_growth_mode": "FIXED_GLOBAL_LATTICE_RECT_CLIPPED",
 		"repeller_display_term": "CITY",
 		"geometry_overlay_z_index": GEOMETRY_OVERLAY_Z_INDEX,
 		"water_display_z_index": WATER_DISPLAY_Z_INDEX,
@@ -3563,37 +4649,49 @@ func runtime_summary() -> Dictionary:
 		),
 		"delta_tide_animation_direction": "BOTTOM_TO_TOP",
 		"delta_tide_origin_side": "RIGHT",
-		"delta_tide_render_style": "RIGHT_ANCHORED_CENTERED_96H_FIFO_HATCHED_AREA",
-		"delta_tide_area_shape": "RIGHT_ANCHORED_HOURLY_TIDE_POLYGON",
+		"delta_tide_render_style": "RIGHT_ANCHORED_CENTERED_96H_SMOOTH_CUBIC_POLYGON",
+		"delta_tide_polygon_shape": "RIGHT_ANCHORED_MONOTONE_CUBIC_TIDE_BOUNDARY",
 		"delta_tide_series_sample_count": _delta_tide_normalized_heights.size(),
 		"delta_tide_series_sample_position": (
 			float(_delta_tide_row_index) + _delta_tide_row_fraction
 		),
-		"delta_tide_visible_line_count": 120,
-		"delta_tide_first_line_y": 4.5,
-		"delta_tide_last_line_y": 1075.5,
+		"delta_tide_boundary_source_knot_count": 97,
+		"delta_tide_boundary_point_count": 769,
+		"delta_tide_boundary_segment_count": 768,
+		"delta_tide_polygon_vertex_count": 771,
+		"delta_tide_curve_subdivisions_per_hour": 8,
+		"delta_tide_curve_y_step_pixels": 1.40625,
+		"delta_tide_curve_max_y_step_pixels": 1.5,
+		"delta_tide_first_sample_y": 0.0,
+		"delta_tide_last_sample_y": STAGE_SIZE.y,
 		"delta_tide_current_sample_screen_y": 540.0,
 		"delta_tide_current_sample_centered": true,
 		"delta_tide_history_capacity": 97,
-		"delta_tide_history_update_mode": "WRAPPED_LINEAR_HOURLY_FIFO_WINDOW",
+		"delta_tide_history_update_mode": "WRAPPED_C1_MONOTONE_CUBIC_HOURLY_FIFO_WINDOW",
 		"delta_tide_history_order": "OLDEST_TOP_NEWEST_BOTTOM",
 		"delta_tide_migration_pixels_per_sample": 11.25,
-		"delta_tide_bar_value_dimension": "POLYGON_LEFT_BOUNDARY_X_FROM_TIDE_HEIGHT",
+		"delta_tide_curve_type": "MONOTONE_CUBIC_HERMITE_BEZIER_EQUIVALENT",
+		"delta_tide_temporal_interpolation": "PERIODIC_MONOTONE_CUBIC_HERMITE",
+		"delta_tide_interpolation_continuity": "C1",
+		"delta_tide_exact_hourly_knots": true,
+		"delta_tide_normalized_overshoot_clamped": true,
+		"delta_tide_value_dimension": "SMOOTH_BOUNDARY_X_FROM_TIDE_HEIGHT",
 		"delta_tide_line_length_range_pixels": Vector2(40.8, 306.0),
 		"delta_tide_line_length_scale": 0.34,
 		"delta_tide_line_length_reduction_percent": 66.0,
 		"delta_tide_length_source": "NORMALIZED_TIDE_HEIGHT",
-		"delta_tide_line_color": Color.WHITE,
-		"delta_tide_line_color_name": "WHITE",
-		"delta_tide_line_alpha": 0.20,
+		"delta_tide_outline_color": Color.WHITE,
+		"delta_tide_outline_color_name": "WHITE",
+		"delta_tide_outline_alpha": 0.80,
 		"delta_budget_percentage_font_resource": STAGE_TITLE_FONT.resource_path,
 		"delta_budget_percentage_tabular_numerals": true,
-		"delta_tide_fill_line_orientation": "HORIZONTAL",
-		"delta_tide_fill_line_width_pixels": 3.0,
-		"delta_tide_fill_line_gap_pixels": 6.0,
-		"delta_tide_fill_line_period_pixels": 9.0,
-		"delta_tide_skips_screen_boundary_gridlines": true,
-		"delta_tide_boundary_visible": false,
+		"delta_tide_outline_width_pixels": 3.0,
+		"delta_tide_outline_antialiased": true,
+		"delta_tide_outline_caps": "NONE",
+		"delta_tide_fill_visible": true,
+		"delta_tide_fill_color": Color.WHITE,
+		"delta_tide_fill_alpha": 0.08,
+		"delta_tide_hatches_visible": false,
 		"delta_tide_label_visible": false,
 		"delta_tide_window_hours": 96.0,
 		"delta_tide_window_past_hours": 48.0,
@@ -3601,7 +4699,7 @@ func runtime_summary() -> Dictionary:
 		"delta_tide_window_sample_count": 97,
 		"delta_tide_wrap_enabled": true,
 		"delta_tide_timeline_source": "SHARED_MODEL_YEAR_PROGRESS",
-		"delta_tide_antialiasing_profile": "PIXEL_ALIGNED_HORIZONTAL_STRIPES",
+		"delta_tide_antialiasing_profile": "FIXED_DENSITY_CUBIC_BOUNDARY_WITH_AA_OUTLINE",
 		"delta_tide_z_index": TIDE_OVERLAY_Z_INDEX,
 		"delta_tide_below_text": TIDE_OVERLAY_Z_INDEX < STAGE_TITLE_Z_INDEX,
 		"delta_tide_arrowheads": false,
@@ -3752,11 +4850,8 @@ func runtime_summary() -> Dictionary:
 			else 0
 		),
 		"stage_date_visible": stage_date_visible,
-		"stage_date_text": _format_model_date_time(
-			_model_day_index,
-			_model_minute_of_day
-		),
-		"stage_date_format": "MM/DD-HH:MM",
+		"stage_date_text": _format_model_display_date(_model_day_index),
+		"stage_date_format": "YYYY/MM/DD",
 		"stage_date_position": MODEL_DATE_POSITION,
 		"stage_date_position_anchor": "CENTERLINE",
 		"stage_date_rotation_degrees": TYPE_ROTATION_DEGREES,
@@ -3902,6 +4997,27 @@ func runtime_summary() -> Dictionary:
 		"watershed_ai_applied_decision_id": _watershed_ai_applied_decision_id,
 		"watershed_ai_applied_state_hash": _watershed_ai_applied_state_hash,
 		"watershed_ai_applied_state": _watershed_ai_applied_state.duplicate(true),
+		"watershed_ai_applied_source": _watershed_ai_applied_source,
+		"watershed_ai_last_successful_available": (
+			not _watershed_ai_last_successful_state.is_empty()
+		),
+		"watershed_ai_last_successful_decision_id": (
+			_watershed_ai_last_successful_decision_id
+		),
+		"watershed_ai_last_successful_state_hash": (
+			_watershed_ai_last_successful_state_hash
+		),
+		"watershed_ai_last_successful_cache_path": (
+			_watershed_ai_last_successful_cache_path()
+		),
+		"watershed_ai_last_successful_cache_status": (
+			_watershed_ai_last_successful_cache_status
+		),
+		"watershed_ai_last_successful_cache_error": (
+			_watershed_ai_last_successful_cache_error
+		),
+		"watershed_ai_fallback_policy": "LAST_SUCCESSFUL_THEN_CURRENT",
+		"watershed_ai_fallback_replay_count": _watershed_ai_fallback_replay_count,
 		"watershed_ai_last_error": _watershed_ai_last_error,
 		"watershed_ai_apply_count": _watershed_ai_apply_count,
 		"watershed_ai_deduplicated_count": _watershed_ai_deduplicated_count,
@@ -3937,8 +5053,10 @@ func runtime_summary() -> Dictionary:
 		"active_heads_approx": _flow_line_target_count(flow_rate),
 		"water_line_density_low_rate": FLOW_DENSITY_LOW_RATE,
 		"water_line_density_low_count": FLOW_DENSITY_LOW_LINE_COUNT,
-		"water_line_density_full_count": FLOW_DENSITY_FULL_LINE_COUNT,
-		"water_line_density_mapping": "1_PERCENT_20__100_PERCENT_1000",
+		"water_line_density_full_count": particle_slots,
+		"water_line_density_mapping": (
+			"1_PERCENT_20__100_PERCENT_%d" % particle_slots
+		),
 		"palette_layer_count": PALETTE_LAYER_COUNT,
 		"head_layer_count": _head_layers.size(),
 		"trail_segment_layer_count": _trail_segment_layers.size(),
@@ -4063,6 +5181,7 @@ func runtime_summary() -> Dictionary:
 		"salmon_water_steering_strength": salmon_water_steering_strength,
 		"salmon_occupancy_flip_y": salmon_occupancy_flip_y,
 		"salmon_summary": salmon_summary,
+		"confluence_summary": get_confluence_runtime_summary(),
 		"leaves_enabled": leaves_enabled,
 		"leaves_per_side": leaves_per_side,
 		"leaf_release_stagger_interval_seconds": leaf_release_stagger_interval_seconds,
@@ -4082,6 +5201,59 @@ func runtime_summary() -> Dictionary:
 		"leaf_radius_variation": leaf_line_width_variation,
 		"leaf_occupancy_flip_y": leaf_occupancy_flip_y,
 		"leaf_summary": leaf_summary,
+		"pollution_enabled": pollution_enabled,
+		"pollution_particles_per_source": pollution_particles_per_source,
+		"pollution_release_interval_seconds": pollution_release_interval_seconds,
+		"pollution_free_speed_pixels": pollution_free_speed_pixels,
+		"pollution_free_water_search_radius_pixels": (
+			pollution_free_water_search_radius_pixels
+		),
+		"pollution_free_water_steering_strength": (
+			pollution_free_water_steering_strength
+		),
+		"pollution_active_source_count": _pollution_sources.size(),
+		"pollution_active_source_ids": pollution_source_ids,
+		"pollution_active_sources": _pollution_sources.duplicate(true),
+		"pollution_source_signature": _pollution_source_signature,
+		"pollution_source_identity_signature": (
+			_pollution_source_identity_signature
+		),
+		"pollution_emission_accumulator": _pollution_emission_accumulator,
+		"pollution_emission_serial": _pollution_emission_serial,
+		"pollution_color": Color(
+			pollution_color.r,
+			pollution_color.g,
+			pollution_color.b,
+			1.0,
+		),
+		"pollution_mine_color": Color(
+			pollution_color.r,
+			pollution_color.g,
+			pollution_color.b,
+			1.0,
+		),
+		"pollution_data_center_color": Color(
+			pollution_data_center_color.r,
+			pollution_data_center_color.g,
+			pollution_data_center_color.b,
+			1.0,
+		),
+		"pollution_color_routing": "MINE_GREY_DATA_CENTER_BRIGHT_RED_HEAT",
+		"pollution_disk_diameter_pixels": pollution_disk_diameter_pixels,
+		"pollution_never_fades": false,
+		"pollution_source_position_contract": "EXACT_EXTRACTOR_MOUTH",
+		"pollution_initial_state": "FREE_SEEKING",
+		"pollution_water_attachment": "IRREVERSIBLE",
+		"pollution_center_miss_behavior": "THROTTLED_RECHECK_THEN_FADE",
+		"pollution_center_recheck_interval_seconds": (
+			pollution_center_recheck_interval_seconds
+		),
+		"pollution_center_hold_seconds": pollution_center_hold_seconds,
+		"pollution_center_fade_seconds": pollution_center_fade_seconds,
+		"pollution_retirement": (
+			"LATCHED_RIGHT_EDGE_OR_CENTER_TIMEOUT_OR_FULL_RESET"
+		),
+		"pollution_summary": pollution_summary,
 		"interaction_overlay_count": (
 			int(_overlay.call(&"get_interaction_polygon_count"))
 			if _overlay != null
@@ -4332,16 +5504,28 @@ func _apply_control_message(message: Dictionary) -> void:
 				"toggle_debug", "toggle_debug_geometry":
 					toggle_debug_visibility()
 				"release_salmon":
-					var requested_salmon := salmon_per_release
-					if action_arguments.has("count"):
-						requested_salmon = _strict_positive_int(
-							action_arguments["count"]
+					# Production salmon originate only in the Delta. Upstream
+					# stages receive survivor batches through the confluence bus.
+					if screen_id != CONFLUENCE_DELTA_SCREEN_ID:
+						continue
+					var destination := String(action_arguments.get(
+						"destination_screen",
+						action_arguments.get("destination", ""),
+					)).strip_edges()
+					var requested_survivors := -1
+					if action_arguments.has("survivor_count"):
+						requested_survivors = _strict_nonnegative_int(
+							action_arguments["survivor_count"]
 						)
-					if (
-						requested_salmon >= 1
-						and requested_salmon <= GPUSalmon2D.CAPACITY
-					):
-						release_salmon(requested_salmon)
+						if requested_survivors < 0:
+							continue
+					if destination.is_empty():
+						release_delta_salmon_cohorts()
+					else:
+						release_salmon_cohort(
+							StringName(destination),
+							requested_survivors,
+						)
 				"release_leaves":
 					var requested_leaves := leaves_per_side
 					if action_arguments.has("count_per_side"):
@@ -4366,8 +5550,14 @@ func _apply_control_message(message: Dictionary) -> void:
 						segment_layer.restart(true)
 					if _salmon_school != null:
 						_salmon_school.reset_salmon()
+					_pending_salmon_handoffs.clear()
+					_confluence_last_salmon_handoffs.clear()
 					if _leaf_field != null:
 						_leaf_field.reset_leaves()
+					if _pollution_field != null:
+						_pollution_field.reset_pollution()
+					_pollution_emission_accumulator = 0.0
+					_pollution_emission_serial = 0
 
 
 func _apply_geometry_operation(operation: Dictionary) -> bool:
@@ -4629,6 +5819,7 @@ func _install_regime_extractor_polygons() -> void:
 		not _watershed_ai_applied_state.is_empty()
 		and _watershed_ai_regime_is_exclusive(_regime_snapshot)
 	)
+	_sync_extractor_reveal_state(active_states, watershed_ai_active)
 	for definition: Dictionary in BasinBudgetModel.extractor_definitions():
 		var extractor := GPUFlowInteractionPolygon.new()
 		if extractor == null:
@@ -4654,6 +5845,12 @@ func _install_regime_extractor_polygons() -> void:
 				and bool(active_states[regime_index])
 			)
 		)
+		if (
+			enabled
+			and not watershed_ai_active
+			and _extractor_reveal_applies(definition)
+		):
+			enabled = _extractor_reveal_site_visible(definition)
 		var extractor_rectangle: Rect2 = definition["rect_world"]
 		if watershed_ai_active and enabled:
 			extractor_rectangle = _watershed_ai_scaled_extractor_rect(
@@ -4676,6 +5873,341 @@ func _install_regime_extractor_polygons() -> void:
 		})
 		if valid:
 			_regime_extractor_polygons.append(extractor)
+	_sync_pollution_sources()
+
+
+func _sync_extractor_reveal_state(
+	active_states: Array,
+	watershed_ai_active: bool,
+) -> void:
+	## Regime edges, not chair packets or revision numbers, own these timers.
+	## Unrelated regime changes therefore cannot restart a live Mine/Tech reveal.
+	if watershed_ai_active:
+		_extractor_reveal_elapsed_by_regime.clear()
+		return
+	for regime_index_variant: Variant in [2, 5]:
+		var regime_index := int(regime_index_variant)
+		var active: bool = (
+			regime_index >= 0
+			and regime_index < active_states.size()
+			and bool(active_states[regime_index])
+		)
+		if active:
+			if not _extractor_reveal_elapsed_by_regime.has(regime_index):
+				_extractor_reveal_elapsed_by_regime[regime_index] = 0.0
+		else:
+			_extractor_reveal_elapsed_by_regime.erase(regime_index)
+
+
+func _extractor_reveal_applies(definition: Dictionary) -> bool:
+	var regime_index := int(definition.get("regime_index", -1))
+	var visual_kind := String(definition.get("kind", ""))
+	return (
+		(regime_index == 2 and visual_kind == "mine")
+		or (regime_index == 5 and visual_kind == "data_center")
+	)
+
+
+func _extractor_reveal_is_expanded(regime_index: int) -> bool:
+	if not _extractor_reveal_elapsed_by_regime.has(regime_index):
+		return false
+	return float(_extractor_reveal_elapsed_by_regime[regime_index]) >= maxf(
+		extractor_reveal_delay_seconds,
+		0.001,
+	)
+
+
+func _extractor_reveal_initial_site_visible(definition: Dictionary) -> bool:
+	var regime_index := int(definition.get("regime_index", -1))
+	var initial_fraction := EXTRACTOR_REVEAL_INITIAL_FRACTION
+	if regime_index == 2:
+		## One authored Mine exists per screen. Reveal ceil(50% of seven) in the
+		## alternating stage cohort 0,2,4,6 before filling 1,3,5.
+		var stage_order: Array[int] = [0, 2, 4, 6, 1, 3, 5]
+		var normalized_stage := posmod(stage_index, stage_order.size())
+		var cohort_rank := stage_order.find(normalized_stage)
+		var initial_screen_count := clampi(
+			ceili(float(stage_order.size()) * initial_fraction),
+			1,
+			stage_order.size(),
+		)
+		return cohort_rank >= 0 and cohort_rank < initial_screen_count
+	if regime_index == 5:
+		## Two authored Data Center sites exist on every screen. Rotate which one
+		## appears first so each screen begins with exactly one at 50%.
+		var data_center_ids: Array[String] = [
+			"data_center_north",
+			"data_center_east",
+		]
+		var site_rank := data_center_ids.find(String(definition.get("element_id", "")))
+		if site_rank < 0:
+			return false
+		var initial_site_count := clampi(
+			ceili(float(data_center_ids.size()) * initial_fraction),
+			1,
+			data_center_ids.size(),
+		)
+		var first_site_rank := posmod(stage_index, data_center_ids.size())
+		return posmod(site_rank - first_site_rank, data_center_ids.size()) < initial_site_count
+	return true
+
+
+func _extractor_reveal_site_visible(definition: Dictionary) -> bool:
+	var regime_index := int(definition.get("regime_index", -1))
+	return (
+		_extractor_reveal_is_expanded(regime_index)
+		or _extractor_reveal_initial_site_visible(definition)
+	)
+
+
+func _advance_extractor_reveal(delta: float) -> void:
+	if (
+		_paused
+		or delta <= 0.0
+		or _extractor_reveal_elapsed_by_regime.is_empty()
+		or _watershed_ai_regime_is_exclusive(_regime_snapshot)
+	):
+		return
+	var reveal_delay := maxf(extractor_reveal_delay_seconds, 0.001)
+	var crossed_reveal_threshold := false
+	for regime_index_variant: Variant in _extractor_reveal_elapsed_by_regime.keys():
+		var previous := float(
+			_extractor_reveal_elapsed_by_regime[regime_index_variant]
+		)
+		if previous >= reveal_delay:
+			continue
+		var next_elapsed := minf(previous + delta, reveal_delay)
+		_extractor_reveal_elapsed_by_regime[regime_index_variant] = next_elapsed
+		crossed_reveal_threshold = crossed_reveal_threshold or (
+			previous < reveal_delay and next_elapsed >= reveal_delay
+		)
+	if not crossed_reveal_threshold:
+		return
+	if _apply_extractor_reveal_visibility():
+		_extractor_reveal_update_count += 1
+		# Newly revealed full-size sites become physical withdrawals, hatches, and
+		# pollution mouths in the same update.
+		_sync_pollution_sources()
+		_apply_interaction_geometry()
+
+
+func _apply_extractor_reveal_visibility() -> bool:
+	var changed := false
+	for extractor: GPUFlowInteractionPolygon in _regime_extractor_polygons:
+		if extractor == null:
+			continue
+		var definition := _basin_extractor_definition(String(extractor.element_id))
+		if not _extractor_reveal_applies(definition):
+			continue
+		var regime_index := int(definition["regime_index"])
+		if not _extractor_reveal_elapsed_by_regime.has(regime_index):
+			continue
+		var next_enabled := _extractor_reveal_site_visible(definition)
+		if extractor.enabled != next_enabled:
+			extractor.enabled = next_enabled
+			changed = true
+	return changed
+
+
+func _extractor_reveal_runtime_states() -> Dictionary:
+	var result := {}
+	for regime_index_variant: Variant in [2, 5]:
+		var regime_index := int(regime_index_variant)
+		var elapsed := float(
+			_extractor_reveal_elapsed_by_regime.get(regime_index, 0.0)
+		)
+		var reveal_delay := maxf(extractor_reveal_delay_seconds, 0.001)
+		var reveal_active := _extractor_reveal_elapsed_by_regime.has(regime_index)
+		var expanded := reveal_active and elapsed >= reveal_delay
+		var visible_site_ids: Array[String] = []
+		var hidden_site_ids: Array[String] = []
+		var sites: Array[Dictionary] = []
+		for extractor: GPUFlowInteractionPolygon in _regime_extractor_polygons:
+			if not reveal_active:
+				break
+			if extractor == null:
+				continue
+			var definition := _basin_extractor_definition(
+				String(extractor.element_id)
+			)
+			if (
+				not _extractor_reveal_applies(definition)
+				or int(definition.get("regime_index", -1)) != regime_index
+			):
+				continue
+			var target_rect: Rect2 = definition["rect_world"]
+			var element_id := String(extractor.element_id)
+			if extractor.enabled:
+				visible_site_ids.append(element_id)
+			else:
+				hidden_site_ids.append(element_id)
+			sites.append({
+				"element_id": String(extractor.element_id),
+				"visible": extractor.enabled,
+				"initial_cohort": _extractor_reveal_initial_site_visible(definition),
+				"rect_world": target_rect,
+				"bounds_pixels": _native_polygon_bounds(
+					_polygon_native_vertices(
+						BasinBudgetModel.rect_vertices(target_rect)
+					)
+				),
+			})
+		var state_key := "gold_rush" if regime_index == 2 else "tech"
+		result[state_key] = {
+			"regime_index": regime_index,
+			"active": reveal_active,
+			"elapsed_seconds": elapsed,
+			"phase": (
+				"EXPANDED_100_PERCENT"
+				if expanded
+				else ("INITIAL_50_PERCENT" if reveal_active else "INACTIVE")
+			),
+			"expanded": expanded,
+			"progress": 1.0 if expanded else 0.0,
+			"visible_site_count": visible_site_ids.size(),
+			"hidden_site_count": hidden_site_ids.size(),
+			"target_site_count": sites.size(),
+			"visible_site_ids": visible_site_ids,
+			"hidden_site_ids": hidden_site_ids,
+			"sites": sites,
+		}
+	return result
+
+
+func _sync_pollution_sources() -> void:
+	## Pollution emitters follow the live extraction polygons rather than regime
+	## names. This automatically uses AI-scaled Data Center geometry and stops
+	## emission as soon as an extractor is disabled.
+	var had_pollution_sources := not _pollution_sources.is_empty()
+	var next_sources: Array[Dictionary] = []
+	var signature_parts := PackedStringArray()
+	var identity_parts := PackedStringArray()
+	for extractor: GPUFlowInteractionPolygon in _regime_extractor_polygons:
+		if extractor == null or not extractor.enabled:
+			continue
+		var definition := _basin_extractor_definition(String(extractor.element_id))
+		var source_kind := String(definition.get("kind", ""))
+		if source_kind not in ["mine", "data_center"]:
+			continue
+		var native_vertices := _polygon_native_vertices(extractor.vertices)
+		if native_vertices.is_empty():
+			continue
+		var native_bounds := _native_polygon_bounds(native_vertices)
+		var bank_drain_sign := _native_bank_drain_sign(
+			extractor.mode,
+			native_bounds,
+		)
+		if absf(bank_drain_sign) < 0.5:
+			continue
+		# Drain sign points from the river into the bank. Pollution travels the
+		# opposite direction, just across the mouth and into the water.
+		var water_direction := Vector2(0.0, -bank_drain_sign)
+		var mouth_y := (
+			native_bounds.end.y
+			if bank_drain_sign < 0.0
+			else native_bounds.position.y
+		)
+		var source := {
+			"source_id": String(extractor.element_id),
+			"kind": source_kind,
+			"bank_side": _bank_side_name(bank_drain_sign),
+			"bounds_pixels": native_bounds,
+			"mouth_start_pixels": Vector2(native_bounds.position.x, mouth_y),
+			"mouth_end_pixels": Vector2(native_bounds.end.x, mouth_y),
+			"water_direction_pixels": water_direction,
+		}
+		next_sources.append(source)
+		identity_parts.append(String(source["source_id"]))
+		signature_parts.append("%s:%.3f:%.3f:%.3f:%.3f" % [
+			String(source["source_id"]),
+			native_bounds.position.x,
+			native_bounds.position.y,
+			native_bounds.size.x,
+			native_bounds.size.y,
+		])
+	var next_signature := "|".join(signature_parts)
+	var next_identity_signature := "|".join(identity_parts)
+	_pollution_sources = next_sources
+	_pollution_source_signature = next_signature
+	_pollution_source_identity_signature = next_identity_signature
+	if _pollution_sources.is_empty():
+		_pollution_emission_accumulator = 0.0
+	elif not had_pollution_sources:
+		# Make the first single-dot release visible promptly after activation.
+		# Adding a site to an already-active cohort preserves the shared cadence,
+		# so existing sources do not receive an early extra disk at reveal time.
+		_pollution_emission_accumulator = maxf(
+			pollution_release_interval_seconds,
+			0.10,
+		)
+
+
+func _advance_pollution_emission(delta: float) -> void:
+	if (
+		_paused
+		or not pollution_enabled
+		or _pollution_field == null
+		or _pollution_sources.is_empty()
+		or delta <= 0.0
+	):
+		return
+	var interval := maxf(pollution_release_interval_seconds, 0.10)
+	_pollution_emission_accumulator += delta
+	var burst_guard := 0
+	while _pollution_emission_accumulator >= interval and burst_guard < 4:
+		_pollution_emission_accumulator -= interval
+		_release_pollution_burst()
+		burst_guard += 1
+	# A rendering stall must not replay an arbitrarily large pollution history.
+	# Keep only a true fractional remainder; an exact extra interval would force
+	# an unwanted fifth catch-up burst on the next frame.
+	_pollution_emission_accumulator = fmod(
+		_pollution_emission_accumulator,
+		interval,
+	)
+
+
+func _release_pollution_burst() -> int:
+	if _pollution_field == null or _pollution_sources.is_empty():
+		return 0
+	_pollution_emission_serial += 1
+	var commands: Array[Dictionary] = []
+	var count_per_source := maxi(pollution_particles_per_source, 1)
+	var disk_radius := pollution_disk_diameter_pixels * 0.5
+	for source_index in range(_pollution_sources.size()):
+		var source: Dictionary = _pollution_sources[source_index]
+		var mouth_start := Vector2(source["mouth_start_pixels"])
+		var mouth_end := Vector2(source["mouth_end_pixels"])
+		var water_direction := Vector2(source["water_direction_pixels"])
+		var source_seed := _stable_interaction_seed(
+			StringName(String(source["source_id"]))
+		)
+		var mouth_width := maxf(mouth_end.x - mouth_start.x, 0.0)
+		var edge_margin := minf(disk_radius * 1.5, mouth_width * 0.45)
+		for particle_index in range(count_per_source):
+			var lane_fraction := fposmod(
+				0.5
+				+ float(_pollution_emission_serial) * 0.38196601125
+				+ float(particle_index) / float(count_per_source)
+				+ float(source_index) * 0.17320508075
+				+ source_seed * 0.27182818284,
+				1.0,
+			)
+			var spawn_x := lerpf(
+				mouth_start.x + edge_margin,
+				mouth_end.x - edge_margin,
+				lane_fraction,
+			)
+			commands.append({
+				"source_id": String(source["source_id"]),
+				"position_pixels": Vector2(spawn_x, mouth_start.y),
+				"inward_direction_pixels": water_direction,
+				"pollution_class": (
+					"heat" if String(source.get("kind", "")) == "data_center"
+					else "material"
+				),
+			})
+	return _pollution_field.release_from_sources(commands)
 
 
 func _watershed_ai_scaled_extractor_rect(
@@ -4826,6 +6358,7 @@ func _apply_water_rate_parameters() -> void:
 		# source of low-flow batch emission and blank intervals.
 		if not is_equal_approx(head_layer.amount_ratio, 1.0):
 			head_layer.amount_ratio = 1.0
+	_apply_confluence_water_parameters()
 
 
 func _apply_runtime_parameters() -> void:
@@ -4937,6 +6470,7 @@ func _apply_runtime_parameters() -> void:
 	_apply_water_rate_parameters()
 	_apply_salmon_parameters()
 	_apply_leaf_parameters()
+	_apply_pollution_parameters()
 
 
 func _apply_salmon_parameters() -> void:
@@ -4967,6 +6501,8 @@ func _apply_salmon_parameters() -> void:
 		"water_steering_strength": salmon_water_steering_strength,
 		"occupancy_flip_y": salmon_occupancy_flip_y,
 		"spawn_search_width_pixels": salmon_contact_width_pixels * 0.5,
+		"delta_route_turn_pixels": confluence_entry_turn_pixels,
+		"delta_route_trunk_center_y_pixels": confluence_trunk_center_y_pixels,
 		"streak_length_pixels": salmon_trail_length_pixels,
 		"streak_width_pixels": salmon_line_width_pixels,
 		"fade_seconds": salmon_fade_seconds,
@@ -5025,6 +6561,62 @@ func _apply_leaf_parameters() -> void:
 	})
 	_leaf_field.set_water_texture(get_water_texture())
 	_leaf_field.set_paused(_paused)
+
+
+func _apply_pollution_parameters() -> void:
+	var heat_color := Color(
+		pollution_data_center_color.r,
+		pollution_data_center_color.g,
+		pollution_data_center_color.b,
+		1.0,
+	)
+	if _overlay != null:
+		_overlay.call(&"set_data_center_color", heat_color)
+	if _pollution_field == null:
+		return
+	pollution_follow_probe_max_pixels = maxf(
+		pollution_follow_probe_max_pixels,
+		pollution_follow_probe_min_pixels,
+	)
+	_pollution_field.configure({
+		"stage_size": STAGE_SIZE,
+		"simulation_fps": 30,
+		"free_speed_pixels": pollution_free_speed_pixels,
+		"free_water_search_radius_pixels": (
+			pollution_free_water_search_radius_pixels
+		),
+		"free_water_steering_strength": (
+			pollution_free_water_steering_strength
+		),
+		"flow_speed_pixels": pollution_flow_speed_pixels,
+		"speed_variation": pollution_speed_variation,
+		"velocity_response": pollution_velocity_response,
+		"water_alpha_threshold": pollution_water_alpha_threshold,
+		"contact_radius_pixels": pollution_contact_radius_pixels,
+		"follow_probe_min_pixels": pollution_follow_probe_min_pixels,
+		"follow_probe_max_pixels": pollution_follow_probe_max_pixels,
+		"follow_turn_degrees": pollution_follow_turn_degrees,
+		"follow_resample_interval_seconds": (
+			pollution_follow_resample_interval_seconds
+		),
+		"center_recheck_interval_seconds": (
+			pollution_center_recheck_interval_seconds
+		),
+		"center_hold_seconds": pollution_center_hold_seconds,
+		"center_fade_seconds": pollution_center_fade_seconds,
+		"occupancy_flip_y": pollution_occupancy_flip_y,
+		"disk_diameter_pixels": pollution_disk_diameter_pixels,
+		"radius_variation": pollution_radius_variation,
+		"pollution_color": Color(
+			pollution_color.r,
+			pollution_color.g,
+			pollution_color.b,
+			1.0,
+		),
+		"heat_pollution_color": heat_color,
+	})
+	_pollution_field.set_water_texture(get_water_texture())
+	_pollution_field.set_paused(_paused)
 
 
 func _apply_trail_draw_parameters() -> void:
@@ -5389,7 +6981,19 @@ func _apply_interaction_geometry() -> void:
 	for extractor: GPUFlowInteractionPolygon in _regime_extractor_polygons:
 		if extractor != null and extractor.enabled:
 			active_polygons.append(extractor)
-	var explicit_extractors_active := not active_polygons.is_empty()
+	var explicit_extractor_regime_active := false
+	var active_states := Array(_regime_snapshot.get("active_states", []))
+	for definition: Dictionary in BasinBudgetModel.extractor_definitions():
+		var regime_index := int(definition.get("regime_index", -1))
+		if (
+			regime_index >= 0
+			and regime_index < active_states.size()
+			and bool(active_states[regime_index])
+		):
+			explicit_extractor_regime_active = true
+			break
+	if _watershed_ai_regime_is_exclusive(_regime_snapshot):
+		explicit_extractor_regime_active = true
 	for polygon: GPUFlowInteractionPolygon in _gpu_interaction_polygons():
 		var regime_managed := _is_regime_managed_interaction_polygon(polygon)
 		# Keep controller-owned disabled records packed. Their enabled flag stays
@@ -5403,7 +7007,7 @@ func _apply_interaction_geometry() -> void:
 		# extractors are active, omitting those generic drains prevents double
 		# withdrawal and keeps the bounded eight-polygon GPU contract.
 		if (
-			explicit_extractors_active
+			explicit_extractor_regime_active
 			and polygon.mode == GPUFlowInteractionPolygon.Mode.ABSORB
 			and regime_managed
 		):
@@ -5907,6 +7511,9 @@ func _build_salmon() -> void:
 	var release_callback := Callable(self, &"_on_salmon_released")
 	if not _salmon_school.salmon_released.is_connected(release_callback):
 		_salmon_school.salmon_released.connect(release_callback)
+	var cohort_callback := Callable(self, &"_on_salmon_cohorts_released")
+	if not _salmon_school.salmon_cohorts_released.is_connected(cohort_callback):
+		_salmon_school.salmon_cohorts_released.connect(cohort_callback)
 
 
 func _on_salmon_released(
@@ -5919,6 +7526,305 @@ func _on_salmon_released(
 		requested_count,
 		scheduled_count,
 		release_serial
+	)
+
+
+func _on_salmon_cohorts_released(
+	cohorts: Array,
+	requested_count: int,
+	scheduled_count: int,
+	survivor_count: int,
+	release_serial: int,
+) -> void:
+	salmon_cohorts_released.emit(
+		screen_id,
+		cohorts.duplicate(true),
+		requested_count,
+		scheduled_count,
+		survivor_count,
+		release_serial,
+	)
+	if (
+		screen_id != CONFLUENCE_DELTA_SCREEN_ID
+		or not delta_confluence_enabled
+		or _confluence_import_in_progress
+	):
+		return
+	_confluence_last_salmon_handoffs = []
+	for cohort_variant: Variant in cohorts:
+		if not cohort_variant is Dictionary:
+			continue
+		var cohort: Dictionary = cohort_variant
+		var destination := String(cohort.get(
+			"destination_screen",
+			cohort.get("source_screen", ""),
+		)).strip_edges()
+		var destination_index := _confluence_source_index(destination)
+		if destination_index < 0:
+			continue
+		var survivors := clampi(
+			int(cohort.get(
+				"survivor_count",
+				cohort.get("scheduled_survivor_count", 0),
+			)),
+			0,
+			CONFLUENCE_SALMON_COHORT_SIZE,
+		)
+		var destination_anchor: Vector2 = cohort.get(
+			"destination_anchor_pixels",
+			Vector2(
+				CONFLUENCE_SOURCE_RECORDS[destination_index].x,
+				CONFLUENCE_SOURCE_RECORDS[destination_index].y,
+			),
+		)
+		var captured_base_speed := maxf(
+			float(cohort.get(
+				"captured_base_speed_pixels",
+				_salmon_school.upstream_speed_pixels,
+			)),
+			1.0,
+		)
+		var group_offset_seconds := maxf(
+			float(cohort.get("group_offset_seconds", 0.0)),
+			0.0,
+		)
+		var transit_metrics := _delta_salmon_transit_metrics(
+			destination_index,
+			captured_base_speed,
+			group_offset_seconds,
+		)
+		var handoff := {
+			"destination_screen": destination,
+			"destination_anchor_pixels": destination_anchor,
+			"origin_count": CONFLUENCE_SALMON_COHORT_SIZE,
+			"survivor_count": survivors,
+			"death_count": CONFLUENCE_SALMON_COHORT_SIZE - survivors,
+			"release_serial": release_serial,
+			"transit_seconds": float(transit_metrics["transit_seconds"]),
+			"transit_distance_pixels": float(
+				transit_metrics["transit_distance_pixels"]
+			),
+			"transit_speed_pixels": float(transit_metrics["transit_speed_pixels"]),
+			"trunk_distance_pixels": float(transit_metrics["trunk_distance_pixels"]),
+			"route_arc_length_pixels": float(
+				transit_metrics["route_arc_length_pixels"]
+			),
+			"route_control_polygon_length_pixels": float(
+				transit_metrics["route_control_polygon_length_pixels"]
+			),
+			"head_arrival_seconds": float(
+				transit_metrics["head_arrival_seconds"]
+			),
+			"spawn_stagger_seconds": float(
+				transit_metrics["spawn_stagger_seconds"]
+			),
+			"group_offset_seconds": float(
+				transit_metrics["group_offset_seconds"]
+			),
+			"trail_clear_seconds": float(
+				transit_metrics["trail_clear_seconds"]
+			),
+			"gpu_start_guard_seconds": float(
+				transit_metrics["gpu_start_guard_seconds"]
+			),
+			"edge_clear_distance_pixels": float(
+				transit_metrics["edge_clear_distance_pixels"]
+			),
+			"route_arc_sample_count": CONFLUENCE_SALMON_ROUTE_ARC_SAMPLES,
+		}
+		_confluence_last_salmon_handoffs.append(handoff.duplicate(true))
+		if survivors <= 0:
+			continue
+		handoff["remaining_seconds"] = float(handoff["transit_seconds"])
+		while (
+			_pending_salmon_handoffs.size()
+			>= CONFLUENCE_SALMON_HANDOFF_LIMIT
+		):
+			_pending_salmon_handoffs.remove_at(0)
+		_pending_salmon_handoffs.append(handoff)
+
+
+func _delta_salmon_transit_metrics(
+	destination_index: int,
+	captured_base_speed_pixels: float = 0.0,
+	group_offset_seconds: float = 0.0,
+) -> Dictionary:
+	if destination_index < 0 or destination_index >= CONFLUENCE_SOURCE_COUNT:
+		return {
+			"transit_seconds": 0.1,
+			"transit_distance_pixels": 0.0,
+			"transit_speed_pixels": 1.0,
+			"trunk_distance_pixels": 0.0,
+			"route_arc_length_pixels": 0.0,
+			"route_control_polygon_length_pixels": 0.0,
+			"head_arrival_seconds": 0.0,
+			"spawn_stagger_seconds": 0.0,
+			"group_offset_seconds": 0.0,
+			"trail_clear_seconds": 0.0,
+			"gpu_start_guard_seconds": 0.0,
+			"edge_clear_distance_pixels": 0.0,
+		}
+	var route_arc_length := _delta_salmon_route_arc_length_pixels(destination_index)
+	var route_control_polygon_length := (
+		_delta_salmon_route_control_polygon_length_pixels(destination_index)
+	)
+	var merge_x := CONFLUENCE_MERGE_X_PIXELS[destination_index]
+	var trunk_distance := maxf(STAGE_SIZE.x - merge_x, 0.0)
+	var edge_clear_distance := maxf(salmon_trail_length_pixels, 1.0)
+	var transit_speed := maxf(captured_base_speed_pixels, 1.0)
+	var simulation_fps := 30
+	var spawn_stagger_seconds := 0.0
+	if _salmon_school != null:
+		edge_clear_distance = maxf(float(_salmon_school.streak_length_pixels), 1.0)
+		if captured_base_speed_pixels <= 0.0:
+			transit_speed = maxf(float(_salmon_school.upstream_speed_pixels), 1.0)
+		simulation_fps = maxi(int(_salmon_school.simulation_fps), 1)
+		spawn_stagger_seconds = maxf(
+			float(_salmon_school.delta_route_spawn_stagger_seconds),
+			0.0,
+		)
+	# The shader uses this same finite schedule and captured release-time speed:
+	# authoritative trunk travel, then t=1..0 over the cubic control polygon.
+	# Wait for the immutable final segment to expire and retain a render-start
+	# guard so the CPU clock cannot beat command-texture visibility by one frame.
+	var head_arrival_seconds := (
+		maxf(group_offset_seconds, 0.0)
+		+ spawn_stagger_seconds
+		+ (trunk_distance + route_control_polygon_length) / transit_speed
+	)
+	var trail_clear_seconds := maxf(
+		edge_clear_distance / maxf(
+			minf(transit_speed, salmon_min_speed_pixels),
+			1.0,
+		),
+		1.0 / float(simulation_fps),
+	)
+	var transit_seconds := (
+		head_arrival_seconds
+		+ trail_clear_seconds
+		+ CONFLUENCE_SALMON_GPU_START_GUARD_SECONDS
+	)
+	var transit_distance := transit_seconds * transit_speed
+	return {
+		"transit_seconds": maxf(transit_seconds, 0.1),
+		"transit_distance_pixels": transit_distance,
+		"transit_speed_pixels": transit_speed,
+		"trunk_distance_pixels": trunk_distance,
+		"route_arc_length_pixels": route_arc_length,
+		"route_control_polygon_length_pixels": route_control_polygon_length,
+		"head_arrival_seconds": head_arrival_seconds,
+		"spawn_stagger_seconds": spawn_stagger_seconds,
+		"group_offset_seconds": maxf(group_offset_seconds, 0.0),
+		"trail_clear_seconds": trail_clear_seconds,
+		"gpu_start_guard_seconds": CONFLUENCE_SALMON_GPU_START_GUARD_SECONDS,
+		"edge_clear_distance_pixels": edge_clear_distance,
+	}
+
+
+func _delta_salmon_route_control_polygon_length_pixels(source_index: int) -> float:
+	if source_index < 0 or source_index >= CONFLUENCE_SOURCE_COUNT:
+		return 0.0
+	var source_record := CONFLUENCE_SOURCE_RECORDS[source_index]
+	var route_start := Vector2(source_record.x, source_record.y)
+	var source_direction := Vector2(source_record.z, source_record.w).normalized()
+	var route_end := Vector2(
+		CONFLUENCE_MERGE_X_PIXELS[source_index],
+		clampf(confluence_trunk_center_y_pixels, 0.0, STAGE_SIZE.y),
+	)
+	var turn_handle := maxf(confluence_entry_turn_pixels, 60.0)
+	var horizontal_source := absf(source_direction.x) > 0.5
+	var horizontal_handle := minf(
+		turn_handle,
+		maxf(absf(route_end.y - route_start.y) * 0.5, 180.0),
+	)
+	var inlet_handle := (
+		horizontal_handle
+		if horizontal_source
+		else minf(
+			turn_handle,
+			maxf(absf(route_end.y - route_start.y) * 0.45, 60.0),
+		)
+	)
+	var outlet_handle := (
+		horizontal_handle
+		if horizontal_source
+		else minf(turn_handle, 180.0)
+	)
+	var control_1 := route_start + source_direction * inlet_handle
+	var control_2 := route_end - Vector2(outlet_handle, 0.0)
+	return (
+		route_start.distance_to(control_1)
+		+ control_1.distance_to(control_2)
+		+ control_2.distance_to(route_end)
+	)
+
+
+func _delta_salmon_route_arc_length_pixels(source_index: int) -> float:
+	if source_index < 0 or source_index >= CONFLUENCE_SOURCE_COUNT:
+		return 0.0
+	var source_record := CONFLUENCE_SOURCE_RECORDS[source_index]
+	var route_start := Vector2(source_record.x, source_record.y)
+	var source_direction := Vector2(source_record.z, source_record.w).normalized()
+	var route_end := Vector2(
+		CONFLUENCE_MERGE_X_PIXELS[source_index],
+		clampf(confluence_trunk_center_y_pixels, 0.0, STAGE_SIZE.y),
+	)
+	# Keep these control-handle rules identical to gpu_flow_particle.gdshader.
+	var turn_handle := maxf(confluence_entry_turn_pixels, 60.0)
+	var horizontal_source := absf(source_direction.x) > 0.5
+	# A larger vertical span needs symmetric horizontal handles to preserve the
+	# bounded-radius turn at both ends without moving the fixed merge point.
+	var horizontal_handle := minf(
+		turn_handle,
+		maxf(absf(route_end.y - route_start.y) * 0.5, 180.0),
+	)
+	var inlet_handle := (
+		horizontal_handle
+		if horizontal_source
+		else minf(
+			turn_handle,
+			maxf(absf(route_end.y - route_start.y) * 0.45, 60.0),
+		)
+	)
+	var outlet_handle := (
+		horizontal_handle
+		if horizontal_source
+		else minf(turn_handle, 180.0)
+	)
+	var control_1 := route_start + source_direction * inlet_handle
+	var control_2 := route_end - Vector2(outlet_handle, 0.0)
+	var previous_point := route_start
+	var arc_length := 0.0
+	for sample_index in range(1, CONFLUENCE_SALMON_ROUTE_ARC_SAMPLES + 1):
+		var progress := (
+			float(sample_index) / float(CONFLUENCE_SALMON_ROUTE_ARC_SAMPLES)
+		)
+		var route_point := _confluence_cubic_point(
+			route_start,
+			control_1,
+			control_2,
+			route_end,
+			progress,
+		)
+		arc_length += previous_point.distance_to(route_point)
+		previous_point = route_point
+	return arc_length
+
+
+func _confluence_cubic_point(
+	point_0: Vector2,
+	point_1: Vector2,
+	point_2: Vector2,
+	point_3: Vector2,
+	progress: float,
+) -> Vector2:
+	var one_minus := 1.0 - clampf(progress, 0.0, 1.0)
+	var clamped_progress := clampf(progress, 0.0, 1.0)
+	return (
+		point_0 * one_minus * one_minus * one_minus
+		+ point_1 * 3.0 * one_minus * one_minus * clamped_progress
+		+ point_2 * 3.0 * one_minus * clamped_progress * clamped_progress
+		+ point_3 * clamped_progress * clamped_progress * clamped_progress
 	)
 
 
@@ -5949,6 +7855,71 @@ func _on_leaves_released(
 		scheduled_total_count,
 		release_serial
 	)
+	_publish_confluence_particle_batch(
+		"leaf",
+		"mixed",
+		scheduled_total_count,
+	)
+
+
+func _build_pollution() -> void:
+	_pollution_field = POLLUTION_SCRIPT.new() as GPUPollution2D
+	_pollution_field.name = "GPUPollutionField"
+	# Pollution follows the water texture but must never feed its own disks
+	# back into occupancy, so it remains a sibling of WaterOnlyViewport.
+	add_child(_pollution_field)
+	_pollution_field.set_water_texture(get_water_texture())
+	var release_callback := Callable(self, &"_on_pollution_released")
+	if not _pollution_field.pollution_released.is_connected(release_callback):
+		_pollution_field.pollution_released.connect(release_callback)
+
+
+func _on_pollution_released(
+	requested_count: int,
+	scheduled_count: int,
+	release_serial: int,
+	source_ids: Array,
+) -> void:
+	pollution_released.emit(
+		screen_id,
+		requested_count,
+		scheduled_count,
+		release_serial,
+		source_ids.duplicate(),
+	)
+	if (
+		_confluence_import_in_progress
+		or screen_id == CONFLUENCE_DELTA_SCREEN_ID
+		or _pollution_field == null
+	):
+		return
+	var source_classes: Dictionary = {}
+	for source: Dictionary in _pollution_sources:
+		source_classes[String(source.get("source_id", ""))] = (
+			"heat" if String(source.get("kind", "")) == "data_center"
+			else "material"
+		)
+	var summary := _pollution_field.runtime_summary()
+	var last_counts_variant: Variant = summary.get(
+		"last_source_release_counts",
+		{},
+	)
+	if not last_counts_variant is Dictionary:
+		return
+	var subtype_counts := {"material": 0, "heat": 0}
+	for source_variant: Variant in last_counts_variant:
+		var source_id := String(source_variant)
+		var subtype := String(source_classes.get(source_id, "material"))
+		subtype_counts[subtype] = (
+			int(subtype_counts.get(subtype, 0))
+			+ int(Dictionary(last_counts_variant)[source_variant])
+		)
+	for subtype: String in ["material", "heat"]:
+		_publish_confluence_particle_batch(
+			"pollution",
+			subtype,
+			int(subtype_counts[subtype]),
+		)
 
 
 func _build_overlay() -> void:
@@ -6455,24 +8426,24 @@ func _update_delta_tide_timeline() -> void:
 	)
 	var row_position := year_progress * float(row_count)
 	var row_index := mini(floori(row_position), row_count - 1)
-	var following_index := (row_index + 1) % row_count
 	var row_fraction := row_position - floorf(row_position)
 	_delta_tide_row_index = row_index
 	_delta_tide_row_fraction = row_fraction
-	_delta_tide_current_height_m = lerpf(
-		float(_delta_tide_heights[row_index]),
-		float(_delta_tide_heights[following_index]),
-		row_fraction,
+	_delta_tide_current_height_m = BASIN_BUDGET_OVERLAY_SCRIPT.wrapped_monotone_cubic_sample(
+		_delta_tide_heights,
+		row_position,
 	)
-	_delta_tide_current_normalized_height = lerpf(
-		float(_delta_tide_normalized_heights[row_index]),
-		float(_delta_tide_normalized_heights[following_index]),
-		row_fraction,
+	_delta_tide_current_normalized_height = BASIN_BUDGET_OVERLAY_SCRIPT.wrapped_monotone_cubic_sample(
+		_delta_tide_normalized_heights,
+		row_position,
+		0.0,
+		1.0,
 	)
-	_delta_tide_current_normalized_velocity = lerpf(
-		float(_delta_tide_normalized_velocities[row_index]),
-		float(_delta_tide_normalized_velocities[following_index]),
-		row_fraction,
+	_delta_tide_current_normalized_velocity = BASIN_BUDGET_OVERLAY_SCRIPT.wrapped_monotone_cubic_sample(
+		_delta_tide_normalized_velocities,
+		row_position,
+		-1.0,
+		1.0,
 	)
 	_configure_basin_budget_overlay()
 
@@ -6775,11 +8746,7 @@ func _align_model_elapsed_to_current_day() -> void:
 func _apply_model_date(emit_date_signal: bool = true) -> void:
 	if _model_date_label == null:
 		return
-	var date_time := _format_model_date_time(
-		_model_day_index,
-		_model_minute_of_day
-	)
-	_model_date_label.text = date_time
+	_model_date_label.text = _format_model_display_date(_model_day_index)
 	_model_date_label.visible = stage_date_visible
 	_center_label_on_rotated_centerline(
 		_model_date_label,
@@ -6820,6 +8787,16 @@ func _format_model_date(day_index: int) -> String:
 	return "12/31"
 
 
+func _format_model_display_date(day_index: int) -> String:
+	var normalized_day := posmod(day_index, MODEL_CALENDAR_DAY_COUNT)
+	var display_year := (
+		MODEL_DISPLAY_WATER_YEAR_START
+		if normalized_day >= MODEL_DISPLAY_WATER_YEAR_START_DAY_INDEX
+		else MODEL_DISPLAY_WATER_YEAR_START + 1
+	)
+	return "%04d/%s" % [display_year, _format_model_date(normalized_day)]
+
+
 func _format_model_date_time(day_index: int, minute_of_day: int) -> String:
 	var clamped_minute: int = clampi(
 		minute_of_day,
@@ -6835,8 +8812,9 @@ func _parse_model_date_time(model_date_time: String) -> Vector2i:
 	var normalized := model_date_time.strip_edges()
 	if normalized.is_empty():
 		return Vector2i(-1, -1)
-	# Accept the earlier slash separator as input compatibility, but always render
-	# the clearer canonical form MM/DD-HH:MM.
+	# Accept the earlier slash separator as input compatibility. Machine-facing
+	# clock serialization retains the canonical MM/DD-HH:MM form even though the
+	# visible label is date-only.
 	var date_and_time := normalized.split("-", false, 1)
 	if date_and_time.size() == 1:
 		var legacy_parts := normalized.split("/", false)

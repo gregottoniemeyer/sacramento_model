@@ -308,6 +308,9 @@ void process() {
 	);
 	bool control_enabled = control.a >= 0.5 && control.r > 0.5;
 	bool generation_changed = abs(control.r - CUSTOM.x) > 0.25;
+	bool explicit_source = control.a >= 2.5;
+	vec2 source_position = vec2(control.g, command.r);
+	vec2 source_inward_direction = safe_direction(vec2(command.g, command.b));
 
 	if (!control_enabled) {
 		CUSTOM = vec4(control.r, STATE_INACTIVE, 0.0, control.g);
@@ -335,6 +338,19 @@ void process() {
 	TRANSFORM[0].xy = vec2(leaf_diameter_pixels, 0.0);
 	TRANSFORM[1].xy = vec2(0.0, leaf_diameter_pixels);
 	if (generation_changed) {
+		if (explicit_source) {
+			// Exact confluence entries remain parked at their supplied point. The
+			// first generation tick is hidden so circular slot reuse cannot draw an
+			// interpolation bridge from the retired command.
+			CUSTOM = vec4(
+				control.r,
+				STATE_SCHEDULED,
+				max(command.a, 0.0),
+				0.0
+			);
+			TRANSFORM[3].xy = source_position;
+			VELOCITY = vec3(0.0);
+		} else {
 		float safe_margin = min(
 			max(
 				max(contact_radius_pixels, leaf_radius_pixels),
@@ -358,6 +374,7 @@ void process() {
 		CUSTOM = vec4(control.r, STATE_SCHEDULED, max(command.r, 0.0), spawn_x);
 		TRANSFORM[3].xy = vec2(spawn_x, scheduled_y);
 		VELOCITY = vec3(0.0);
+		}
 	}
 
 	COLOR = leaf_color(control.b);
@@ -367,6 +384,19 @@ void process() {
 		} else {
 			CUSTOM.z -= DELTA;
 			if (CUSTOM.z <= 0.0) {
+			if (explicit_source) {
+				CUSTOM.y = STATE_FREE;
+				CUSTOM.z = 0.0;
+				CUSTOM.w = atan(
+					source_inward_direction.y,
+					source_inward_direction.x
+				);
+				TRANSFORM[3].xy = source_position;
+				VELOCITY = vec3(
+					source_inward_direction * free_speed_pixels * speed_factor,
+					0.0
+				);
+			} else {
 			float spawn_y = (
 				bank_direction > 0.0
 					? -leaf_radius_pixels
@@ -380,6 +410,7 @@ void process() {
 				bank_direction * free_speed_pixels * speed_factor,
 				0.0
 			);
+			}
 			} else {
 				COLOR = vec4(0.0);
 			}
@@ -387,6 +418,107 @@ void process() {
 	}
 		if (abs(CUSTOM.y - STATE_FREE) < 0.25) {
 			vec2 point = TRANSFORM[3].xy;
+			if (explicit_source) {
+				if (touches_water(point)) {
+					// Preserve the supplied/steered confluence heading at the decisive
+					// latch. The normal follower can then bend it along the local water.
+					vec2 latch_direction = source_inward_direction;
+					if (length(VELOCITY.xy) > 0.000001) {
+						latch_direction = safe_direction(VELOCITY.xy);
+					}
+					CUSTOM.y = STATE_WATER_LATCHED;
+					CUSTOM.z = hash11(
+						float(INDEX) * 19.731 + control.r * 0.419
+					) * max(follow_resample_interval_seconds, DELTA);
+					CUSTOM.w = atan(latch_direction.y, latch_direction.x);
+					VELOCITY = vec3(
+						latch_direction * flow_speed_pixels * speed_factor,
+						0.0
+					);
+				} else {
+					float inward_distance = max(
+						dot(
+							point - source_position,
+							source_inward_direction
+						),
+						0.0
+					);
+					// A left source receives a half-width search span while top and
+					// bottom retain the legacy half-height minimum. Diagonal commands
+					// use the projected half-stage span along their supplied direction.
+					float source_center_span = dot(
+						abs(source_inward_direction),
+						stage_size * 0.5
+					);
+					float search_distance_limit = max(
+						max(free_search_max_distance_pixels, source_center_span),
+						1.0
+					);
+					if (inward_distance >= search_distance_limit) {
+						CUSTOM.y = STATE_STOPPED_FADING;
+						CUSTOM.z = 0.0;
+						CUSTOM.w = 0.0;
+						VELOCITY = vec3(0.0);
+					} else {
+						CUSTOM.z += DELTA;
+						vec3 nearby_water = find_nearby_water_direction(
+							point,
+							source_inward_direction
+						);
+						vec2 free_direction = source_inward_direction;
+						if (nearby_water.z >= 0.5) {
+							free_direction = safe_direction(mix(
+								source_inward_direction,
+								nearby_water.xy,
+								clamp(
+									free_water_steering_strength,
+									0.0,
+									1.0
+								)
+							));
+							float inward_alignment = dot(
+								free_direction,
+								source_inward_direction
+							);
+							if (inward_alignment < 0.20) {
+								free_direction = safe_direction(
+									free_direction
+									+ source_inward_direction
+										* (0.20 - inward_alignment)
+								);
+							}
+						}
+						vec2 steering_velocity = (
+							free_direction * free_speed_pixels * speed_factor
+						);
+						float inward_step = max(
+							dot(
+								steering_velocity,
+								source_inward_direction
+							) * DELTA,
+							0.0
+						);
+						float remaining_inward_distance = max(
+							search_distance_limit - inward_distance,
+							0.0
+						);
+						float movement_scale = (
+							inward_step > 0.000001
+								? min(
+									remaining_inward_distance / inward_step,
+									1.0
+								)
+								: 1.0
+						);
+						float movement_delta = DELTA * movement_scale;
+						vec2 next_point = (
+							point + steering_velocity * movement_delta
+						);
+						VELOCITY = vec3(steering_velocity, 0.0);
+						TRANSFORM[3].xy = next_point;
+					}
+				}
+			} else {
 			if (touches_water(point)) {
 			// The state transition is decisive and position-preserving. All attached
 			// leaves adopt the known downstream (+X) orientation, regardless of bank.
@@ -497,6 +629,7 @@ void process() {
 				);
 				VELOCITY = vec3(free_velocity, 0.0);
 				TRANSFORM[3].xy = next_point;
+					}
 				}
 			}
 		} else if (abs(CUSTOM.y - STATE_WATER_LATCHED) < 0.25) {

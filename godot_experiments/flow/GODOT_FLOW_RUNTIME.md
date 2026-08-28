@@ -41,7 +41,7 @@ there is no separate temperature node. None of it is part of the debug overlay,
 so `V` does not
 hide it.
 
-Salmon and leaves sample this water texture's alpha directly in their
+Salmon, leaves, and pollution sample this water texture's alpha directly in their
 particle-process shaders. No frame is copied to an `Image`, no CPU occupancy
 mask is generated, and no GPU particle state is read back. Salmon use a fixed
 240 x 24 native-pixel contact field for both contact and full 2D upstream
@@ -182,13 +182,20 @@ interaction power.
 
 | Regime | Current per-river matrix and schedule |
 |---|---|
-| Kinship | All: `R 0/c0`, `Dr 0/p0`, `Ob 0/p0`, `Sh 1`; salmon `11/01–01/31` daily, leaves `10/01–10/31` every 2 days. |
+| Kinship | All: `R 0/c0`, `Dr 0/p0`, `Ob 0/p0`, `Sh 1`; Sacramento River winter-run Chinook salmon `04/15–08/15` daily, leaves `10/01–10/31` every 2 days. |
 | Agriculture (`ranch`) | `R .20/c1` S/Mi/F/A, `.20/c2` Mc/D, `0/c0` C; `Dr .75` and `Ob .10` all; `Sh .30` S/Mc/C, `0` elsewhere. Positive-area gates open `06/01–08/31`; aperture blank. |
 | Gold Rush | F/A/D only: `R .10` with count blank, `Dr .30/p1`, `Ob .30/p1`, `Sh 1`, and the Kinship salmon/leaf seasons. S/Mc/C/Mi are blank. |
 | Water Projects | S/Mc/F/A/D: `R .33/c1`, `Dr .50`; C/Mi: explicit `R 0/c0`, `Dr 0`; five of seven whole-river stages is the nearest discrete allocation to 75%; all: `Sh 0`, leaves `0`; no gate schedule. |
 | Hydropower | S/Mc/Mi/F/A/D: `R .50/c2`, aperture `.33`, open `01/01–12/31`; C: `R 0/c0`, no gate. `Dr .25` all; `Sh .20` Mc/C and `0` elsewhere. |
 | Tech | All: `R .75/c2`, `Dr .75/p1`, `Sh 0`; gate, obstacle, salmon, and leaf fields blank. |
-| Watershed | The authored profile remains a no-op until a valid `watershed-ai/2` seasonal allocation is applied. Selecting Watershed clears every other regime. |
+| Watershed | On a cold installation the authored profile is a no-op until the first valid `watershed-ai/2` allocation arrives. Thereafter each screen immediately replays its persisted last-successful allocation while the current model-day decision is delivered. Selecting Watershed clears every other regime. |
+
+The salmon animation moves upstream and uses the Sacramento River winter-run
+spawning window. Adult winter-run Chinook migrate upstream from roughly
+mid-December through early August, then spawn from mid-April through August,
+peaking in June and July. Downstream migrants are the next generation of
+juveniles, broadly present from July through March; that opposite direction is
+not currently rendered and would require its own schedule and movement mode.
 
 Area fractions are deterministic admission/encounter budgets, not literal
 geometry or guaranteed screen-area coverage. A positive drain or obstacle
@@ -389,9 +396,11 @@ and text remain outside `WaterOnlyViewport`, so their alpha never counts as
 water, and outside `ReservoirAndStatusOverlay`, so the `V` debug toggle does not
 affect them.
 
-`ModelDate` displays a zero-padded `MM/DD-HH:MM` from a 365-day, non-leap
-calendar. Every production wrapper sets `model_start_day_index = 181`, so its
-cycle begins at `07/01-00:00`, runs through June 30, and wraps to July 1. The
+`ModelDate` displays only the zero-padded water-year date `YYYY/MM/DD`. The
+production data year is July 1, 2025 through June 30, 2026, so the visible year
+changes at January 1 while the 365-day, non-leap model cycle continues. Every
+production wrapper sets `model_start_day_index = 181`, so its underlying clock
+begins at `07/01-00:00`, runs through June 30, and wraps to July 1. The
 shared internal clock defaults to one model year in 720 running seconds, or
 21,600 rendered frames at the production 30 FPS cap. Time is derived from the
 continuous year fraction rather than accumulated integer frame counts. When
@@ -411,14 +420,42 @@ auto-advance setting.
 Each wrapper also loads one 720-row watershed file from
 `res://flow/data/water_pipeline/`. At the default year duration, each row spans
 one running second and a uniform 730 model minutes (12 hours 10 minutes). Since
-the text files contain no timestamps, the displayed `HH:MM` is synthetic uniform
-model time, not an observed timestamp. The atmospheric input rate is a
+the text files contain no timestamps, the internal `HH:MM` retained by the
+timeline and control API is synthetic uniform model time, not an observed
+timestamp. The atmospheric input rate is a
 per-update linear interpolation between adjacent `norm` rows, including the
 last-to-first wrap. `norm` maps directly from `0.0…1.0` to the single basin
 input. Active regimes contribute explicit extraction fractions, capped at 100
 percent. The one modeled output is:
 
 `Delta remainder = basin input × (1 − total extraction fraction)`
+
+### Delta particle confluence
+
+The Delta is also the visual confluence for the other six stages. It uses
+2,000 fixed water heads and 150,000 immutable segment slots, while upstream
+stages retain 1,000/75,000. The edge assignments are Shasta left 8, McCloud
+left 2, Mill bottom 3, Cottonwood bottom 10, Feather top 5, and American top
+12. Shasta's canvas inlet is `(0, 120)` and points right; Feather's is
+`(600, 0)` and points down. Cubic Bézier paths
+meet a shared horizontal trunk at canvas `y = 540` with
+rightward endpoint tangents. Merge X positions are 480 for the paired left
+rivers, then 720, 960, 1440, and 1680. Shasta's larger vertical span uses
+symmetric 210-pixel horizontal handles, yielding controls `(0,120)`,
+`(210,120)`, `(270,540)`, `(480,540)` while retaining its fixed merge. A fixed
+three-step closest-curve solve keeps the turns smooth. Each inlet's full width
+is the delayed source-screen exit width. The ordinary source band spans canvas
+Y `28..1052`, so the CPU contract is `exit_width_pixels = 1024 * flow_rate`.
+The pull bridge installs its first valid sample as a steady startup baseline,
+then delays each later complete water snapshot by one 1,920-pixel source
+traversal. Legacy/direct packets without that optional field derive the same
+width from their received rate. Two packed `vec4` uniforms carry all six widths
+without GPU readback. Quintic 120-pixel joins widen the trunk by the square root
+of the summed source-width squares, with the existing 42-pixel floor and a
+1,024-pixel channel cap. Because this water is rendered inside
+`WaterOnlyViewport`, imported leaves and pollution follow it. Six 25-salmon
+destination cohorts swim the opposite direction; only their Delta survivors
+are handed upstream.
 
 The modeled input uses hydrologic memory before this equation. A trailing,
 cyclic 30-day running average spans 59 of the 720 annual samples. The runtime
@@ -433,23 +470,41 @@ remainder. The raw and scaled columns never multiply the normalized input.
 On the Delta, Kinship floods the central floodplain using borderless 45-degree
 blue hatching with 3-pixel round-capped lines, 6-pixel gaps, fixed 33% alpha,
 and a 6-pixel label knockout. Every regime shows incoming Bay tide water as a
-right-anchored area. Tide height and velocity come from
+right-anchored smooth cubic polygon. Tide height and velocity come from
 `res://flow/data/tide/sf_bay_9414290_tide_hourly_2025_2026.txt`: all 8,760 NOAA
 CO-OPS hourly predictions for San Francisco station `9414290`, covering the
 same half-open July 1, 2025–June 30, 2026 annual window. The wrapped FIFO window
 shows exactly 96 hours, with 48 past hours above the centered current time and
-48 future hours below it. Its polygon has a tide-shaped left boundary and a
-41–306 pixel reach. White horizontal hatches fill the area at fixed 20% alpha;
-they are 3 pixels wide with 6-pixel gaps. No solid fill, outline, label, or
-arrowhead is drawn. The tide renders at Z=-60 below all text and advances with
-the shared model-year timeline. Delta budget percentages use the Barlow
-Condensed font's tabular-numeral OpenType feature. Active extractor and
+48 future hours below it. Periodic monotone cubic Hermite interpolation keeps
+all 97 hourly values as exact knots with C1 continuity, including the annual
+wrap, and clamps normalized values to `[0, 1]`. The curved boundary is sampled
+at a fixed eight subdivisions per hour: 769 points spaced 1.40625 pixels apart
+vertically. It maps tide height to a 41–306 pixel reach leftward from the right
+edge. A subtle white 8% fill closes against the right edge; its separate white
+outline is 3 pixels wide, antialiased, and fixed at 80% alpha. No hatches,
+circular caps, label, or arrowhead are drawn. The tide renders at Z=-60 below
+all text and advances with the shared model-year timeline. Delta budget
+percentages use the Barlow Condensed font's tabular-numeral OpenType feature.
+Active extractor and
 city geometry is borderless 45-degree hatching with 3-pixel round-capped lines,
 6-pixel gaps, and fixed 33% alpha, rendered below the water; every overlay
-label is rotated -90 degrees. The internal physics name remains `obstacle` for
+label is rotated -90 degrees. Fields are green, Mines remain gold, and Data
+Center hatches and labels use the same `#FF0000` RGB as their heat-pollution
+disks. The internal physics name remains `obstacle` for
 protocol compatibility, but the visible term is City. The Delta budget legend
 has no background fill. Geometry labels use transparent hatch knockouts, with
 every hatch segment stopping six pixels before the measured text bounds.
+Gold Rush Mines and Tech Data Centers now use a discrete 50% site cohort rather
+than resizing rectangles. Every visible site starts at its full authored size.
+At activation, Mines appear on alternating even stage ranks (4 of 7 screens),
+while every screen shows exactly one of its two Data Centers, alternating north
+and east. After 30 unpaused real seconds, all remaining authored Mine and Data
+Center sites pop into place in one update. Pause freezes each regime's timer;
+unrelated regime changes preserve it, and a genuine off/on transition restarts
+the 50% cohort. Only the reveal boundary uploads interaction geometry, which
+also keeps the older Intel Mac at `.11` free of the former 10 Hz resize churn.
+Exclusive AI Watershed bypasses this presentation reveal and applies its
+allocation geometry immediately.
 During exclusive Watershed, the extraction percentage is derived directly
 from the applied agriculture, data-center, and city allocation fractions. If
 no AI allocation has been applied, the panel displays an em dash instead of
@@ -473,11 +528,12 @@ changing downstream trail or interaction physics. Runtime diagnostics include
 `set_model_date_time()`, the compatibility name `set_model_date_mm_dd()`,
 `calendar.date`, and `stage.date` accept canonical `MM/DD-HH:MM`, validate it,
 align the watershed timeline, and disable auto-advance. Date-only `MM/DD` input
-is retained and means midnight; output is always `MM/DD-HH:MM`. Invalid input
-does not change state. These operations update the process-wide authority even
+is retained and means midnight; machine-facing output remains
+`MM/DD-HH:MM`, while the screen label remains `YYYY/MM/DD`. Invalid input does
+not change state. These operations update the process-wide authority even
 when routed through one river, so every active or subsequently loaded stage sees
 the same manual date. `calendar.auto_advance = true` globally resumes from the
-displayed time. None of these paths changes controller routing; continue to
+current model instant. None of these paths changes controller routing; continue to
 target the stable `screen_id`.
 
 The full `reset` action returns the shared timeline to `07/01-00:00` and
@@ -881,17 +937,23 @@ same absolute packet until all of these are true:
   `.applied_state_hash` equal the sent decision and locally computed hash.
 
 That per-screen entry also returns `eligible`, `applied`, `applied_state`,
-`last_error`, counters, `fixed_bank_only`, and `current_observation`. The
+`applied_source`, last-successful ID/hash/cache diagnostics, `last_error`,
+counters, `fixed_bank_only`, and `current_observation`. The
 observation reports the current screen, model date/time, flow, watershed row,
 temperature validity/value, authored and effective gate state/aperture, and
 regime indices/revision for the sender's next decision.
 
 The state overlays only the already resident reservoir, five-drain, and
 two-obstacle banks plus existing shader parameters. It allocates no nodes,
-resources, textures, pools, or new geometry. Leaving exclusive Watershed mode
-clears the AI overlay and restores the stage's captured data-drive setting,
-flow, authored gate value, and the newly active authored/profile/timeline
-behavior.
+resources, textures, pools, or new geometry. An accepted state is also
+atomically persisted per screen at
+`user://watershed_ai/last_successful/<screen_id>.json`. Leaving exclusive
+Watershed clears only the active AI overlay and restores the stage's captured
+data-drive setting, flow, authored gate value, and newly active
+authored/profile/timeline behavior. It retains the last successful state and
+replays it synchronously on the next Watershed entry, including after a process
+restart, until the controller's current exact ID/hash arrives. Invalid cache
+files fail closed to the cold authored baseline.
 
 For the CPU `FlowModel2D`, one message is atomic for `changes` and
 `geometry_ops`: the model validates a duplicated candidate profile and rejects
@@ -965,7 +1027,7 @@ paths are:
 | `stage.grid_spacing_pixels` | `stage_grid_spacing_pixels` | Native spacing, clamped to `1…960` |
 | `stage.grid_line_width_pixels` | `stage_grid_line_width_pixels` | Native width, clamped to `0.1…8` |
 | `stage.grid_color` | `stage_grid_color` | Grid color including alpha |
-| `stage.date_visible` | `stage_date_visible` | `MM/DD-HH:MM` visibility |
+| `stage.date_visible` | `stage_date_visible` | `YYYY/MM/DD` label visibility |
 | `stage.temperature_visible` or `temperature.visible` | `temperature_visible`, `stage_temperature_visible` | Append/remove the measured-temperature suffix in `StageTitle` |
 | `temperature.data_path` or `stage.temperature_data_path` | `temperature_data_path` | Load the temperature table and align it to the current timeline |
 | `temperature.data_column` or `stage.temperature_data_column` | `temperature_data_column` | Select a Celsius series by exact header name |
@@ -994,11 +1056,12 @@ It exposes no geometry-hiding option. No controller state is saved; `start` and
 
 The public `set_model_date_time(model_date_time)` method provides the same
 validated external-time handoff as `calendar.date` and `stage.date`;
-`set_model_date_mm_dd()` remains as a compatibility name. Canonical input and
-output are zero-padded `MM/DD-HH:MM`; date-only `MM/DD` input means midnight.
+`set_model_date_mm_dd()` remains as a compatibility name. Canonical
+machine-facing input and output are zero-padded `MM/DD-HH:MM`; date-only
+`MM/DD` input means midnight, and the visible label remains `YYYY/MM/DD`.
 Invalid input returns `false` without changing state.
 `set_model_calendar_auto_advance(true)` globally resumes the shared clock from
-the displayed time. `reset_model_calendar()` globally resets calendar/data
+the current model instant. `reset_model_calendar()` globally resets calendar/data
 position only and does not reset water or ecology.
 `get_current_watershed_data_row()` returns the addressed river's raw row plus
 its interpolated flow at the shared synthetic model date-time.
@@ -1638,6 +1701,34 @@ process. The stage's `reset` action clears leaf release generations and all
 visible disks on each addressed stage; an immediate new release remains valid
 even while paused.
 
+## Production GPU pollution
+
+Mine and Data Center pollution uses a separate `GPUPollution2D` pool outside
+the water-only viewport. It never consumes a seasonal leaf slot, but it reuses
+the same antialiased disk draw shader and cached local water-following method.
+The pool is fixed at 96 heads. Gold Rush supplies each currently revealed
+`gold_mine` mouth; Tech supplies its currently revealed Data Center mouth(s);
+AI Watershed supplies both live, allocation-scaled Data Center mouths when
+`data_center_fraction > 0`.
+
+While a source is enabled, the stage emits one opaque disk from that source
+once per second. Mine material pollution is grey (`#7F858A`); Data Center heat
+pollution is bright red (`#FF0000`), including Data Centers supplied by AI
+Watershed. The point varies deterministically across, and lies exactly on, the
+current river-facing mouth. A new disk seeks inward toward the stage center,
+using the water texture for contact and nearby-water search. Its first contact
+irreversibly latches it to water, after which it follows the cached local water
+heading. If the bounded inward search reaches the center without finding water,
+the disk parks but remains active: a phased 9 x 9 contact probe checks every
+0.5 seconds for a later water trail. A caught disk immediately latches and
+continues downstream. If no water arrives during the 8-second hold, it fades
+smoothly for 2 seconds and retires, so no icon can remain locked at center.
+A source transition only stops new emissions; it does not erase in-flight
+disks. A latched disk retires only after its complete diameter clears the right
+edge, unless the explicit full `reset` action clears the bounded 96-slot pool.
+`runtime_summary()` exposes active source IDs, mouth geometry, seek/latch/park
+policy, cadence, opacity/retirement policy, and per-source counters.
+
 ## Actions
 
 Actions can be strings:
@@ -1873,7 +1964,7 @@ ends with `FLOW_RUNTIME_SMOKE: PASS`. It deliberately submits one over-budget
 configuration to verify rollback, so the corresponding rejection warning is
 expected.
 
-The retained validation set has six suites:
+The retained validation set has seven suites:
 
 | Suite | Scene |
 |---|---|
@@ -1882,17 +1973,18 @@ The retained validation set has six suites:
 | Reusable production GPU stage | `res://flow/gpu_stage/gpu_flow_stage_smoke.tscn` |
 | GPU salmon | `res://flow/gpu_stage/gpu_salmon_smoke.tscn` |
 | GPU leaves | `res://flow/gpu_stage/gpu_leaf_smoke.tscn` |
+| GPU Mine/Data Center pollution | `res://flow/gpu_stage/gpu_pollution_smoke.tscn` |
 | Seven production wrappers | `res://flow/tests/gpu_stage_scenes_smoke.tscn` |
 
-The four deployed GPU suites verify the water-only viewport, the bounded
+The deployed GPU suites verify the water-only viewport, the bounded
 interaction texture and its propagation to all seven water particle-process
-materials, interaction controller operations, salmon and leaf release/control
+materials, interaction controller operations, salmon, leaf, and pollution release/control
 without CPU readback, fixed circular ecology pools and stable resident
 allocations during their high-volume release stress passes, targeted screen
 isolation, and the shared Barlow Condensed Medium resource. The
-grid, date-time, and watershed
-timeline described above are runtime contracts; the current smoke scenes do not
-assert their complete behavior.
+grid, visible `YYYY/MM/DD` date, and watershed timeline described above are
+runtime contracts; the smoke verifies the date format and retained tabular
+numerals alongside the other presentation invariants.
 The standalone leaf smoke is:
 
 ```sh
@@ -1917,3 +2009,19 @@ unchanged resident node/resource identities and RIDs; the salmon smoke performs
 the corresponding checks across 2,000 release calls. All GPU
 smoke commands and their expected scope are listed in
 `res://flow/gpu_stage/README.md`.
+
+The standalone pollution smoke is:
+
+```sh
+Godot --headless --path . \
+  --rendering-method mobile \
+  --scene res://flow/gpu_stage/gpu_pollution_smoke.tscn
+```
+
+It verifies the 96-slot circular pool, arbitrary exact-mouth source positions,
+one-disk default, per-source counters, opaque grey Mine and bright-red Data
+Center color routing in the existing command texture, reuse of the
+leaf disk renderer, inward seek/contact, irreversible water latch and cached
+following, throttled late-water reacquisition, the bounded 8-second hold plus
+2-second center-miss fade, downstream-edge retirement, pause/reset, and stable
+resident particle/material/texture IDs through command-slot reuse.

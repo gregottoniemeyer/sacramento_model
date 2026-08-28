@@ -15,6 +15,8 @@ signal packet_routed(message: Dictionary, recipient_count: int)
 signal packet_error(reason: String, sender_ip: String, sender_port: int)
 signal transport_error(reason: String)
 
+const ConfluenceTopology = preload("res://flow/confluence_topology.gd")
+
 const PROTOCOL := "ink-flow/1"
 const ACK_PROTOCOL := "ink-flow/1-ack"
 const FLOW_MODELS_GROUP := &"flow_models"
@@ -23,6 +25,8 @@ const DEFAULT_BIND_ADDRESS := "0.0.0.0"
 const UDP_PORT_SETTING := "flow_control/udp_port"
 const BIND_ADDRESS_SETTING := "flow_control/bind_address"
 const MAX_PACKETS_PER_FRAME := 256
+const PARTICLE_CONFLUENCE_BRIDGE_FIELD := "particle_confluence_bridge"
+const PARTICLE_CONFLUENCE_BRIDGE_MAX_EVENTS := 16
 const WATERSHED_AI_CONTROL_SCOPE := "watershed-ai/2"
 const WATERSHED_AI_STATE_PATH := "watershed.ai.state"
 const WATERSHED_REGIME_INDEX := 6
@@ -57,6 +61,16 @@ const PROCESS_GLOBAL_REGIME_PATHS: Array[String] = [
 	"regimes.hydropower",
 	"regimes.tech",
 	"regimes.watershed",
+]
+const PARTICLE_CONFLUENCE_BRIDGE_TOP_LEVEL_FIELDS: Array[String] = [
+	"protocol",
+	"revision",
+	"target",
+	"changes",
+	"geometry_ops",
+	"actions",
+	"metadata",
+	PARTICLE_CONFLUENCE_BRIDGE_FIELD,
 ]
 
 # These fields describe meaningful legacy controller state. Diagnostic values
@@ -261,6 +275,25 @@ func _handle_packet(
 		)
 		if normalized.is_empty():
 			return false
+		if normalized.has(PARTICLE_CONFLUENCE_BRIDGE_FIELD):
+			var bridge_result := _handle_particle_confluence_bridge_request(
+				normalized,
+				sender_ip,
+			)
+			var bridge_accepted := bool(bridge_result.get("accepted", false))
+			var bridge_reason := String(bridge_result.get("reason", ""))
+			if not bridge_accepted:
+				_emit_packet_error(bridge_reason, sender_ip, sender_port)
+			_send_protocol_ack(
+				normalized,
+				sender_ip,
+				sender_port,
+				int(bridge_result.get("recipient_count", 0)),
+				bridge_accepted,
+				bridge_reason,
+				{PARTICLE_CONFLUENCE_BRIDGE_FIELD: bridge_result},
+			)
+			return bridge_accepted
 		var scope_result := _validate_control_scope(normalized)
 		if not bool(scope_result.get("ok", false)):
 			var scope_reason := String(scope_result.get(
@@ -627,6 +660,188 @@ func _apply_process_global_regime_changes(
 	return {"ok": true, "message": routed_message}
 
 
+func _handle_particle_confluence_bridge_request(
+	message: Dictionary,
+	sender_ip: String,
+) -> Dictionary:
+	## The trusted Python process on .11 initiates every LAN exchange, letting
+	## Godot reply through the permission gate. These requests are semantic bus
+	## operations and must never be routed as ordinary stage controls.
+	var particle_bus := get_node_or_null("/root/ParticleConfluenceBus")
+	if (
+		particle_bus == null
+		or not particle_bus.has_method(&"bridge_sender_is_authorized")
+		or not bool(particle_bus.call(&"bridge_sender_is_authorized", sender_ip))
+	):
+		return _particle_bridge_failure(
+			"Particle bridge sender is not authorized.",
+			"",
+		)
+	for field_variant: Variant in message:
+		var field := String(field_variant)
+		if field not in PARTICLE_CONFLUENCE_BRIDGE_TOP_LEVEL_FIELDS:
+			return _particle_bridge_failure(
+				"Particle bridge request cannot contain top-level field '%s'." % field,
+				"",
+			)
+	if (
+		not Dictionary(message.get("changes", {})).is_empty()
+		or not Array(message.get("geometry_ops", [])).is_empty()
+		or not Array(message.get("actions", [])).is_empty()
+	):
+		return _particle_bridge_failure(
+			"Particle bridge request must not contain control mutations.",
+			"",
+		)
+	var metadata_variant: Variant = message.get("metadata", {})
+	if not metadata_variant is Dictionary:
+		return _particle_bridge_failure("Particle bridge metadata is invalid.", "")
+	var request_id := String(Dictionary(metadata_variant).get("request_id", "")).strip_edges()
+	if request_id.is_empty() or request_id.length() > 128:
+		return _particle_bridge_failure(
+			"Particle bridge metadata.request_id must contain 1..128 characters.",
+			"",
+		)
+	var request_variant: Variant = message.get(PARTICLE_CONFLUENCE_BRIDGE_FIELD, {})
+	if not request_variant is Dictionary:
+		return _particle_bridge_failure("Particle bridge body must be a dictionary.", "")
+	var request: Dictionary = request_variant
+	var operation := String(request.get("op", "")).strip_edges().to_lower()
+	var requested_targets := _particle_bridge_screen_ids(message.get("target", []))
+	if requested_targets.is_empty():
+		return _particle_bridge_failure(
+			"Particle bridge target must name canonical screens exactly.",
+			operation,
+		)
+	var local_screens_variant: Variant = particle_bus.call(&"bridge_registered_screen_ids")
+	if not local_screens_variant is Array:
+		return _particle_bridge_failure("Particle confluence stage registry is unavailable.", operation)
+	var local_screens := _particle_bridge_screen_ids(local_screens_variant)
+	match operation:
+		"poll":
+			for field_variant: Variant in request:
+				if String(field_variant) not in ["op", "event_acks", "max_events"]:
+					return _particle_bridge_failure(
+						"Particle bridge poll contains an unsupported field.",
+						operation,
+					)
+			if requested_targets != local_screens:
+				return _particle_bridge_failure(
+					"Particle bridge poll target does not exactly match this host.",
+					operation,
+				)
+			var event_acks_variant: Variant = request.get("event_acks", [])
+			var max_events_variant: Variant = request.get(
+				"max_events",
+				PARTICLE_CONFLUENCE_BRIDGE_MAX_EVENTS,
+			)
+			if (
+				not event_acks_variant is Array
+				or not _particle_bridge_is_integral_number(max_events_variant)
+				or int(max_events_variant) < 1
+				or int(max_events_variant) > PARTICLE_CONFLUENCE_BRIDGE_MAX_EVENTS
+				or not particle_bus.has_method(&"bridge_poll")
+			):
+				return _particle_bridge_failure("Particle bridge poll bounds are invalid.", operation)
+			var poll_variant: Variant = particle_bus.call(
+				&"bridge_poll",
+				event_acks_variant,
+				int(max_events_variant),
+			)
+			if not poll_variant is Dictionary:
+				return _particle_bridge_failure("Particle confluence poll returned no result.", operation)
+			var poll_result: Dictionary = Dictionary(poll_variant).duplicate(true)
+			poll_result["recipient_count"] = (
+				local_screens.size() if bool(poll_result.get("accepted", false)) else 0
+			)
+			return poll_result
+		"deliver":
+			for field_variant: Variant in request:
+				if String(field_variant) not in ["op", "event"]:
+					return _particle_bridge_failure(
+						"Particle bridge delivery contains an unsupported field.",
+						operation,
+					)
+			var event_variant: Variant = request.get("event", {})
+			if not event_variant is Dictionary:
+				return _particle_bridge_failure("Particle bridge event is invalid.", operation)
+			var event: Dictionary = event_variant
+			var event_targets := _particle_bridge_screen_ids(
+				event.get("target_screens", []),
+			)
+			if (
+				event_targets.is_empty()
+				or requested_targets != event_targets
+				or not _particle_bridge_targets_are_local(event_targets, local_screens)
+			):
+				return _particle_bridge_failure(
+					"Particle bridge delivery target is not owned exactly by this host.",
+					operation,
+				)
+			if not particle_bus.has_method(&"bridge_deliver_event"):
+				return _particle_bridge_failure("Particle confluence delivery API is unavailable.", operation)
+			var delivery_variant: Variant = particle_bus.call(
+				&"bridge_deliver_event",
+				event,
+				sender_ip,
+			)
+			if not delivery_variant is Dictionary:
+				return _particle_bridge_failure("Particle confluence delivery returned no result.", operation)
+			var delivery_result: Dictionary = Dictionary(delivery_variant).duplicate(true)
+			delivery_result["recipient_count"] = (
+				event_targets.size()
+				if bool(delivery_result.get("accepted", false))
+				else 0
+			)
+			return delivery_result
+		_:
+			return _particle_bridge_failure("Unknown particle bridge operation.", operation)
+
+
+func _particle_bridge_screen_ids(value: Variant) -> Array[String]:
+	var screens: Array[String] = []
+	var values: Array = value if value is Array else [value]
+	for screen_variant: Variant in values:
+		if not (screen_variant is String or screen_variant is StringName):
+			return []
+		var screen_id := String(screen_variant).strip_edges()
+		if screen_id not in CANONICAL_SCREEN_IDS or screen_id in screens:
+			return []
+		screens.append(screen_id)
+	screens.sort()
+	return screens
+
+
+func _particle_bridge_targets_are_local(
+	targets: Array[String],
+	local_screens: Array[String],
+) -> bool:
+	for target: String in targets:
+		if target not in local_screens:
+			return false
+	return true
+
+
+func _particle_bridge_is_integral_number(value: Variant) -> bool:
+	# Godot's JSON parser may materialize an integer token as TYPE_FLOAT. Accept
+	# either numeric representation only when it is finite and exactly integral;
+	# fractional, NaN, infinity, boolean, and string values remain invalid.
+	return (
+		(typeof(value) == TYPE_INT or typeof(value) == TYPE_FLOAT)
+		and is_finite(float(value))
+		and is_equal_approx(float(value), roundf(float(value)))
+	)
+
+
+func _particle_bridge_failure(reason: String, operation: String) -> Dictionary:
+	return {
+		"accepted": false,
+		"reason": reason,
+		"op": operation,
+		"recipient_count": 0,
+	}
+
+
 func _send_protocol_ack(
 	message: Dictionary,
 	sender_ip: String,
@@ -634,6 +849,7 @@ func _send_protocol_ack(
 	recipient_count: int,
 	accepted: bool = true,
 	reason: String = "",
+	extensions: Dictionary = {},
 ) -> void:
 	if _udp == null or sender_port <= 0 or sender_ip.is_empty():
 		return
@@ -642,6 +858,7 @@ func _send_protocol_ack(
 		recipient_count,
 		accepted,
 		reason,
+		extensions,
 	)
 	var destination_error := _udp.set_dest_address(sender_ip, sender_port)
 	if destination_error != OK:
@@ -667,6 +884,7 @@ func _protocol_acknowledgement(
 	recipient_count: int,
 	accepted: bool = true,
 	reason: String = "",
+	extensions: Dictionary = {},
 ) -> Dictionary:
 	var active_indices: Array = []
 	var regime_revision := 0
@@ -679,7 +897,7 @@ func _protocol_acknowledgement(
 	var request_id := ""
 	if metadata_variant is Dictionary:
 		request_id = String(Dictionary(metadata_variant).get("request_id", ""))
-	return {
+	var acknowledgement := {
 		"protocol": ACK_PROTOCOL,
 		"accepted": accepted,
 		"reason": reason,
@@ -700,6 +918,11 @@ func _protocol_acknowledgement(
 		"regime_active_indices": active_indices,
 		"regime_revision": regime_revision,
 	}
+	for field_variant: Variant in extensions:
+		var field := String(field_variant)
+		if not acknowledgement.has(field):
+			acknowledgement[field] = extensions[field_variant]
+	return acknowledgement
 
 
 func _recipient_screen_ids(target: Variant) -> Array[String]:

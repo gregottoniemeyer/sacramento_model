@@ -3,6 +3,6 @@ schema_version,screen_id,reservoir_area_fraction,reservoir_count,reservoir_gate_
 2,mccloud_pit,,,,,,,,,,,,,,,,,,,Historical review pending; blank overrides inherit master defaults.
 2,cottonwood_creek,,,,,,,,,,,,,,,,,,,Historical review pending; blank overrides inherit master defaults.
 2,mill_creek,,,,,,,,,,,,,,,,,,,Historical review pending; blank overrides inherit master defaults.
-2,feather_river,0.1,,,,,0.30,1.0,0.30,1.0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Gold Rush pilot override; historical review pending.
-2,american_river,0.1,,,,,0.30,1.0,0.30,1.0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Gold Rush pilot override; historical review pending.
-2,delta,0.1,,,,,0.30,1.0,0.30,1.0,1.0,1.0,11/01,01/31,1,1.0,10/01,10/31,2,Gold Rush pilot override; historical review pending.
+2,feather_river,0.1,,,,,0.30,1.0,0.30,1.0,1.0,1.0,04/15,08/15,1,1.0,10/01,10/31,2,Gold Rush pilot override; historical review pending.
+2,american_river,0.1,,,,,0.30,1.0,0.30,1.0,1.0,1.0,04/15,08/15,1,1.0,10/01,10/31,2,Gold Rush pilot override; historical review pending.
+2,delta,0.1,,,,,0.30,1.0,0.30,1.0,1.0,1.0,04/15,08/15,1,1.0,10/01,10/31,2,Gold Rush pilot override; historical review pending.

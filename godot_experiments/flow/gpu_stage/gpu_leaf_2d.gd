@@ -4,10 +4,10 @@ extends Node2D
 ## Isolated, write-only GPU leaf subsystem.
 ##
 ## A 300 x 2 CPU control texture contains only release commands: generations,
-## stratified X selectors, palette indices, originating banks, and deterministic
-## launch delays. Leaf position, water contact, irreversible attachment, path
-## following, and visible disk rendering are GPU-owned. Simulation state is
-## never read back to the CPU.
+## bank selectors or exact confluence positions, palette indices, inward
+## directions, and deterministic launch delays. Leaf position, water contact,
+## irreversible attachment, path following, and visible disk rendering are
+## GPU-owned. Simulation state is never read back to the CPU.
 
 signal leaves_released(
 	requested_count_per_side: int,
@@ -15,6 +15,12 @@ signal leaves_released(
 	scheduled_bottom_count: int,
 	scheduled_total_count: int,
 	release_serial: int
+)
+signal source_leaves_released(
+	requested_count: int,
+	scheduled_count: int,
+	release_serial: int,
+	source_ids: Array[String]
 )
 signal pause_changed(paused: bool)
 
@@ -24,8 +30,10 @@ const DRAW_SHADER := preload("res://flow/gpu_stage/gpu_leaf_draw.gdshader")
 const CAPACITY := 300
 const MAX_PER_SIDE := 150
 const DEFAULT_RELEASE_COUNT_PER_SIDE := 15
+const DEFAULT_COUNT_PER_SOURCE := 1
 const PALETTE_SIZE := 7
 const CONTROL_TEXTURE_ROWS := 2
+const EXPLICIT_SOURCE_CONTROL_TAG := 3.0
 const RELEASE_GAP_MULTIPLIER_MIN := 0.55
 const RELEASE_GAP_MULTIPLIER_MAX := 1.45
 
@@ -109,6 +117,17 @@ var _last_min_release_gap_seconds: float = 0.0
 var _last_max_release_gap_seconds: float = 0.0
 var _last_top_lane_order := PackedInt32Array()
 var _last_bottom_lane_order := PackedInt32Array()
+var _source_release_serial: int = 0
+var _source_total_requested: int = 0
+var _source_total_scheduled: int = 0
+var _source_last_requested_count: int = 0
+var _source_last_scheduled_count: int = 0
+var _source_last_release_stagger_span_seconds: float = 0.0
+var _source_last_min_release_gap_seconds: float = 0.0
+var _source_last_max_release_gap_seconds: float = 0.0
+var _source_last_ids: Array[String] = []
+var _source_last_release_counts: Dictionary = {}
+var _source_total_scheduled_by_id: Dictionary = {}
 var _paused: bool = false
 
 
@@ -329,6 +348,168 @@ func release_leaves(
 	return _last_scheduled_total
 
 
+func release_from_sources(sources: Array[Dictionary]) -> int:
+	## Schedules exact confluence entries in the same fixed resident pool used by
+	## bank releases. Every source requires a nonempty source_id, an in-bounds
+	## position_pixels, and a nonzero inward_direction_pixels. Optional count
+	## defaults to one. Valid sources are interleaved in stable round-robin order
+	## and the return value is the number actually scheduled (at most CAPACITY).
+	if _control_image == null or _control_texture == null:
+		return 0
+
+	var valid_sources: Array[Dictionary] = []
+	var requested_count := 0
+	for source: Dictionary in sources:
+		var requested_for_source := _source_count(
+			source.get("count", DEFAULT_COUNT_PER_SOURCE)
+		)
+		requested_count += requested_for_source
+		if requested_for_source <= 0:
+			continue
+		var source_id := String(source.get("source_id", "")).strip_edges()
+		if (
+			source_id.is_empty()
+			or not source.has("position_pixels")
+			or not source.has("inward_direction_pixels")
+		):
+			continue
+		var parsed_position: Variant = _source_vector2(source["position_pixels"])
+		var parsed_inward: Variant = _source_vector2(
+			source["inward_direction_pixels"]
+		)
+		if parsed_position == null or parsed_inward == null:
+			continue
+		var position: Vector2 = parsed_position
+		var inward_direction: Vector2 = parsed_inward
+		if (
+			position.x < 0.0
+			or position.x > stage_size.x
+			or position.y < 0.0
+			or position.y > stage_size.y
+			or inward_direction.length_squared() <= 0.000001
+		):
+			continue
+		valid_sources.append({
+			"source_id": source_id,
+			"position_pixels": position,
+			"inward_direction_pixels": inward_direction.normalized(),
+			"remaining": requested_for_source,
+		})
+
+	_source_last_requested_count = requested_count
+	_source_total_requested += requested_count
+	var commands: Array[Dictionary] = []
+	var any_remaining := true
+	while commands.size() < CAPACITY and any_remaining:
+		any_remaining = false
+		for source_index in range(valid_sources.size()):
+			if commands.size() >= CAPACITY:
+				break
+			var remaining := int(valid_sources[source_index]["remaining"])
+			if remaining <= 0:
+				continue
+			any_remaining = true
+			commands.append(valid_sources[source_index])
+			valid_sources[source_index]["remaining"] = remaining - 1
+
+	var scheduled_count := commands.size()
+	_source_last_scheduled_count = scheduled_count
+	_source_last_ids = []
+	_source_last_release_counts = {}
+	_source_last_release_stagger_span_seconds = 0.0
+	_source_last_min_release_gap_seconds = 0.0
+	_source_last_max_release_gap_seconds = 0.0
+	if scheduled_count <= 0:
+		return 0
+
+	_source_release_serial += 1
+	var release_delay_seconds := 0.0
+	var minimum_gap_seconds := INF
+	var maximum_gap_seconds := 0.0
+	for sequence_index in range(scheduled_count):
+		var command: Dictionary = commands[sequence_index]
+		var source_id := String(command["source_id"])
+		var position: Vector2 = command["position_pixels"]
+		var inward_direction: Vector2 = command["inward_direction_pixels"]
+		if not _source_last_release_counts.has(source_id):
+			_source_last_ids.append(source_id)
+			_source_last_release_counts[source_id] = 0
+		_source_last_release_counts[source_id] = (
+			int(_source_last_release_counts[source_id]) + 1
+		)
+		_source_total_scheduled_by_id[source_id] = (
+			int(_source_total_scheduled_by_id.get(source_id, 0)) + 1
+		)
+
+		var slot := _write_slot
+		var next_generation := _slot_generations[slot] + 1
+		if next_generation > 1000000:
+			next_generation = 1
+		_slot_generations[slot] = next_generation
+		var stable_seed_integer := int(floor(
+			_stable_source_seed_unit(source_id) * 1000002.0
+		))
+		var source_release_index := int(
+			_source_last_release_counts[source_id]
+		) - 1
+		var palette_index := posmod(
+			stable_seed_integer
+			+ source_release_index
+			+ _source_release_serial - 1,
+			PALETTE_SIZE
+		)
+		# Explicit-source encoding keeps the texture at 300 x 2:
+		# row 0 = generation, source X, palette, command tag;
+		# row 1 = source Y, normalized inward X/Y, launch delay.
+		_control_image.set_pixel(
+			slot,
+			0,
+			Color(
+				float(next_generation),
+				position.x,
+				float(palette_index),
+				EXPLICIT_SOURCE_CONTROL_TAG
+			)
+		)
+		_control_image.set_pixel(
+			slot,
+			1,
+			Color(
+				position.y,
+				inward_direction.x,
+				inward_direction.y,
+				release_delay_seconds
+			)
+		)
+		if sequence_index < scheduled_count - 1:
+			var gap_seconds := (
+				release_stagger_interval_seconds
+				* _deterministic_release_gap_multiplier(
+					_source_release_serial,
+					sequence_index
+				)
+			)
+			minimum_gap_seconds = minf(minimum_gap_seconds, gap_seconds)
+			maximum_gap_seconds = maxf(maximum_gap_seconds, gap_seconds)
+			release_delay_seconds += gap_seconds
+		_write_slot = (_write_slot + 1) % CAPACITY
+
+	_control_texture.update(_control_image)
+	_source_last_release_stagger_span_seconds = release_delay_seconds
+	_source_last_min_release_gap_seconds = (
+		0.0 if minimum_gap_seconds == INF else minimum_gap_seconds
+	)
+	_source_last_max_release_gap_seconds = maximum_gap_seconds
+	_source_total_scheduled += scheduled_count
+	source_leaves_released.emit(
+		requested_count,
+		scheduled_count,
+		_source_release_serial,
+		_source_last_ids.duplicate()
+	)
+	return scheduled_count
+
+
 func set_paused(value: bool) -> void:
 	_paused = value
 	var speed_scale := 0.0 if value else 1.0
@@ -374,6 +555,17 @@ func reset_leaves() -> void:
 	_last_max_release_gap_seconds = 0.0
 	_last_top_lane_order = PackedInt32Array()
 	_last_bottom_lane_order = PackedInt32Array()
+	_source_release_serial = 0
+	_source_total_requested = 0
+	_source_total_scheduled = 0
+	_source_last_requested_count = 0
+	_source_last_scheduled_count = 0
+	_source_last_release_stagger_span_seconds = 0.0
+	_source_last_min_release_gap_seconds = 0.0
+	_source_last_max_release_gap_seconds = 0.0
+	_source_last_ids = []
+	_source_last_release_counts = {}
+	_source_total_scheduled_by_id = {}
 	if _head_particles != null:
 		_head_particles.restart(true)
 
@@ -414,6 +606,49 @@ func runtime_summary() -> Dictionary:
 		"total_scheduled": _total_scheduled_top + _total_scheduled_bottom,
 		"last_scheduled_per_side": _last_scheduled_per_side,
 		"last_scheduled_total": _last_scheduled_total,
+		"all_release_total_scheduled": (
+			_total_scheduled_top
+			+ _total_scheduled_bottom
+			+ _source_total_scheduled
+		),
+		"source_release_supported": true,
+		"source_release_serial": _source_release_serial,
+		"source_default_count": DEFAULT_COUNT_PER_SOURCE,
+		"source_maximum_scheduled_per_call": CAPACITY,
+		"source_total_requested": _source_total_requested,
+		"source_total_scheduled": _source_total_scheduled,
+		"source_last_requested_count": _source_last_requested_count,
+		"source_last_scheduled_count": _source_last_scheduled_count,
+		"source_last_ids": _source_last_ids.duplicate(),
+		"source_last_release_counts": _source_last_release_counts.duplicate(true),
+		"source_total_scheduled_by_id": (
+			_source_total_scheduled_by_id.duplicate(true)
+		),
+		"source_release_stagger_span_seconds": (
+			_source_last_release_stagger_span_seconds
+		),
+		"source_last_min_release_gap_seconds": (
+			_source_last_min_release_gap_seconds
+		),
+		"source_last_max_release_gap_seconds": (
+			_source_last_max_release_gap_seconds
+		),
+		"source_release_schedule": (
+			"ROUND_ROBIN_SOURCES_DETERMINISTIC_IRREGULAR_STAGGER"
+		),
+		"source_command_position_space": "LOCAL_STAGE_CANVAS_PIXELS",
+		"source_command_direction_space": "LOCAL_STAGE_CANVAS_PIXELS_NORMALIZED",
+		"source_command_required_fields": [
+			"source_id",
+			"position_pixels",
+			"inward_direction_pixels",
+		],
+		"source_command_optional_fields": ["count"],
+		"source_command_supported_edges": ["TOP", "BOTTOM", "LEFT"],
+		"source_command_control_tag": EXPLICIT_SOURCE_CONTROL_TAG,
+		"source_command_control_layout": (
+			"ROW0_GENERATION_X_PALETTE_TAG_ROW1_Y_INWARD_X_INWARD_Y_DELAY"
+		),
 		"next_write_slot": _write_slot,
 		"paused": _paused,
 		"water_texture_assigned": _supplied_water_texture != null,
@@ -471,6 +706,11 @@ func runtime_summary() -> Dictionary:
 		"bottom_free_direction": "-Y",
 		"free_sway_axis": "X",
 		"latched_initial_direction": "+X",
+		"source_latched_initial_direction": "SUPPLIED_INWARD_DIRECTION",
+		"source_free_search_distance_measure": (
+			"SUPPLIED_INWARD_AXIS_TO_STAGE_CENTER_SPAN"
+		),
+		"source_release_retirement": "RIGHT_EDGE_AFTER_DISK",
 		"latched_follow_reference_axis": "CACHED_WATER_HEADING",
 		"latched_heading_constraint": "LOCAL_CONTINUITY_WITH_DOWNSTREAM_BIAS",
 		"latched_follow_resampling": "PERIODIC_DETERMINISTIC_PHASE",
@@ -609,6 +849,50 @@ func _apply_water_texture() -> void:
 	if texture == null:
 		texture = _empty_water_texture
 	_head_material.set_shader_parameter(&"water_occupancy_texture", texture)
+
+
+func _source_count(value: Variant) -> int:
+	if not (value is int or value is float):
+		return 0
+	var numeric := float(value)
+	if not is_finite(numeric) or numeric <= 0.0:
+		return 0
+	return clampi(int(floor(numeric)), 0, CAPACITY)
+
+
+func _stable_source_seed_unit(source_id: String) -> float:
+	# A stable integer polynomial avoids runtime RNG and String.hash state.
+	var mixed := 17
+	for index in range(source_id.length()):
+		mixed = posmod(mixed * 131 + source_id.unicode_at(index), 1000003)
+	return float(mixed) / 1000002.0
+
+
+func _source_vector2(value: Variant) -> Variant:
+	if value is Vector2:
+		return value if is_finite(value.x) and is_finite(value.y) else null
+	if value is Vector2i:
+		return Vector2(value)
+	if (
+		value is Array
+		and value.size() == 2
+		and _is_finite_number(value[0])
+		and _is_finite_number(value[1])
+	):
+		return Vector2(float(value[0]), float(value[1]))
+	if (
+		value is Dictionary
+		and value.has("x")
+		and value.has("y")
+		and _is_finite_number(value["x"])
+		and _is_finite_number(value["y"])
+	):
+		return Vector2(float(value["x"]), float(value["y"]))
+	return null
+
+
+func _is_finite_number(value: Variant) -> bool:
+	return (value is int or value is float) and is_finite(float(value))
 
 
 func _deterministic_release_gap_multiplier(

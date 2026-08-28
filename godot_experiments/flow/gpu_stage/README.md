@@ -41,9 +41,12 @@ a visible two-screen hardware benchmark after renderer changes before treating
 `gpu_flow_stage_2d.tscn` is one native 1920 x 1080 screen of GPU flow. It owns
 seven fixed palette layers. Each layer is a paired head `GPUParticles2D` emitter
 and child `GPUParticles2D` pool of immutable trail segments. Together they
-contain exactly 1,000 head slots and 75,000 segment slots—the layers divide that
-population rather than multiplying it by seven. Density is piecewise linear:
-1% water shows 20 lines and 100% water shows all 1,000. Native emitters always
+contain exactly 1,000 head slots and 75,000 segment slots by default—the layers
+divide that population rather than multiplying it by seven. The newer Delta
+wrapper deliberately uses its greater GPU headroom for 2,000 heads and 150,000
+immutable segment slots; the six upstream screens retain the default budget.
+Density is piecewise linear: 1% water shows 20 lines and 100% water shows the
+screen's complete fixed capacity. Native emitters always
 run a complete eight-second cycle; an evenly spaced global-slot selector controls
 the logical population without Godot's low-count `amount_ratio` batching. A head
 re-enters directly after its previous trail fades instead of waiting for another
@@ -85,7 +88,7 @@ head/segment renderer. The stage background, background grid, cyan reservoir
 guide, gold interaction outlines, temperature-bearing stage title, model date,
 active-regime panel, salmon, and leaves are deliberately excluded.
 
-Salmon and leaves bind this exact texture and sample its alpha in their
+Salmon, leaves, and pollution bind this exact texture and sample its alpha in their
 particle-process shaders. Salmon choose a full 2D upstream heading from their
 centered contact field. Free leaves steer toward nearby water and stop/fade if
 their bounded bank-to-center search misses; latched leaves periodically choose
@@ -113,7 +116,7 @@ Every instance exposes:
 - `stage_grid_spacing_pixels`, `stage_grid_line_width_pixels`, and
   `stage_grid_color`: native-pixel grid presentation controls.
 - `stage_date_visible: bool`: visibility of the screen-fixed
-  `MM/DD-HH:MM` label.
+  `YYYY/MM/DD` label.
 - `stage_temperature_visible: bool`: whether the measured temperature suffix
   is appended to the stage title. Production enables it on every stage except
   Cottonwood Creek.
@@ -184,13 +187,13 @@ count and `p` is interaction power.
 
 | Regime | Current seven-screen definition |
 |---|---|
-| Kinship | All seven: `R 0/c0`, `Dr 0/p0`, `Ob 0/p0`, `Sh 1`; salmon `11/01–01/31` daily and leaves `10/01–10/31` every 2 days. |
+| Kinship | All seven: `R 0/c0`, `Dr 0/p0`, `Ob 0/p0`, `Sh 1`; Sacramento River winter-run Chinook salmon `04/15–08/15` daily and leaves `10/01–10/31` every 2 days. |
 | Agriculture (`ranch`) | `R .20/c1` on S/Mi/F/A, `.20/c2` on Mc/D, and `0/c0` on C; `Dr .75` and `Ob .10` on all seven; `Sh .30` on S/Mc/C and `0` elsewhere. Positive-area reservoir gates are scheduled open `06/01–08/31`; aperture is otherwise undefined. |
 | Gold Rush | Only F/A/D define physics: `R .10` (count blank), `Dr .30/p1`, `Ob .30/p1`, `Sh 1`, plus the Kinship salmon/leaf seasons. S/Mc/C/Mi remain blank. |
 | Water Projects | S/Mc/F/A/D: `R .33/c1`, `Dr .50`; C/Mi: explicit `R 0/c0`, `Dr 0`. Five of seven whole-river stages is the nearest discrete allocation to 75%. All seven define `Sh 0` and leaves `0`; other fields and gate schedules are blank. |
 | Hydropower | S/Mc/Mi/F/A/D: `R .50/c2`, aperture `.33`, gate open `01/01–12/31`; C: `R 0/c0` with no gate. All seven inherit `Dr .25`; `Sh .20` on Mc/C and `0` elsewhere. |
 | Tech | All seven: `R .75/c2`, `Dr .75/p1`, and `Sh 0`; gate, obstacle, salmon, and leaf fields remain blank. |
-| Watershed | The authored profile remains a no-op until a valid `watershed-ai/2` seasonal allocation is applied. Watershed is exclusive: selecting it clears every other regime. |
+| Watershed | On a cold installation the authored profile is a no-op until the first valid `watershed-ai/2` allocation arrives. Thereafter each screen immediately replays its persisted last-successful allocation while the controller delivers the current model day's decision. Watershed is exclusive: selecting it clears every other regime. |
 
 The three `*_area_fraction` physics values are deterministic admission or
 encounter budgets over particle lifecycles. They do not resize geometry or
@@ -271,6 +274,44 @@ regime transition remains visibly continuous without restarting particles.
 The uniform edge field is also cheaper than the former polygon force and
 swept-crossing searches.
 
+### Delta confluence
+
+The Delta reuses one bounded water system as a six-source confluence. It does
+not create six duplicate stage simulations. Shasta enters at left gridline 8,
+McCloud at left gridline 2, Mill at bottom gridline 3, Cottonwood at bottom
+gridline 10, Feather at top gridline 5, and American at top gridline 12.
+Shasta's canvas inlet is `(0, 120)` and points right; McCloud's is `(0, 840)`
+and points right; Feather's is `(600, 0)` and points down.
+
+Each inlet follows a cubic Bézier path whose first tangent matches its screen
+edge and whose final tangent is exactly rightward. Shasta and McCloud meet the
+shared `y = 540` trunk at `x = 480`; Mill, Feather, Cottonwood, and American
+then join at `x = 720`, `960`, `1440`, and `1680`. The shader refines the
+closest curve point in a fixed three-step loop, applies bounded normal
+correction, and normalizes the result back to the river's requested speed. The
+turns therefore remain smooth without per-particle CPU state or GPU readback.
+Shasta retains its `x = 480` merge with symmetric 210-pixel horizontal handles:
+`(0,120)`, `(210,120)`, `(270,540)`, `(480,540)`. Its minimum curvature radius
+is approximately 150.3 pixels.
+
+Each Delta inlet now uses the delayed rendered width of its source river. The
+ordinary stage's centered inlet spans canvas Y `28..1052`, so its authoritative
+CPU width is `exit_width_pixels = 1024 * flow_rate`. The pull bridge treats its
+first valid sample as the already-running installation's steady startup
+baseline, then buffers every later complete water snapshot by one 1,920-pixel
+source-screen traversal before supplying that width. Legacy/direct snapshots
+without the optional field derive the same value from `flow_rate`. Six widths
+are packed into two `vec4` uniforms, with no particle readback or pool resizing.
+
+The central lane envelope widens by bounded quadrature: each source contributes
+`exit_width_pixels²` through its quintic 120-pixel join, the shader takes the
+square root, retains the authored 42-pixel trunk floor, and caps the result at
+the upstream 1,024-pixel channel width. The curved water remains inside
+`WaterOnlyViewport`, so handed-off leaves and pollution sample and follow the
+same paths. Salmon use six jointly released 25-fish destination cohorts;
+deterministic deaths fade in the Delta, and only the exact survivors are handed
+to their named upstream stage.
+
 ### Stage presentation layers and model calendar
 
 The main-canvas presentation stack is fixed around the animated content:
@@ -314,9 +355,12 @@ them. The bundled font is
 `res://flow/assets/fonts/BarlowCondensed-Medium.ttf`; the installation does not
 depend on a matching system font.
 
-`ModelDate` displays a zero-padded `MM/DD-HH:MM` in a non-leap, 365-day model
-year. Every production wrapper sets `model_start_day_index = 181`, the zero-based
-index for `07/01`, so a cycle runs from July 1 through June 30 and then wraps.
+`ModelDate` displays only a zero-padded `YYYY/MM/DD` date and retains Barlow's
+tabular-number OpenType feature. The production data year is July 1, 2025
+through June 30, 2026, so the displayed year changes at January 1. Every
+production wrapper sets `model_start_day_index = 181`, the zero-based index for
+`07/01`, so the underlying minute-resolved cycle runs from July 1 through June
+30 and then wraps.
 The shared internal clock defaults to one model year every 720 running seconds,
 which is 21,600 rendered frames at the project's 30 FPS cap. The date-time is
 derived from the continuous year fraction rather than accumulated integer frame
@@ -329,7 +373,8 @@ A newly instantiated stage synchronizes from `ModelTimeline` immediately after
 loading its own watershed and optional temperature files and before building
 its water particles. Its date label, 720-row data positions, interpolated flow
 rate and temperature, and runtime summary therefore begin at the current shared
-instant; they do not briefly fall back to `07/01-00:00` or row zero. Two stages
+instant; they do not briefly fall back to the underlying `07/01-00:00`, the
+visible `2025/07/01`, or row zero. Two stages
 hosted by the same Godot process consume the same authority and remain on
 exactly the same clock.
 
@@ -343,8 +388,9 @@ unpaused, and resuming simulation does not implicitly enable auto-advance.
 Each stage loads a 720-row `water_pipeline` text file. At the default 720-second
 year, one row spans exactly one running second and represents a uniform 730
 model minutes (12 hours 10 minutes). The files do not contain timestamps, so the
-displayed `HH:MM` is a synthetic, uniformly spaced model time rather than an
-observed sample timestamp. Between row boundaries the stage linearly
+internal `HH:MM` retained by the timeline and control API is a synthetic,
+uniformly spaced model time rather than an observed sample timestamp. Between
+row boundaries the stage linearly
 interpolates the current and following `norm` values on every update, including
 the last-to-first wrap. The interpolated `norm` maps directly from `0.0…1.0` to
 water `flow_rate` `0.0…1.0`, or 0…100 percent; it is not multiplied by the raw or
@@ -369,10 +415,11 @@ compatibility name `set_model_date_mm_dd`) and runtime paths `calendar.date` or
 disable automatic advancement. This handoff is process-global even when the
 message was addressed through one stage: all active stages move to the same
 instant, and a later stage inherits it. Date-only `MM/DD` input remains accepted
-and means midnight, but output is always canonical `MM/DD-HH:MM`. Invalid values
-return `false` without changing state. Call
+and means midnight, but machine-facing output remains canonical
+`MM/DD-HH:MM`; the screen label remains `YYYY/MM/DD`. Invalid values return
+`false` without changing state. Call
 `set_model_calendar_auto_advance(true)`, or set `calendar.auto_advance`, to
-resume the shared clock from the displayed time.
+resume the shared clock from the current model instant.
 
 An autoload is shared only inside its own Godot process. Two stages in one
 process are synchronized automatically; two Godot executables, two computers,
@@ -417,25 +464,31 @@ telemetry; only the buffered value drives the one input to the budget.
 
 Regime fractions are Kinship 0%, Agriculture 45%, Gold Rush 30%, Water
 Projects/export 40%, Hydropower/reservoir loss 15%, Tech/data-center cooling
-25%, and the authored Watershed fallback 0%, capped at 100%. An applied
-Watershed AI state instead derives extraction from its agriculture,
-data-center, and city allocations. Until that state arrives, the Delta panel
-shows an em dash rather than claiming `0%`. The host maps each screen's own
+25%, and the cold-start authored Watershed baseline 0%, capped at 100%. A
+replayed or current Watershed AI state instead derives extraction from its
+agriculture, data-center, and city allocations. Before the installation has
+ever accepted a valid state, the Delta panel shows an em dash rather than
+claiming `0%`. The host maps each screen's own
 available supply to a smooth 5%-to-50% extraction target, biases cooler water
 toward data centers and warmer water toward fields, and independently resolves
 each screen from its own observation and AI priorities. The panel displays input, total
 extraction, and remainder. Kinship floods the Delta with borderless 45-degree
 blue hatching: 3-pixel round-capped lines, 6-pixel gaps, fixed 33% alpha, and a
 6-pixel label knockout. Every regime draws the incoming Bay tide as a
-right-anchored area using all 8,760 hourly NOAA CO-OPS predictions for San
-Francisco station `9414290` over the same July 1, 2025–June 30, 2026 window.
+right-anchored smooth cubic polygon using all 8,760 hourly NOAA CO-OPS
+predictions for San Francisco station `9414290` over the same July 1,
+2025–June 30, 2026 window.
 The wrapped FIFO window covers exactly 96 hours: 48 past hours above screen
 center and 48 future hours below it, with current model time fixed at `y=540`.
-The polygon's left boundary follows interpolated hourly tide height; its
-41–306 pixel reach preserves the earlier 66% scale reduction. It has no solid
-fill, outline, label, or arrowhead. White, pixel-aligned horizontal hatches are
-3 pixels wide with 6-pixel gaps and fixed 20% alpha. The tide renders at Z=-60
-below all text and advances on the shared model-year clock. Delta budget
+Periodic monotone cubic Hermite interpolation keeps all 97 hourly values as
+exact knots with C1 continuity across integer hours and the annual wrap, while
+clamping normalized values to `[0, 1]`. Fixed eight-way tessellation yields a
+769-point boundary with 1.40625-pixel vertical spacing and a 41–306 pixel
+leftward reach. A subtle white 8% fill closes against the right edge; its
+separate white outline is 3 pixels wide, antialiased, and fixed at 80% alpha.
+There are no hatches, circular caps, label, or arrowhead. The tide renders at
+Z=-60 below all text
+and advances on the shared model-year clock. Delta budget
 percentages use Barlow Condensed with its tabular-numeral OpenType feature.
 The seven water-color head emitters keep native `amount_ratio = 1`, zero timing
 randomness, and zero explosiveness. The shader selects the requested logical
@@ -446,11 +499,24 @@ and the low-flow blank interval without changing trail, velocity, reservoir,
 gate, extractor, city, or turbulence physics.
 Agriculture fields and Tech data centers are bank-connected `Rect2` extractors.
 All active geometry uses borderless,
-unclipped 45-degree hatching with 3-pixel round-capped lines, 6-pixel gaps, and
+clipped 45-degree hatching with 3-pixel round-capped lines, 6-pixel gaps, and
 fixed 33% alpha. Repelling geometry is labeled City in the artwork while
 retaining `obstacle` as its protocol-compatible internal physics name. Hatches
 split around measured label bounds, leaving a transparent six-pixel clearance.
-Fields use green and data centers use white. All overlay labels are rotated -90°.
+Fields use green, Mines use gold, and Data Centers use the same bright-red
+`#FF0000` RGB as their heat-pollution disks. All overlay labels are rotated
+-90°; hatch alpha remains the shared 33%.
+
+Gold Rush's Mine and Tech's Data Centers use full-size discrete site cohorts.
+At activation, the Mine appears on alternating even stage ranks (4 of 7
+screens), and each screen shows one alternating north/east Data Center. This is
+the initial 50% cohort. After 30 unpaused real seconds, all hidden authored
+sites appear together. Pause freezes the independent Gold Rush and Tech timers;
+unrelated regime changes preserve them, and disabling then re-enabling a regime
+restarts its initial cohort. Only the reveal boundary updates GPU interaction
+data, avoiding the former continuous geometry churn on `.11`. Exclusive AI
+Watershed bypasses the reveal and adopts both allocation-scaled Data Center
+rectangles immediately.
 
 Six production stages read the shared table
 `res://flow/data/water_pipeline/water_temperature_all_rivers_720.txt`;
@@ -495,7 +561,7 @@ paths are:
 | `stage.grid_spacing_pixels` | `stage_grid_spacing_pixels` | Grid spacing, clamped to `1…960` native pixels |
 | `stage.grid_line_width_pixels` | `stage_grid_line_width_pixels` | Grid width, clamped to `0.1…8` native pixels |
 | `stage.grid_color` | `stage_grid_color` | Grid color, including alpha |
-| `stage.date_visible` | `stage_date_visible` | Date-time-label visibility |
+| `stage.date_visible` | `stage_date_visible` | `YYYY/MM/DD` date-label visibility |
 | `stage.temperature_visible` or `temperature.visible` | `temperature_visible`, `stage_temperature_visible` | Append/remove the measured-temperature suffix in `StageTitle` |
 | `temperature.data_path` or `stage.temperature_data_path` | `temperature_data_path` | Load the shared temperature table and align it to the current timeline |
 | `temperature.data_column` or `stage.temperature_data_column` | `temperature_data_column` | Select the Celsius series by exact header name |
@@ -595,9 +661,16 @@ are no-ops; an ID reused with different state is rejected; a new ID with the
 same state updates acknowledgement without repeating GPU work.
 
 Applied values derive the reservoir, bounded drain/obstacle banks, explicit
-field/data-center rectangles, and Delta floodplain area. Exiting exclusive Watershed mode removes the overlay and
-restores captured data-drive, flow, authored gate, and the newly active
-authored/profile/timeline behavior.
+field/data-center rectangles, and Delta floodplain area. Every accepted state
+is retained separately from the active overlay and atomically persisted at
+`user://watershed_ai/last_successful/<screen_id>.json`. On macOS that is below
+the logged-in account's `~/Library/Application Support/Godot/app_userdata/`
+`Sacramento Model Test/` directory. Exiting exclusive Watershed removes the
+active overlay and restores captured data-drive, flow, authored gate, and the
+newly active authored/profile/timeline behavior, but it does not forget the
+last successful state. Re-entering Watershed promotes that state synchronously;
+the controller's exact current decision ID/hash then confirms or replaces it.
+Corrupt, mismatched, or schema-incompatible cache files are ignored.
 
 ### Regime-switch runtime cost
 
@@ -1114,6 +1187,46 @@ generations and visible disks.
 `reset_leaves()` followed immediately by a new release is valid even while the
 stage is paused.
 
+## GPU Mine and Data Center pollution
+
+`GPUPollution2D` is an independent 96-slot GPU pool at absolute Z index `11`.
+It reuses the leaf antialiased-disk draw shader, but it does not share leaf
+particles, commands, colors, or reset state. The stage derives sources from the
+live enabled extractor polygons: Gold Rush supplies a Mine only on screens
+whose site has been revealed; Tech begins with one alternating Data Center and
+supplies both after 30 seconds; exclusive AI Watershed immediately enables both
+Data Centers when `data_center_fraction` is positive. AI-scaled rectangle widths
+therefore also scale the pollution mouths.
+
+Each active source emits one opaque disk per one-second cadence from a
+deterministic point exactly on its current river-facing mouth. Mine disks are
+material-pollution grey (`#7F858A`); Data Center disks, including AI Watershed
+Data Centers, are bright red (`#FF0000`) to represent heat pollution. Each disk begins in an
+inward seek state, moving toward the stage center while water-contact and
+nearby-water probes sample the water-only texture. First contact irreversibly
+latches the disk; it then uses the leaf system's cached local-heading follower
+at 300 pixels per second and stays fully opaque through temporary water-alpha
+gaps. A disk whose bounded search reaches the center without water parks there
+and remains catchable: a deterministically phased 9 x 9 contact check runs every
+0.5 seconds. Later water contact immediately latches it. If no trail arrives,
+the disk stays opaque for 8 seconds, fades over 2 seconds, and retires instead
+of remaining locked at center. A latched disk ordinarily retires only after its
+complete diameter clears the right edge. Disabling a source stops new commands
+without erasing existing disks. The explicit full-stage `reset` action clears
+the pool, and circular reuse remains a final bound.
+
+Important defaults are `pollution_particles_per_source=1`,
+`pollution_release_interval_seconds=1.0`, `pollution_color=#7F858A`,
+`pollution_data_center_color=#FF0000`,
+`pollution_center_recheck_interval_seconds=0.5`,
+`pollution_center_hold_seconds=8.0`, `pollution_center_fade_seconds=2.0`,
+a 10-pixel base diameter with
+deterministic radius variation, and a 96-slot capacity. The class tag fits in
+the existing command texture, so the two colors do not add a pool or material.
+`runtime_summary()` reports `pollution_active_source_ids`, live mouth geometry,
+the fixed opacity/retirement contract, and the nested per-source release
+counters in `pollution_summary`.
+
 ## Water immutable segment trails
 
 For water, the moving head is only the simulation state. The particle-process
@@ -1136,6 +1249,7 @@ ceil(particle_slots * 30 updates/second * trail_lifetime * 1.25)
 ```
 
 At the defaults, `ceil(1000 * 30 * 2.0 * 1.25)` is 75,000 slots per stage.
+The Delta's 2,000-head override yields 150,000 slots by the same formula.
 Changing flow rate does not resize the pool while visible segments are using
 it; changing particle-slot count or trail lifetime updates the required capacity.
 
@@ -1153,7 +1267,10 @@ stacking order for their full lifetime.
 The global particle identity is interleaved across those layers. At the default
 1,000 slots, head allocations are `[143, 143, 143, 143, 143, 143, 142]`.
 Segment capacities are `[10725, 10725, 10725, 10725, 10725, 10725, 10650]`,
-totaling 75,000. Runtime flow changes use the same global threshold, so splitting the
+totaling 75,000. Delta's corresponding fixed distributions are
+`[286, 286, 286, 286, 286, 285, 285]` and
+`[21450, 21450, 21450, 21450, 21450, 21375, 21375]`, totaling 2,000 heads and
+150,000 segments. Runtime flow changes use the same global threshold, so splitting the
 renderer does not change the requested population or the deterministic path
 seeds. Segments within one layer share the same RGB color; their alpha blending
 is visually order-independent, so they do not need one node per trail.
@@ -1257,8 +1374,8 @@ newly admitted heads replace those leaving. The hard-drain state is reserved
 for the diameter-wide setting.
 
 The production GPU reservoir does not have a separate retention pool. Every
-retained head continues to occupy one of the stage's fixed 1,000 active
-water-head slots until it exits. A closed or high-capture reservoir can
+retained head continues to occupy one of the stage's fixed `particle_slots`
+(1,000 upstream or 2,000 on Delta) until it exits. A closed or high-capture reservoir can
 therefore temporarily thin ordinary inlet lanes. If every active slot is
 retained, no new ordinary inlet lifecycle can begin until a head is released
 and recycled. This is bounded slot occupancy, not a memory leak or rendering
@@ -1372,7 +1489,7 @@ placement on every real active-set transition, identical-set idempotence,
 explicit-zero removal, undefined fallback, 300-pixel lateral field capture,
 sharp minimum-speed quarter-turn withdrawal and offscreen drainage, and stable
 pool/resource identity across live transitions.
-The salmon and leaf smoke scenes additionally validate release scheduling,
+The salmon, leaf, and pollution smoke scenes additionally validate release scheduling,
 their occupancy contracts, bounded water/salmon immutable trails, fixed circular
 release pools, stable resident particle/material/texture allocations under 2,000
 salmon and 500 leaf release calls, and the absence of CPU readback. Visual testing
@@ -1401,6 +1518,10 @@ steady visible-pixel average leaves the calibrated 1–4% band.
 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . \
   --rendering-method mobile \
   --scene res://flow/gpu_stage/gpu_leaf_smoke.tscn
+
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . \
+  --rendering-method mobile \
+  --scene res://flow/gpu_stage/gpu_pollution_smoke.tscn
 ```
 
 The leaf smoke checks its 300-slot GPU pool, exact 15-top/15-bottom default
@@ -1418,7 +1539,12 @@ readback. Its 500-call stress pass additionally verifies circular-slot wrapping,
 bounded last-release lane state, unchanged control-texture dimensions, fixed
 particle amounts, and unchanged resident node/resource identities and RIDs. The
 salmon smoke applies the corresponding allocation checks across 2,000 release
-calls.
+calls. The pollution smoke checks its separate 96-slot pool, arbitrary
+exact-mouth source positions, one-disk default, inward seek/contact,
+irreversible latch and cached water following, opaque center parking after a
+miss, throttled late-water reacquisition, bounded center-miss fading,
+downstream-edge retirement, pause/reset behavior,
+per-source counters, and stable resources through circular reuse.
 
 The production integration smoke is:
 
@@ -1432,12 +1558,13 @@ It loads all seven wrappers, verifies their unique IDs and native sizes, routes
 a targeted `flow_rate` message through `FlowControlBus` to each stage, and
 checks that targeted interaction-polygon geometry operations remain isolated to
 the addressed screen. It also checks the exact seven-title mapping and shared
-Barlow Condensed Medium resource. The grid, date-time, and watershed timeline
-described above are runtime contracts; the existing smoke scenes do not assert
-their complete behavior.
+Barlow Condensed Medium resource. The grid, visible `YYYY/MM/DD` date, and
+watershed timeline described above are runtime contracts; the smoke verifies
+the date format and retained tabular numerals alongside the other presentation
+invariants.
 
-The retained validation set contains six suites: basin budget, reusable GPU
-stage, salmon, leaf, seven-scene integration, and the transport/runtime suite
+The retained validation set contains seven suites: basin budget, reusable GPU
+stage, salmon, leaf, pollution, seven-scene integration, and the transport/runtime suite
 at `res://flow/tests/flow_runtime_smoke.tscn`. The last suite retains unique
 localhost UDP normalization and routing coverage for the shared controller
 protocol; it is not a production rendering path.
@@ -1449,8 +1576,9 @@ segments, variable line width and color, a circular reservoir, retained
 circulation, gate state, proportional gate-width release, runtime reservoir
 geometry, and up to eight addressable absorb/repel polygons. Polygon capacity is
 deliberately bounded at 12 vertices each so every stage can use a small geometry
-texture with predictable shader cost. The stage also includes GPU salmon and
-leaves whose contact and steering are driven directly by the water-only texture.
+texture with predictable shader cost. The stage also includes GPU salmon,
+leaves, and Mine/Data Center pollution whose contact or steering is driven
+directly by the water-only texture.
 
 The CPU `FlowModel2D` remains in the project as a reference/fallback for its
 arbitrary shoreline chain, circle and rotated-rectangle obstacle types, legacy

@@ -15,17 +15,16 @@ const HATCH_ALPHA := 0.33
 const HATCH_PERIOD_PIXELS := HATCH_LINE_WIDTH_PIXELS + HATCH_GAP_PIXELS
 const HATCH_AXIS_SCALE := 1.4142135623730951
 const LABEL_HATCH_CLEARANCE_PIXELS := 6.0
-const TIDE_HATCH_LINE_WIDTH_PIXELS := 3.0
-const TIDE_HATCH_GAP_PIXELS := 6.0
-const TIDE_HATCH_ALPHA := 0.20
-const TIDE_HATCH_PERIOD_PIXELS := (
-	TIDE_HATCH_LINE_WIDTH_PIXELS + TIDE_HATCH_GAP_PIXELS
-)
-const TIDE_FIRST_HATCH_Y := TIDE_HATCH_PERIOD_PIXELS * 0.5
-const TIDE_HATCH_LINE_COUNT := 120
+const TIDE_OUTLINE_WIDTH_PIXELS := 3.0
+const TIDE_OUTLINE_ALPHA := 0.80
+const TIDE_FILL_ALPHA := 0.08
 const TIDE_WINDOW_HOURS := 96.0
 const TIDE_WINDOW_HALF_HOURS := TIDE_WINDOW_HOURS * 0.5
 const TIDE_WINDOW_SAMPLE_COUNT := 97
+const TIDE_CURVE_SUBDIVISIONS_PER_HOUR := 8
+const TIDE_CURVE_POINT_COUNT := 769
+const TIDE_CURVE_Y_STEP_PIXELS := 1.40625
+const TIDE_CURVE_MAX_Y_STEP_PIXELS := 1.5
 const TIDE_LINE_MIN_LENGTH_PIXELS := 40.8
 const TIDE_LINE_MAX_LENGTH_PIXELS := 306.0
 const KINSHIP_FLOOD_LABEL := "KINSHIP FLOODPLAIN"
@@ -261,54 +260,121 @@ func _draw_capped_line(
 func _draw_incoming_tide() -> void:
 	if tide_series.is_empty() or tide_fifo_values.size() != TIDE_WINDOW_SAMPLE_COUNT:
 		return
-	_draw_horizontal_hatched_tide_polygon(_tide_area_polygon())
+	var boundary_points := _tide_curve_points()
+	var fill_color := Color.WHITE
+	fill_color.a = TIDE_FILL_ALPHA
+	draw_colored_polygon(_tide_fill_polygon(boundary_points), fill_color)
+	var outline_color := Color.WHITE
+	outline_color.a = TIDE_OUTLINE_ALPHA
+	draw_polyline(
+		boundary_points,
+		outline_color,
+		TIDE_OUTLINE_WIDTH_PIXELS,
+		true,
+	)
 
 
-func _tide_area_polygon() -> PackedVector2Array:
-	var polygon := PackedVector2Array([Vector2(STAGE_SIZE.x, 0.0)])
-	for sample_index in range(TIDE_WINDOW_SAMPLE_COUNT):
-		var sample_fraction := float(sample_index) / float(
-			TIDE_WINDOW_SAMPLE_COUNT - 1
+func _tide_curve_points() -> PackedVector2Array:
+	var points := PackedVector2Array()
+	points.resize(TIDE_CURVE_POINT_COUNT)
+	for curve_index in range(TIDE_CURVE_POINT_COUNT):
+		var hour_offset := (
+			-TIDE_WINDOW_HALF_HOURS
+			+ float(curve_index) / float(TIDE_CURVE_SUBDIVISIONS_PER_HOUR)
 		)
-		polygon.append(Vector2(
-			STAGE_SIZE.x - _tide_line_length(tide_fifo_values[sample_index]),
-			sample_fraction * STAGE_SIZE.y,
-		))
+		var normalized_height := _wrapped_tide_sample(
+			tide_sample_position + hour_offset
+		)
+		points[curve_index] = Vector2(
+			STAGE_SIZE.x - _tide_line_length(normalized_height),
+			float(curve_index) * TIDE_CURVE_Y_STEP_PIXELS,
+		)
+	return points
+
+
+func _tide_fill_polygon(
+	boundary_points: PackedVector2Array,
+) -> PackedVector2Array:
+	var polygon := PackedVector2Array([Vector2(STAGE_SIZE.x, 0.0)])
+	polygon.append_array(boundary_points)
 	polygon.append(Vector2(STAGE_SIZE.x, STAGE_SIZE.y))
 	return polygon
 
 
-func _draw_horizontal_hatched_tide_polygon(
-	polygon: PackedVector2Array,
-) -> void:
-	var hatch_color := Color.WHITE
-	hatch_color.a = TIDE_HATCH_ALPHA
-	for hatch_index in range(TIDE_HATCH_LINE_COUNT):
-		var line_y := (
-			TIDE_FIRST_HATCH_Y
-			+ float(hatch_index) * TIDE_HATCH_PERIOD_PIXELS
-		)
-		var minimum_x := INF
-		var maximum_x := -INF
-		for vertex_index in range(polygon.size()):
-			var start: Vector2 = polygon[vertex_index]
-			var finish: Vector2 = polygon[(vertex_index + 1) % polygon.size()]
-			if not (
-				(start.y <= line_y and finish.y > line_y)
-				or (finish.y <= line_y and start.y > line_y)
-			):
-				continue
-			var edge_fraction := (line_y - start.y) / (finish.y - start.y)
-			var intersection_x := lerpf(start.x, finish.x, edge_fraction)
-			minimum_x = minf(minimum_x, intersection_x)
-			maximum_x = maxf(maximum_x, intersection_x)
-		if is_finite(minimum_x) and maximum_x > minimum_x:
-			_draw_capped_line(
-				Vector2(minimum_x, line_y),
-				Vector2(maximum_x, line_y),
-				hatch_color,
-				TIDE_HATCH_LINE_WIDTH_PIXELS,
-			)
+static func monotone_cubic_value(
+	previous_value: float,
+	start_value: float,
+	finish_value: float,
+	following_value: float,
+	segment_fraction: float,
+	minimum_value: float = -INF,
+	maximum_value: float = INF,
+) -> float:
+	## Uniform monotone cubic Hermite interpolation. Its harmonic-mean knot
+	## tangents are C1-continuous without ringing past a segment's extrema.
+	var fraction := clampf(segment_fraction, 0.0, 1.0)
+	var previous_delta := start_value - previous_value
+	var segment_delta := finish_value - start_value
+	var following_delta := following_value - finish_value
+	var start_tangent := _monotone_cubic_tangent(
+		previous_delta,
+		segment_delta,
+	)
+	var finish_tangent := _monotone_cubic_tangent(
+		segment_delta,
+		following_delta,
+	)
+	var fraction_squared := fraction * fraction
+	var fraction_cubed := fraction_squared * fraction
+	var value := (
+		(2.0 * fraction_cubed - 3.0 * fraction_squared + 1.0) * start_value
+		+ (fraction_cubed - 2.0 * fraction_squared + fraction) * start_tangent
+		+ (-2.0 * fraction_cubed + 3.0 * fraction_squared) * finish_value
+		+ (fraction_cubed - fraction_squared) * finish_tangent
+	)
+	return clampf(value, minimum_value, maximum_value)
+
+
+static func wrapped_monotone_cubic_sample(
+	series: PackedFloat32Array,
+	sample_position: float,
+	minimum_value: float = -INF,
+	maximum_value: float = INF,
+) -> float:
+	if series.is_empty():
+		return clampf(0.0, minimum_value, maximum_value)
+	if series.size() == 1:
+		return clampf(float(series[0]), minimum_value, maximum_value)
+	var wrapped_position := fposmod(sample_position, float(series.size()))
+	var start_index := floori(wrapped_position)
+	var previous_index := posmod(start_index - 1, series.size())
+	var finish_index := (start_index + 1) % series.size()
+	var following_index := (start_index + 2) % series.size()
+	return monotone_cubic_value(
+		float(series[previous_index]),
+		float(series[start_index]),
+		float(series[finish_index]),
+		float(series[following_index]),
+		wrapped_position - floorf(wrapped_position),
+		minimum_value,
+		maximum_value,
+	)
+
+
+static func _monotone_cubic_tangent(
+	previous_delta: float,
+	following_delta: float,
+) -> float:
+	if (
+		is_zero_approx(previous_delta)
+		or is_zero_approx(following_delta)
+		or previous_delta * following_delta <= 0.0
+	):
+		return 0.0
+	return (
+		2.0 * previous_delta * following_delta
+		/ (previous_delta + following_delta)
+	)
 
 
 func _tide_line_length(normalized_height: float) -> float:
@@ -343,14 +409,11 @@ func _update_tide_fifo(
 
 
 func _wrapped_tide_sample(sample_position: float) -> float:
-	var wrapped_position := fposmod(sample_position, float(tide_series.size()))
-	var first_index := floori(wrapped_position)
-	var second_index := (first_index + 1) % tide_series.size()
-	var fraction := wrapped_position - floorf(wrapped_position)
-	return lerpf(
-		float(tide_series[first_index]),
-		float(tide_series[second_index]),
-		fraction,
+	return wrapped_monotone_cubic_sample(
+		tide_series,
+		sample_position,
+		0.0,
+		1.0,
 	)
 
 

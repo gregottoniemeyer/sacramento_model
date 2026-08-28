@@ -13,7 +13,7 @@ Godot project. Run every command below from the repository root.
 
 | Target | Address | SSH account | Installed project | Stages |
 | --- | --- | --- | --- | --- |
-| `11` | `196.168.50.11` | `francescospagnolo` | `/Users/francescospagnolo/Documents/watercouncil/code` | `7` on extended screen `1` |
+| `11` | `196.168.50.11` | `watershed` | `/Users/watershed/Documents/watercouncil/code` | `7` on extended Samsung screen `1`; BenQ is the console/main display |
 | `21` | `196.168.50.21` | `gregniemeyer` | `/Users/gregniemeyer/Documents/watercouncil/code` | `1,2` |
 | `31` | `196.168.50.31` | `gregniemeyer` | `/Users/gregniemeyer/Documents/watercouncil/code` | `3,4` |
 | `41` | `196.168.50.41` | `gregniemeyer` | `/Users/gregniemeyer/Documents/watercouncil/code` | `5,6` |
@@ -35,8 +35,7 @@ starts that chair's timer. If Watershed reaches its own 60-second deadline, all
 chairs are released. Handoffs use the same strong-motion threshold as ordinary
 activation; there is no lower noise-sensitive threshold. While Watershed is
 active, changes to hidden raw chair bits are deduplicated because they do not
-change the effective regime. They therefore cannot resend Watershed and clear
-the applied daily AI overlay back to its fallback map.
+change the effective regime or warrant another cache-selection cycle.
 
 ## Studio `.51` network setup
 
@@ -68,11 +67,11 @@ then install the matching public key on every target:
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/water_council_fleet_ed25519 -C water-council-studio-51
-ssh francescospagnolo@196.168.50.11 true
+ssh watershed@196.168.50.11 true
 ssh gregniemeyer@196.168.50.21 true
 ssh gregniemeyer@196.168.50.31 true
 ssh gregniemeyer@196.168.50.41 true
-ssh-copy-id -i ~/.ssh/water_council_fleet_ed25519.pub francescospagnolo@196.168.50.11
+ssh-copy-id -i ~/.ssh/water_council_fleet_ed25519.pub watershed@196.168.50.11
 ssh-copy-id -i ~/.ssh/water_council_fleet_ed25519.pub gregniemeyer@196.168.50.21
 ssh-copy-id -i ~/.ssh/water_council_fleet_ed25519.pub gregniemeyer@196.168.50.31
 ssh-copy-id -i ~/.ssh/water_council_fleet_ed25519.pub gregniemeyer@196.168.50.41
@@ -83,7 +82,7 @@ Verify each fingerprint before accepting it; do not disable host-key checking.
 Then prove that non-interactive authentication works with the configured key:
 
 ```bash
-ssh -i ~/.ssh/water_council_fleet_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes francescospagnolo@196.168.50.11 true
+ssh -i ~/.ssh/water_council_fleet_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes watershed@196.168.50.11 true
 ssh -i ~/.ssh/water_council_fleet_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes gregniemeyer@196.168.50.21 true
 ssh -i ~/.ssh/water_council_fleet_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes gregniemeyer@196.168.50.31 true
 ssh -i ~/.ssh/water_council_fleet_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes gregniemeyer@196.168.50.41 true
@@ -92,8 +91,9 @@ ssh -i ~/.ssh/water_council_fleet_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes
 The controller uses `BatchMode=yes`, `IdentitiesOnly=yes`, a fifteen-second
 connection timeout, and no connection retry; password prompts cannot rescue a
 missing key. Ping alone is not an SSH test, and macOS Firewall Stealth Mode may
-suppress ping even when SSH works. Godot also needs inbound UDP port `5005`,
-plus the return acknowledgement to the temporary controller UDP port.
+suppress ping even when SSH works. Godot needs inbound UDP `5005` for control
+and acknowledgements and UDP `5007` for unicast confluence state and particle
+handoffs. Chair telemetry remains on UDP `5006`.
 
 ## Safe deployment from `.51`
 
@@ -157,14 +157,16 @@ python3 fleet/godot_controller.py start
 
 The Governator intentionally refuses to deploy target `11` to itself; the
 offline update bundle owns that local copy step. The full `start` still launches
-stage 7 on extended screen `1`, establishes Kinship, and restarts telemetry.
+stage 7 on the extended Samsung screen `1`, establishes Kinship, and restarts
+telemetry. The BenQ remains available as the console display.
 
 Each target is staged in a sibling `.code.deploy-<12-hex-id>` directory.
 During promotion, the previous tree is moved to the matching
 `.code.backup-<12-hex-id>` path so an automatic rollback remains possible.
 After every promoted tree passes checksum verification, that release's old
-backup is deleted. The deployed mirror preserves and excludes `telemetry/` and
-`watershed_ai/`; it also excludes `.godot/`, `.DS_Store`, `godot-remote.log`,
+backup is deleted. The deployed mirror preserves and excludes `telemetry/`,
+`watershed_ai/`, the top-level `chair_state_monitor.py`, and its local
+`chair_state_monitor.log`; it also excludes `.godot/`, `.DS_Store`, `godot-remote.log`,
 `__pycache__/`, `*.pyc`, and `*.pyo`. `.godot/` is generated afresh on each
 target rather than copied across machines. The controller does not update a
 running project in place and never deletes a path that does not match the exact
@@ -309,6 +311,12 @@ result prints the selected day, zero trigger cost, and original generation cost.
 On `.11`, the chair bridge reads that local array and sends the seven cached
 states from its already-authorized process. It does not spawn an AI/network
 helper, contact OpenAI, or require an Internet route when chair 7 is triggered.
+Because regime activation is acknowledged before those seven screen packets
+are delivered, each Godot stage immediately displays its own persisted
+last-successful state during that handoff. The current day's exact decision
+then confirms or replaces it. This per-screen state lives in Godot `user://`,
+survives code deployment and process restarts, and is written only after the
+stage has accepted the validated state.
 
 The live preflight requires all seven updated stage capabilities and uses
 Delta's 720-row phase as the reference. Other screens must be within two cyclic
@@ -361,9 +369,9 @@ The operator-level matrix is:
 
 - Kinship removes the reservoir, drain/field, and obstacle constraints and their
   debug guides and applies the full irregular shoreline, with salmon
-  `11/01–01/31` daily and leaves `10/01–10/31` every 2 days on all seven. Water
-  already retained by a reservoir is released downstream while its existing
-  trail fades normally.
+  `04/15–08/15` daily for Sacramento River winter-run Chinook and leaves
+  `10/01–10/31` every 2 days on all seven. Water already retained by a
+  reservoir is released downstream while its existing trail fades normally.
 - Agriculture defines reservoir `.20` except Cottonwood `0` (counts 1 on
   Shasta/Mill/Feather/American, 2 on McCloud/Delta), drain `.75` everywhere,
   shoreline `.30` on Shasta/McCloud/Cottonwood and `0` elsewhere, with positive

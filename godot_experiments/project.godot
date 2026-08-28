@@ -19,6 +19,7 @@ config/icon="res://img/icon.svg"
 [autoload]
 
 FlowControlBus="*res://flow/flow_control_bus.gd"
+ParticleConfluenceBus="*res://flow/particle_confluence_bus.gd"
 ModelTimeline="*res://flow/model_timeline.gd"
 ModelRegimes="*res://flow/model_regimes.gd"
 

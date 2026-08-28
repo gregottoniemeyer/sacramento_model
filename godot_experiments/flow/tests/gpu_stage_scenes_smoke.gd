@@ -11,6 +11,8 @@ extends Node
 const EXPECTED_VIEWPORT_SIZE := Vector2i(1920, 1080)
 const EXPECTED_LAYER_SLOTS := [143, 143, 143, 143, 143, 143, 142]
 const EXPECTED_LAYER_CAPACITIES := [10725, 10725, 10725, 10725, 10725, 10725, 10650]
+const EXPECTED_DELTA_LAYER_SLOTS := [286, 286, 286, 286, 286, 285, 285]
+const EXPECTED_DELTA_LAYER_CAPACITIES := [21450, 21450, 21450, 21450, 21450, 21375, 21375]
 const EXPECTED_LAYER_Z := [0, 1, 2, 3, 4, 5, 6]
 const EXPECTED_TITLE_FONT_PATH := (
 	"res://flow/assets/fonts/BarlowCondensed-Medium.ttf"
@@ -146,6 +148,11 @@ func _check_project_configuration() -> void:
 		String(ProjectSettings.get_setting("autoload/ModelRegimes", ""))
 			== "*res://flow/model_regimes.gd",
 		"project.godot must install the in-memory ModelRegimes autoload."
+	)
+	_expect(
+		String(ProjectSettings.get_setting("autoload/ParticleConfluenceBus", ""))
+			== "*res://flow/particle_confluence_bus.gd",
+		"project.godot must install the process-wide particle confluence autoload."
 	)
 
 
@@ -488,8 +495,8 @@ func _regime_matrix_expected_schedule(
 ) -> Dictionary:
 	if regime_id == "kinship":
 		return {
-			"salmon_start_mm_dd": "11/01",
-			"salmon_end_mm_dd": "01/31",
+			"salmon_start_mm_dd": "04/15",
+			"salmon_end_mm_dd": "08/15",
 			"salmon_interval_days": "1",
 			"leaf_start_mm_dd": "10/01",
 			"leaf_end_mm_dd": "10/31",
@@ -506,8 +513,8 @@ func _regime_matrix_expected_schedule(
 		"delta",
 	]:
 		return {
-			"salmon_start_mm_dd": "11/01",
-			"salmon_end_mm_dd": "01/31",
+			"salmon_start_mm_dd": "04/15",
+			"salmon_end_mm_dd": "08/15",
 			"salmon_interval_days": "1",
 			"leaf_start_mm_dd": "10/01",
 			"leaf_end_mm_dd": "10/31",
@@ -639,6 +646,32 @@ func _check_two_stage_texture_isolation() -> void:
 				and second_leaf_texture != null
 				and first_leaf_texture.get_rid() != second_leaf_texture.get_rid(),
 				"Two leaf fields must bind their own stage texture."
+			)
+		var first_pollution := first_stage.get_node_or_null(
+			"GPUPollutionField/GPUPollutionHeads"
+		) as GPUParticles2D
+		var second_pollution := second_stage.get_node_or_null(
+			"GPUPollutionField/GPUPollutionHeads"
+		) as GPUParticles2D
+		if first_pollution != null and second_pollution != null:
+			var first_pollution_material := (
+				first_pollution.process_material as ShaderMaterial
+			)
+			var second_pollution_material := (
+				second_pollution.process_material as ShaderMaterial
+			)
+			var first_pollution_texture := first_pollution_material.get_shader_parameter(
+				&"water_occupancy_texture"
+			) as Texture2D
+			var second_pollution_texture := second_pollution_material.get_shader_parameter(
+				&"water_occupancy_texture"
+			) as Texture2D
+			_expect(
+				first_pollution_texture != null
+				and second_pollution_texture != null
+				and first_pollution_texture.get_rid()
+					!= second_pollution_texture.get_rid(),
+				"Two pollution fields must bind their own stage texture.",
 			)
 	else:
 		_expect(false, "Two-stage isolation check could not find both GPU stages.")
@@ -849,6 +882,17 @@ func _check_stage_size(stage: Node, scene_path: String) -> void:
 
 func _check_palette_layers(stage: Node, scene_path: String) -> void:
 	var summary: Dictionary = stage.call(&"runtime_summary")
+	var delta_capacity := String(summary.get("screen_id", "")) == "delta"
+	var expected_layer_slots := (
+		EXPECTED_DELTA_LAYER_SLOTS if delta_capacity else EXPECTED_LAYER_SLOTS
+	)
+	var expected_layer_capacities := (
+		EXPECTED_DELTA_LAYER_CAPACITIES
+		if delta_capacity
+		else EXPECTED_LAYER_CAPACITIES
+	)
+	var expected_head_count := 2000 if delta_capacity else 1000
+	var expected_segment_count := 150000 if delta_capacity else 75000
 	_expect(
 		int(summary.get("palette_layer_count", 0)) == 7,
 		"%s must expose seven fixed palette layers." % scene_path
@@ -862,8 +906,10 @@ func _check_palette_layers(stage: Node, scene_path: String) -> void:
 		"%s must contain seven immutable trail pools." % scene_path
 	)
 	_expect(
-		Array(summary.get("head_layer_slot_counts", [])) == EXPECTED_LAYER_SLOTS,
-		"%s must distribute 1,000 global heads as 143x6 + 142." % scene_path
+		int(summary.get("amount", 0)) == expected_head_count
+		and Array(summary.get("head_layer_slot_counts", []))
+			== expected_layer_slots,
+		"%s must preserve its screen-specific fixed head budget." % scene_path
 	)
 	_expect(
 		String(summary.get("head_emission_timing", ""))
@@ -888,12 +934,12 @@ func _check_palette_layers(stage: Node, scene_path: String) -> void:
 			"%s native head emitters must keep complete cycles." % scene_path
 		)
 	_expect(
-		int(summary.get("trail_segment_capacity", 0)) == 75000,
-		"%s must retain the full 75,000-segment capacity." % scene_path
+		int(summary.get("trail_segment_capacity", 0)) == expected_segment_count,
+		"%s must retain its complete immutable segment capacity." % scene_path
 	)
 	_expect(
 		Array(summary.get("trail_segment_capacities", []))
-			== EXPECTED_LAYER_CAPACITIES,
+			== expected_layer_capacities,
 		"%s must distribute segment capacity by palette population." % scene_path
 	)
 	_expect(
@@ -1020,6 +1066,19 @@ func _check_stage_title(
 			and String(summary.get("stage_date_opentype_feature", ""))
 				== EXPECTED_DATE_OPENTYPE_FEATURE,
 			"%s summary must report the date's tnum feature." % scene_path
+		)
+		var visible_date := date_label.text
+		_expect(
+			visible_date == String(summary.get("stage_date_text", ""))
+			and String(summary.get("stage_date_format", "")) == "YYYY/MM/DD"
+			and visible_date.length() == 10
+			and visible_date.substr(4, 1) == "/"
+			and visible_date.substr(7, 1) == "/"
+			and visible_date.substr(0, 4) in ["2025", "2026"]
+			and visible_date.substr(5, 2).is_valid_int()
+			and visible_date.substr(8, 2).is_valid_int(),
+			"%s date must display only the water-year YYYY/MM/DD."
+				% scene_path,
 		)
 	_expect(
 		water_viewport != null
@@ -1493,6 +1552,210 @@ func _check_ecology(stage: Node, scene_path: String) -> void:
 			not water_viewport.is_ancestor_of(leaf_field),
 			"%s leaves must stay outside its water occupancy render." % scene_path
 		)
+	var pollution_summary: Dictionary = summary.get("pollution_summary", {})
+	var reveal_states := Dictionary(summary.get("extractor_reveal_states", {}))
+	var tech_reveal := Dictionary(reveal_states.get("tech", {}))
+	var stage_index := int(summary.get("stage_index", -1))
+	var expected_initial_data_center := (
+		"data_center_north" if posmod(stage_index, 2) == 0 else "data_center_east"
+	)
+	var expected_hidden_data_center := (
+		"data_center_east" if posmod(stage_index, 2) == 0 else "data_center_north"
+	)
+	_expect(
+		String(summary.get("extractor_reveal_mode", ""))
+			== "DISCRETE_FULL_SIZE_SITE_COHORT"
+		and is_equal_approx(
+			float(summary.get("extractor_reveal_initial_fraction", -1.0)),
+			0.50,
+		)
+		and is_equal_approx(
+			float(summary.get("extractor_reveal_delay_seconds", -1.0)),
+			30.0,
+		)
+		and bool(summary.get("extractor_reveal_ai_watershed_bypass", false))
+		and bool(tech_reveal.get("active", false))
+		and not bool(tech_reveal.get("expanded", true))
+		and Array(tech_reveal.get("visible_site_ids", []))
+			== [expected_initial_data_center]
+		and Array(tech_reveal.get("hidden_site_ids", []))
+			== [expected_hidden_data_center]
+		and int(tech_reveal.get("visible_site_count", 0)) == 1
+		and int(tech_reveal.get("target_site_count", 0)) == 2
+		and Array(summary.get("pollution_active_source_ids", []))
+			== [expected_initial_data_center],
+		"%s must begin Tech with one full-size alternating Data Center: %s"
+			% [scene_path, tech_reveal],
+	)
+	_expect(
+		int(pollution_summary.get("capacity", 0)) == 96
+		and int(summary.get("pollution_particles_per_source", 0)) == 1
+		and bool(pollution_summary.get("water_texture_assigned", false))
+		and String(pollution_summary.get("draw_shader_reused", ""))
+			== "res://flow/gpu_stage/gpu_leaf_draw.gdshader"
+		and String(pollution_summary.get("source_position_contract", ""))
+			== "EXACT_SOURCE_PIXELS_WITH_INWARD_DIRECTION"
+		and String(pollution_summary.get("initial_state", "")) == "FREE_SEEKING"
+		and String(pollution_summary.get("free_search_stop", ""))
+			== "CENTER_RECHECK_THEN_FADE"
+		and String(pollution_summary.get("water_attachment", ""))
+			== "IRREVERSIBLE"
+		and String(pollution_summary.get("fade_behavior", ""))
+			== "CENTER_MISS_SMOOTH_AFTER_HOLD"
+		and String(pollution_summary.get("retirement", ""))
+			== "LATCHED_RIGHT_EDGE_OR_CENTER_TIMEOUT_OR_EXPLICIT_RESET"
+		and is_equal_approx(
+			float(pollution_summary.get("center_recheck_interval_seconds", 0.0)),
+			0.50,
+		)
+		and is_equal_approx(
+			float(pollution_summary.get("center_hold_seconds", 0.0)),
+			8.0,
+		)
+		and is_equal_approx(
+			float(pollution_summary.get("center_fade_seconds", 0.0)),
+			2.0,
+		)
+		and String(pollution_summary.get("material_pollution_color", ""))
+			== "#7F858AFF"
+		and String(pollution_summary.get("heat_pollution_color", ""))
+			== "#FF0000FF"
+		and String(pollution_summary.get("pollution_color_routing", ""))
+			== "MATERIAL_GREY_HEAT_BRIGHT_RED"
+		and Color(summary.get(
+			"pollution_mine_color",
+			Color.TRANSPARENT,
+		)).is_equal_approx(Color("7f858a"))
+		and Color(summary.get(
+			"pollution_data_center_color",
+			Color.TRANSPARENT,
+		)).is_equal_approx(Color("ff0000"))
+		and Color(summary.get(
+			"data_center_hatch_color",
+			Color.TRANSPARENT,
+		)).is_equal_approx(Color("ff0000"))
+		and String(summary.get("pollution_color_routing", ""))
+			== "MINE_GREY_DATA_CENTER_BRIGHT_RED_HEAT"
+		and is_equal_approx(
+			float(pollution_summary.get("source_alpha", 0.0)),
+			1.0,
+		),
+		"%s must contain the bounded two-color GPU pollution field." % scene_path,
+	)
+	var pollution_field := stage.get_node_or_null("GPUPollutionField")
+	_expect(
+		pollution_field != null,
+		"%s must expose its GPU pollution field." % scene_path,
+	)
+	if pollution_field != null:
+		var pollution_heads := pollution_field.get_node_or_null(
+			"GPUPollutionHeads"
+		) as GPUParticles2D
+		_expect(
+			pollution_heads != null
+			and pollution_heads.amount == 96
+			and pollution_field.get_child_count() == 1
+			and pollution_heads.sub_emitter.is_empty(),
+			"%s pollution field must contain one independent disk pool." % scene_path,
+		)
+		if water_viewport != null:
+			_expect(
+				not water_viewport.is_ancestor_of(pollution_field),
+				"%s pollution must stay outside its water occupancy render."
+					% scene_path,
+			)
+	_check_extractor_reveal_cohort(stage, scene_path)
+
+
+func _check_extractor_reveal_cohort(stage: Node, scene_path: String) -> void:
+	var stage_index := int(stage.get("stage_index"))
+	var even_stage := posmod(stage_index, 2) == 0
+	stage.call(&"set_active_regime_names", ["Gold Rush", "Tech"])
+	var initial: Dictionary = stage.call(&"runtime_summary")
+	var initial_sources: Array = []
+	if even_stage:
+		initial_sources.append("gold_mine")
+	initial_sources.append(
+		"data_center_north" if even_stage else "data_center_east"
+	)
+	var reveal_states := Dictionary(initial.get("extractor_reveal_states", {}))
+	var gold_state := Dictionary(reveal_states.get("gold_rush", {}))
+	var tech_state := Dictionary(reveal_states.get("tech", {}))
+	_expect(
+		Array(initial.get("pollution_active_source_ids", [])) == initial_sources
+		and Array(gold_state.get("visible_site_ids", []))
+			== (["gold_mine"] if even_stage else [])
+		and Array(gold_state.get("hidden_site_ids", []))
+			== ([] if even_stage else ["gold_mine"])
+		and Array(tech_state.get("visible_site_ids", [])) == [
+			"data_center_north" if even_stage else "data_center_east"
+		]
+		and int(gold_state.get("visible_site_count", -1)) <= 1
+		and int(tech_state.get("visible_site_count", -1)) == 1,
+		"%s has the wrong initial 50%% Mine/Data Center cohort: %s"
+			% [scene_path, initial_sources],
+	)
+	var resource_ids: Array[int] = []
+	for extractor_variant: Variant in Array(stage.get("_regime_extractor_polygons")):
+		var extractor := extractor_variant as Resource
+		if extractor != null:
+			resource_ids.append(extractor.get_instance_id())
+	var interaction_texture := stage.get("_interaction_data_texture") as ImageTexture
+	var interaction_texture_id := (
+		interaction_texture.get_instance_id()
+		if interaction_texture != null
+		else 0
+	)
+	var initial_update_count := int(initial.get("extractor_reveal_update_count", 0))
+	var was_paused := bool(stage.call(&"is_paused"))
+	stage.call(&"_apply_local_paused", false)
+	stage.call(&"_advance_extractor_reveal", 29.999)
+	var before_boundary: Dictionary = stage.call(&"runtime_summary")
+	_expect(
+		Array(before_boundary.get("pollution_active_source_ids", [])) == initial_sources
+		and int(before_boundary.get("extractor_reveal_update_count", -1))
+			== initial_update_count,
+		"%s revealed a Mine/Data Center before 30 seconds." % scene_path,
+	)
+	var accumulator_before_boundary := float(before_boundary.get(
+		"pollution_emission_accumulator",
+		-1.0,
+	))
+	stage.call(&"_advance_extractor_reveal", 0.001)
+	var expanded: Dictionary = stage.call(&"runtime_summary")
+	var expanded_interaction_texture := (
+		stage.get("_interaction_data_texture") as ImageTexture
+	)
+	var expanded_resource_ids: Array[int] = []
+	for extractor_variant: Variant in Array(stage.get("_regime_extractor_polygons")):
+		var extractor := extractor_variant as Resource
+		if extractor != null:
+			expanded_resource_ids.append(extractor.get_instance_id())
+	_expect(
+		Array(expanded.get("pollution_active_source_ids", [])) == [
+			"gold_mine",
+			"data_center_north",
+			"data_center_east",
+		]
+		and int(expanded.get("active_regime_extractor_count", 0)) == 3
+		and int(expanded.get("interaction_overlay_count", 0)) <= 8
+		and int(expanded.get("extractor_reveal_update_count", -1))
+			== initial_update_count + 1
+		and is_equal_approx(
+			float(expanded.get("pollution_emission_accumulator", -2.0)),
+			accumulator_before_boundary,
+		)
+		and expanded_interaction_texture != null
+		and expanded_interaction_texture.get_instance_id() == interaction_texture_id
+		and resource_ids == expanded_resource_ids,
+		"%s did not reveal all full-size sites once without cadence/resource churn."
+			% scene_path,
+	)
+	stage.call(&"_apply_local_paused", was_paused)
+	# Force a falling edge before restoring the shared fixture so the next test
+	# sees a fresh 50% Tech cohort rather than this expanded timer.
+	stage.call(&"set_active_regime_names", ["Kinship"])
+	stage.call(&"set_active_regime_names", ["Agriculture", "Tech"])
 
 
 func _check_shoreline(
@@ -1645,14 +1908,15 @@ func _expect_feature_slots(
 		},
 		"%s did not preserve controller capacity outside the fixed banks." % context,
 	)
+	var expected_interaction_count := int(summary.get(
+		"active_regime_extractor_count",
+		0,
+	)) + int(expected.get("obstacle", 0))
 	_expect(
 		int(summary.get("interaction_polygon_count", 0)) == 7
 		and int(summary.get("interaction_overlay_count", 0))
-			== int(expected.get("drain", 0)) + int(expected.get("obstacle", 0)),
+			== expected_interaction_count,
 		"%s does not retain the complete resident feature resources." % context,
-	)
-	var expected_interaction_count := int(expected.get("drain", 0)) + int(
-		expected.get("obstacle", 0)
 	)
 	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
 		_expect(
@@ -1878,7 +2142,10 @@ func _check_control_route(
 		"target": String(expected_id),
 		"actions": [{
 			"name": "release_salmon",
-			"arguments": {"count": 3},
+			"arguments": {
+				"destination_screen": "mill_creek",
+				"survivor_count": 3,
+			},
 		}, {
 			"name": "release_leaves",
 			"arguments": {"count_per_side": 2},
@@ -1891,15 +2158,28 @@ func _check_control_route(
 	await get_tree().process_frame
 	summary = stage.call(&"runtime_summary")
 	var salmon_after: Dictionary = summary.get("salmon_summary", {})
-	_expect(
-		int(salmon_after.get("release_serial", 0))
-			== int(salmon_before.get("release_serial", 0)) + 1,
-		"%s routed salmon action must advance its release serial." % scene_path
-	)
-	_expect(
-		int(salmon_after.get("last_scheduled", 0)) == 3,
-		"%s routed salmon action must preserve its exact count." % scene_path
-	)
+	if expected_id == &"delta":
+		_expect(
+			int(salmon_after.get("release_serial", 0))
+				== int(salmon_before.get("release_serial", 0)) + 1,
+			"%s routed Delta cohort must advance its release serial." % scene_path
+		)
+		var cohorts: Array = salmon_after.get("last_cohorts", [])
+		_expect(
+			int(salmon_after.get("last_scheduled", 0)) == 25
+			and cohorts.size() == 1
+			and String(Dictionary(cohorts[0]).get("destination_screen", ""))
+				== "mill_creek"
+			and int(Dictionary(cohorts[0]).get("survivor_count", -1)) == 3,
+			"%s routed Delta cohort must retain 25 origins, destination, and survivors."
+				% scene_path,
+		)
+	else:
+		_expect(
+			int(salmon_after.get("release_serial", 0))
+				== int(salmon_before.get("release_serial", 0)),
+			"%s must not originate salmon outside the Delta." % scene_path,
+		)
 	var leaves_after: Dictionary = summary.get("leaf_summary", {})
 	_expect(
 		int(leaves_after.get("release_serial", 0))
@@ -1952,7 +2232,8 @@ func _check_control_route(
 	)
 	for count_variant: Variant in Array(summary.get("interaction_count_uniforms", [])):
 		_expect(
-			int(count_variant) == 6,
+			int(count_variant)
+				== int(summary.get("active_regime_extractor_count", 0)) + 2,
 			"%s routed polygon count must reach every shader layer." % scene_path
 		)
 
@@ -2032,7 +2313,7 @@ func _finish() -> void:
 			+ "(7 scenes, unique IDs/titles, 1920x1080, Mobile, "
 			+ "six temperature-bearing titles, "
 				+ "shared in-memory timeline/regimes + gate + routed "
-			+ "polygons/salmon/leaves)"
+			+ "polygons/salmon/leaves/pollution)"
 		)
 		get_tree().quit(0)
 		return

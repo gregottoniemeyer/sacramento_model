@@ -3,6 +3,11 @@ extends Node
 ## Focused regression test for the precipitation input and extraction budget.
 
 const BasinBudgetModel := preload("res://flow/basin_budget.gd")
+const BasinBudgetOverlayScript := preload(
+	"res://flow/gpu_stage/basin_budget_overlay.gd"
+)
+const FLOW_DENSITY_LOW_RATE := 0.01
+const FLOW_DENSITY_LOW_LINE_COUNT := 20
 
 var _failures := PackedStringArray()
 
@@ -27,6 +32,15 @@ func _run() -> void:
 		return
 
 	var summary := stage.runtime_summary()
+	var stage_particle_capacity := maxi(int(stage.get("particle_slots")), 1)
+	var one_percent_line_count := _expected_active_line_count(
+		0.01,
+		stage_particle_capacity,
+	)
+	var two_percent_line_count := _expected_active_line_count(
+		0.02,
+		stage_particle_capacity,
+	)
 	var extraction_breakdown := BasinBudgetModel.extraction_breakdown(
 		[false, false, false, true, false, false, false]
 	)
@@ -157,13 +171,28 @@ func _run() -> void:
 	)
 	_expect(
 		String(summary.get("delta_tide_render_style", ""))
-		== "RIGHT_ANCHORED_CENTERED_96H_FIFO_HATCHED_AREA"
-		and String(summary.get("delta_tide_area_shape", ""))
-		== "RIGHT_ANCHORED_HOURLY_TIDE_POLYGON"
+		== "RIGHT_ANCHORED_CENTERED_96H_SMOOTH_CUBIC_POLYGON"
+		and String(summary.get("delta_tide_polygon_shape", ""))
+		== "RIGHT_ANCHORED_MONOTONE_CUBIC_TIDE_BOUNDARY"
 		and int(summary.get("delta_tide_series_sample_count", 0)) == 8760
-		and int(summary.get("delta_tide_visible_line_count", 0)) == 120
-		and is_equal_approx(float(summary.get("delta_tide_first_line_y", 0.0)), 4.5)
-		and is_equal_approx(float(summary.get("delta_tide_last_line_y", 0.0)), 1075.5)
+		and int(summary.get("delta_tide_boundary_source_knot_count", 0)) == 97
+		and int(summary.get("delta_tide_boundary_point_count", 0)) == 769
+		and int(summary.get("delta_tide_boundary_segment_count", 0)) == 768
+		and int(summary.get("delta_tide_polygon_vertex_count", 0)) == 771
+		and int(summary.get("delta_tide_curve_subdivisions_per_hour", 0)) == 8
+		and is_equal_approx(
+			float(summary.get("delta_tide_curve_y_step_pixels", 0.0)),
+			1.40625,
+		)
+		and is_equal_approx(
+			float(summary.get("delta_tide_curve_max_y_step_pixels", 0.0)),
+			1.5,
+		)
+		and is_zero_approx(float(summary.get("delta_tide_first_sample_y", -1.0)))
+		and is_equal_approx(
+			float(summary.get("delta_tide_last_sample_y", 0.0)),
+			1080.0,
+		)
 		and is_equal_approx(
 			float(summary.get("delta_tide_current_sample_screen_y", 0.0)),
 			540.0,
@@ -171,15 +200,22 @@ func _run() -> void:
 		and bool(summary.get("delta_tide_current_sample_centered", false))
 		and int(summary.get("delta_tide_history_capacity", 0)) == 97
 		and String(summary.get("delta_tide_history_update_mode", ""))
-		== "WRAPPED_LINEAR_HOURLY_FIFO_WINDOW"
+		== "WRAPPED_C1_MONOTONE_CUBIC_HOURLY_FIFO_WINDOW"
 		and String(summary.get("delta_tide_history_order", ""))
 		== "OLDEST_TOP_NEWEST_BOTTOM"
 		and is_equal_approx(
 			float(summary.get("delta_tide_migration_pixels_per_sample", 0.0)),
 			11.25,
 		)
-		and String(summary.get("delta_tide_bar_value_dimension", ""))
-		== "POLYGON_LEFT_BOUNDARY_X_FROM_TIDE_HEIGHT"
+		and String(summary.get("delta_tide_curve_type", ""))
+		== "MONOTONE_CUBIC_HERMITE_BEZIER_EQUIVALENT"
+		and String(summary.get("delta_tide_temporal_interpolation", ""))
+		== "PERIODIC_MONOTONE_CUBIC_HERMITE"
+		and String(summary.get("delta_tide_interpolation_continuity", "")) == "C1"
+		and bool(summary.get("delta_tide_exact_hourly_knots", false))
+		and bool(summary.get("delta_tide_normalized_overshoot_clamped", false))
+		and String(summary.get("delta_tide_value_dimension", ""))
+		== "SMOOTH_BOUNDARY_X_FROM_TIDE_HEIGHT"
 		and Vector2(summary.get("delta_tide_line_length_range_pixels", Vector2.ZERO))
 		== Vector2(40.8, 306.0)
 		and is_equal_approx(
@@ -193,10 +229,10 @@ func _run() -> void:
 		and String(summary.get("delta_tide_length_source", ""))
 		== "NORMALIZED_TIDE_HEIGHT"
 		and String(summary.get("delta_tide_origin_side", "")) == "RIGHT"
-		and Color(summary.get("delta_tide_line_color", Color.TRANSPARENT))
+		and Color(summary.get("delta_tide_outline_color", Color.TRANSPARENT))
 		== Color.WHITE
-		and String(summary.get("delta_tide_line_color_name", "")) == "WHITE"
-		and is_equal_approx(float(summary.get("delta_tide_line_alpha", 0.0)), 0.20)
+		and String(summary.get("delta_tide_outline_color_name", "")) == "WHITE"
+		and is_equal_approx(float(summary.get("delta_tide_outline_alpha", 0.0)), 0.80)
 		and bool(summary.get("delta_budget_percentage_tabular_numerals", false))
 		and String(summary.get("delta_budget_percentage_font_resource", ""))
 		== "res://flow/assets/fonts/BarlowCondensed-Medium.ttf"
@@ -205,17 +241,20 @@ func _run() -> void:
 		and not summary.has("delta_tide_color_random_seed")
 		and not bool(summary.get("delta_tide_arrowheads", true))
 		and is_equal_approx(
-			float(summary.get("delta_tide_fill_line_width_pixels", 0.0)),
+			float(summary.get("delta_tide_outline_width_pixels", 0.0)),
 			3.0,
 		)
-		and is_equal_approx(
-			float(summary.get("delta_tide_fill_line_gap_pixels", 0.0)),
-			6.0,
-		)
-		and is_equal_approx(
-			float(summary.get("delta_tide_fill_line_period_pixels", 0.0)),
-			9.0,
-		)
+		and bool(summary.get("delta_tide_outline_antialiased", false))
+		and String(summary.get("delta_tide_outline_caps", "")) == "NONE"
+		and bool(summary.get("delta_tide_fill_visible", false))
+		and Color(summary.get("delta_tide_fill_color", Color.TRANSPARENT))
+		== Color.WHITE
+		and is_equal_approx(float(summary.get("delta_tide_fill_alpha", 0.0)), 0.08)
+		and not bool(summary.get("delta_tide_hatches_visible", true))
+		and not summary.has("delta_tide_area_shape")
+		and not summary.has("delta_tide_visible_line_count")
+		and not summary.has("delta_tide_fill_line_gap_pixels")
+		and not summary.has("delta_tide_plot_shape")
 		and is_equal_approx(float(summary.get("delta_tide_window_hours", 0.0)), 96.0)
 		and is_equal_approx(float(summary.get("delta_tide_window_past_hours", 0.0)), 48.0)
 		and is_equal_approx(float(summary.get("delta_tide_window_future_hours", 0.0)), 48.0)
@@ -223,10 +262,10 @@ func _run() -> void:
 		and bool(summary.get("delta_tide_wrap_enabled", false))
 		and String(summary.get("delta_tide_timeline_source", ""))
 		== "SHARED_MODEL_YEAR_PROGRESS"
-		and bool(summary.get("delta_tide_skips_screen_boundary_gridlines", false))
-		and not bool(summary.get("delta_tide_boundary_visible", true))
+		and String(summary.get("delta_tide_antialiasing_profile", ""))
+		== "FIXED_DENSITY_CUBIC_BOUNDARY_WITH_AA_OUTLINE"
 		and not bool(summary.get("delta_tide_label_visible", true)),
-		"Delta tide must draw a wrapped, right-anchored centered 96-hour white-hatched FIFO area."
+		"Delta tide must draw a wrapped right-anchored 96-hour smooth cubic polygon."
 	)
 	_expect(
 		is_zero_approx(float(summary.get("interaction_count_uniform", -1.0)))
@@ -247,15 +286,62 @@ func _run() -> void:
 			"Delta budget percentages must use tabular numerals."
 		)
 		var history_before := Array(tide_overlay.get("tide_fifo_values")).duplicate()
-		var tide_polygon: PackedVector2Array = tide_overlay.call(&"_tide_area_polygon")
-		_expect(
-			tide_polygon.size() == 99
-			and tide_polygon[0] == Vector2(1920.0, 0.0)
-			and tide_polygon[98] == Vector2(1920.0, 1080.0)
-			and is_equal_approx(tide_polygon[49].y, 540.0)
-			and tide_polygon[49].x < 1920.0,
-			"The tide area must anchor to the right edge with its live profile on the left."
+		var tide_curve_points: PackedVector2Array = tide_overlay.call(
+			&"_tide_curve_points"
 		)
+		var tide_fill_polygon: PackedVector2Array = tide_overlay.call(
+			&"_tide_fill_polygon",
+			tide_curve_points,
+		)
+		_expect(
+			tide_curve_points.size() == 769
+			and tide_fill_polygon.size() == 771
+			and is_zero_approx(tide_curve_points[0].y)
+			and is_equal_approx(tide_curve_points[768].y, 1080.0)
+			and is_equal_approx(tide_curve_points[384].y, 540.0)
+			and tide_curve_points[384].x < 1920.0
+			and tide_curve_points[384].x >= 1614.0
+			and tide_fill_polygon[0] == Vector2(1920.0, 0.0)
+			and tide_fill_polygon[1] == tide_curve_points[0]
+			and tide_fill_polygon[769] == tide_curve_points[768]
+			and tide_fill_polygon[770] == Vector2(1920.0, 1080.0)
+			and not tide_overlay.has_method(&"_tide_area_polygon")
+			and not tide_overlay.has_method(
+				&"_draw_horizontal_hatched_tide_polygon"
+			),
+			"The tide polygon must use 769 smooth boundary points plus two right anchors."
+		)
+		if tide_curve_points.size() == 769:
+			for curve_index in range(tide_curve_points.size()):
+				var point := tide_curve_points[curve_index]
+				_expect(
+					is_equal_approx(
+						point.y,
+						float(curve_index) * 1.40625,
+					)
+					and point.x >= 1614.0
+					and point.x <= 1879.2,
+					"Every tessellated tide point must stay on the fixed fine Y lattice and right-edge reach."
+				)
+			if history_before.size() == 97:
+				for knot_index in range(history_before.size()):
+					var knot_curve_index := knot_index * 8
+					var expected_x := 1920.0 - float(tide_overlay.call(
+						&"_tide_line_length",
+						float(history_before[knot_index]),
+					))
+					_expect(
+						is_equal_approx(
+							tide_curve_points[knot_curve_index].x,
+							expected_x,
+						)
+						and is_equal_approx(
+							tide_curve_points[knot_curve_index].y,
+							float(knot_index) * 11.25,
+						),
+						"Every hourly tide source value must remain an exact cubic boundary knot."
+					)
+		_check_tide_monotone_cubic_contract()
 		stage.set_model_date_time("01/15-01:00")
 		await _settle()
 		var history_after := Array(tide_overlay.get("tide_fifo_values")).duplicate()
@@ -272,6 +358,32 @@ func _run() -> void:
 					),
 					"One model hour must shift the wrapped FIFO by exactly one hourly sample."
 				)
+		stage.set_model_date_time("01/15-01:30")
+		await _settle()
+		var fractional_summary := stage.runtime_summary()
+		var fractional_history := Array(
+			tide_overlay.get("tide_fifo_values")
+		).duplicate()
+		var fractional_curve: PackedVector2Array = tide_overlay.call(
+			&"_tide_curve_points"
+		)
+		if fractional_history.size() == 97 and fractional_curve.size() == 769:
+			var fractional_height := float(fractional_history[48])
+			var expected_center_x := 1920.0 - float(tide_overlay.call(
+				&"_tide_line_length",
+				fractional_height,
+			))
+			_expect(
+				is_equal_approx(
+					fractional_height,
+					float(fractional_summary.get(
+						"delta_tide_normalized_height",
+						-1.0,
+					)),
+				)
+				and is_equal_approx(fractional_curve[384].x, expected_center_x),
+				"Fractional-hour telemetry, FIFO center, and cubic boundary must share one C1 sample."
+			)
 		stage.set_model_date_time("06/30-23:00")
 		await _settle()
 		var year_end_window := Array(tide_overlay.get("tide_fifo_values")).duplicate()
@@ -317,13 +429,64 @@ func _run() -> void:
 		"A 100% extraction budget must leave no modeled Delta remainder."
 	)
 	_expect(
-		int(summary.get("active_regime_extractor_count", 0)) == 5,
-		"Ranch + Gold Rush + Tech must activate two fields, one mine, and two data centers."
+		int(summary.get("active_regime_extractor_count", 0)) == 4,
+		"Initial Ranch + Gold Rush + Tech must show two fields, one mine, and one data center."
+	)
+	_expect(
+		Array(summary.get("pollution_active_source_ids", [])) == [
+			"gold_mine",
+			"data_center_north",
+		]
+		and int(summary.get("pollution_active_source_count", 0)) == 2,
+		"Only the initial Mine and Data Center sites must emit pollution.",
 	)
 	_expect(
 		String(summary.get("field_shape", "")) == "rectangle"
 		and String(summary.get("data_center_shape", "")) == "rectangle",
 		"Fields and data centers must use rectangle geometry."
+	)
+	var reveal_states := Dictionary(summary.get("extractor_reveal_states", {}))
+	var gold_reveal := Dictionary(reveal_states.get("gold_rush", {}))
+	var tech_reveal := Dictionary(reveal_states.get("tech", {}))
+	_expect(
+		String(summary.get("extractor_reveal_scope", ""))
+			== "GOLD_RUSH_MINE_AND_TECH_DATA_CENTERS"
+		and String(summary.get("extractor_reveal_mode", ""))
+			== "DISCRETE_FULL_SIZE_SITE_COHORT"
+		and is_equal_approx(
+			float(summary.get("extractor_reveal_initial_fraction", -1.0)),
+			0.50,
+		)
+		and is_equal_approx(
+			float(summary.get("extractor_reveal_delay_seconds", -1.0)),
+			30.0,
+		)
+		and bool(gold_reveal.get("active", false))
+		and bool(tech_reveal.get("active", false))
+		and not bool(gold_reveal.get("expanded", true))
+		and not bool(tech_reveal.get("expanded", true))
+		and Array(gold_reveal.get("visible_site_ids", [])) == ["gold_mine"]
+		and Array(tech_reveal.get("visible_site_ids", []))
+			== ["data_center_north"]
+		and Array(tech_reveal.get("hidden_site_ids", []))
+			== ["data_center_east"],
+		"Mine/Data Center regions must begin as the discrete 50% site cohort."
+	)
+	stage.call(&"_advance_extractor_reveal", 30.0)
+	await _settle()
+	var expanded_summary: Dictionary = stage.runtime_summary()
+	_expect(
+		int(expanded_summary.get("active_regime_extractor_count", 0)) == 5
+		and Array(expanded_summary.get("pollution_active_source_ids", [])) == [
+			"gold_mine",
+			"data_center_north",
+			"data_center_east",
+		]
+		and bool(Dictionary(Dictionary(expanded_summary.get(
+			"extractor_reveal_states",
+			{},
+		)).get("tech", {})).get("expanded", false)),
+		"The remaining full-size Data Center site must appear after 30 seconds."
 	)
 	_expect(
 		is_equal_approx(float(summary.get("extractor_hatch_angle_degrees", 0.0)), 45.0)
@@ -336,6 +499,10 @@ func _run() -> void:
 		and is_equal_approx(float(summary.get("geometry_hatch_alpha", 0.0)), 0.33)
 		and Color(summary.get("field_hatch_color", Color.TRANSPARENT))
 		== Color("6fbf73")
+		and Color(summary.get("data_center_hatch_color", Color.TRANSPARENT))
+			== Color("ff0000")
+		and Color(summary.get("data_center_hatch_color", Color.TRANSPARENT))
+			== Color(summary.get("pollution_data_center_color", Color.TRANSPARENT))
 		and String(summary.get("geometry_hatch_alpha_mode", "")) == "FIXED_UNIFORM"
 		and String(summary.get("repeller_display_term", "")) == "CITY"
 		and String(summary.get("geometry_label_background", ""))
@@ -344,7 +511,7 @@ func _run() -> void:
 			float(summary.get("geometry_label_hatch_clearance_pixels", 0.0)),
 			6.0,
 		),
-		"Geometry hatches must use green fields, share 33% alpha, and clear six pixels around labels."
+		"Geometry hatches must use green fields and heat-red Data Centers, share 33% alpha, and clear six pixels around labels."
 	)
 	_expect(
 		bool(summary.get("geometry_below_water", false)),
@@ -440,11 +607,15 @@ func _run() -> void:
 	await _settle()
 	summary = stage.runtime_summary()
 	_expect(
-		int(summary.get("amount", 0)) == 1000
-		and int(summary.get("active_heads_approx", 0)) == 20
+		int(summary.get("amount", 0)) == stage_particle_capacity
+		and int(summary.get("active_heads_approx", 0))
+			== one_percent_line_count
 		and String(summary.get("water_line_density_mapping", ""))
-		== "1_PERCENT_20__100_PERCENT_1000",
-		"One-percent water must render as 20 lines from the 1,000-line pool."
+		== "1_PERCENT_20__100_PERCENT_%d" % stage_particle_capacity,
+		"One-percent water must render as %d lines from the %d-line pool." % [
+			one_percent_line_count,
+			stage_particle_capacity,
+		]
 	)
 	_expect(
 		String(summary.get("head_emission_timing", ""))
@@ -475,7 +646,7 @@ func _run() -> void:
 		summary.get("active_particle_count_uniforms", [])
 	):
 		_expect(
-			is_equal_approx(float(active_count), 20.0),
+			is_equal_approx(float(active_count), float(one_percent_line_count)),
 			"Every head shader must receive the exact one-percent active count."
 		)
 	for coverage_fraction: Variant in Array(
@@ -495,7 +666,7 @@ func _run() -> void:
 	await _settle()
 	summary = stage.runtime_summary()
 	_expect(
-		int(summary.get("active_heads_approx", 0)) == 30
+		int(summary.get("active_heads_approx", 0)) == two_percent_line_count
 		and Vector2(
 			summary.get("water_inlet_band_y_range_pixels", Vector2.ZERO)
 		).is_equal_approx(Vector2(529.76, 550.24)),
@@ -506,15 +677,101 @@ func _run() -> void:
 	await _settle()
 	summary = stage.runtime_summary()
 	_expect(
-		int(summary.get("active_heads_approx", 0)) == 1000
+		int(summary.get("active_heads_approx", 0)) == stage_particle_capacity
 		and is_equal_approx(float(summary.get("amount_ratio", 0.0)), 1.0)
 		and Vector2(
 			summary.get("water_inlet_band_y_range_pixels", Vector2.ZERO)
 		).is_equal_approx(Vector2(28.0, 1052.0)),
-		"One-hundred-percent water must render all 1,000 lines."
+		"One-hundred-percent water must render all %d lines."
+			% stage_particle_capacity
 	)
 
 	_finish()
+
+
+func _check_tide_monotone_cubic_contract() -> void:
+	var series := PackedFloat32Array([
+		0.35,
+		0.55,
+		0.72,
+		0.61,
+		0.42,
+		0.28,
+		0.32,
+		0.47,
+	])
+	var derivative_epsilon := 0.0001
+	for knot_index in range(series.size()):
+		var knot_position := float(knot_index)
+		var knot_value := BasinBudgetOverlayScript.wrapped_monotone_cubic_sample(
+			series,
+			knot_position,
+			0.0,
+			1.0,
+		)
+		var left_value := BasinBudgetOverlayScript.wrapped_monotone_cubic_sample(
+			series,
+			knot_position - derivative_epsilon,
+			0.0,
+			1.0,
+		)
+		var right_value := BasinBudgetOverlayScript.wrapped_monotone_cubic_sample(
+			series,
+			knot_position + derivative_epsilon,
+			0.0,
+			1.0,
+		)
+		var left_derivative := (
+			knot_value - left_value
+		) / derivative_epsilon
+		var right_derivative := (
+			right_value - knot_value
+		) / derivative_epsilon
+		_expect(
+			is_equal_approx(knot_value, float(series[knot_index]))
+			and absf(left_derivative - right_derivative) <= 0.002,
+			"Periodic tide interpolation must preserve every knot with C1-continuous slope."
+		)
+	for segment_index in range(series.size()):
+		var start_value := float(series[segment_index])
+		var finish_value := float(series[(segment_index + 1) % series.size()])
+		var segment_minimum := minf(start_value, finish_value)
+		var segment_maximum := maxf(start_value, finish_value)
+		for subdivision_index in range(9):
+			var sample_position := (
+				float(segment_index)
+				+ float(subdivision_index) / 8.0
+			)
+			var value := BasinBudgetOverlayScript.wrapped_monotone_cubic_sample(
+				series,
+				sample_position,
+				0.0,
+				1.0,
+			)
+			_expect(
+				value >= segment_minimum - 0.000001
+				and value <= segment_maximum + 0.000001
+				and value >= 0.0
+				and value <= 1.0,
+				"Monotone tide interpolation must stay within each segment and normalized bounds."
+			)
+	_expect(
+		is_equal_approx(
+			BasinBudgetOverlayScript.wrapped_monotone_cubic_sample(
+				series,
+				-0.25,
+				0.0,
+				1.0,
+			),
+			BasinBudgetOverlayScript.wrapped_monotone_cubic_sample(
+				series,
+				float(series.size()) - 0.25,
+				0.0,
+				1.0,
+			),
+		),
+		"Periodic cubic tide interpolation must wrap without a value seam."
+	)
 
 
 func _count_runtime_rows(path: String) -> int:
@@ -524,6 +781,33 @@ func _count_runtime_rows(path: String) -> int:
 		if not line.is_empty() and line[0].is_valid_int():
 			count += 1
 	return count
+
+
+func _expected_active_line_count(
+	normalized_rate: float,
+	stage_particle_capacity: int,
+) -> int:
+	var capacity := maxi(stage_particle_capacity, 1)
+	var low_count := mini(FLOW_DENSITY_LOW_LINE_COUNT, capacity)
+	var rate := clampf(normalized_rate, 0.0, 1.0)
+	if rate <= 0.0:
+		return 0
+	if rate <= FLOW_DENSITY_LOW_RATE:
+		return clampi(
+			roundi(float(low_count) * rate / FLOW_DENSITY_LOW_RATE),
+			0,
+			capacity,
+		)
+	return clampi(
+		roundi(lerpf(
+			float(low_count),
+			float(capacity),
+			(rate - FLOW_DENSITY_LOW_RATE)
+				/ (1.0 - FLOW_DENSITY_LOW_RATE),
+		)),
+		0,
+		capacity,
+	)
 
 
 func _settle() -> void:

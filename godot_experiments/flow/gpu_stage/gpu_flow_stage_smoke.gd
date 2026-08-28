@@ -22,6 +22,12 @@ const EXPECTED_TEMPERATURE_DATA_PATH := (
 const EXPECTED_DELTA_TEMPERATURE_COLUMN := "delta_freeport_temp_c"
 const EXPECTED_TEMPERATURE_ROW_COUNT := 720
 const EXPECTED_TEMPERATURE_INTERPOLATION := "HALF_OPEN_ANNUAL_LINEAR_WRAP"
+const WATERSHED_AI_SMOKE_CACHE_DIRECTORY := (
+	"user://watershed_ai/gpu_stage_smoke_last_successful"
+)
+const WATERSHED_AI_SMOKE_CACHE_PATH := (
+	WATERSHED_AI_SMOKE_CACHE_DIRECTORY + "/delta.json"
+)
 const EXPECTED_REGIME_SLOT_CAPACITIES := {
 	"drain": 5,
 	"obstacle": 2,
@@ -60,7 +66,19 @@ class DuplicateWatershedAIRecipient:
 		return {"ok": true}
 
 
+func _remove_watershed_ai_smoke_cache() -> void:
+	for path: String in [
+		WATERSHED_AI_SMOKE_CACHE_PATH,
+		WATERSHED_AI_SMOKE_CACHE_PATH + ".tmp",
+	]:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(
+		WATERSHED_AI_SMOKE_CACHE_DIRECTORY
+	))
+
+
 func _ready() -> void:
+	_remove_watershed_ai_smoke_cache()
 	var model_regimes := get_node_or_null("/root/ModelRegimes")
 	if model_regimes != null:
 		model_regimes.call(&"clear_regimes")
@@ -72,6 +90,7 @@ func _ready() -> void:
 	stage.set(&"stage_index", 3)
 	stage.set(&"model_id", &"smoke_model")
 	stage.set(&"screen_id", &"delta")
+	stage.set(&"delta_confluence_enabled", true)
 	stage.set(&"control_target", &"smoke_target")
 	stage.set(&"stage_title", "Smoke River")
 	stage.set(&"regime_panel_visible", true)
@@ -80,6 +99,11 @@ func _ready() -> void:
 	stage.set(&"stage_temperature_visible", true)
 	stage.set(&"temperature_data_path", EXPECTED_TEMPERATURE_DATA_PATH)
 	stage.set(&"temperature_data_column", EXPECTED_DELTA_TEMPERATURE_COLUMN)
+	stage.set(&"watershed_ai_persist_last_successful", true)
+	stage.set(
+		&"watershed_ai_last_successful_cache_directory",
+		WATERSHED_AI_SMOKE_CACHE_DIRECTORY,
+	)
 	add_child(stage)
 	var startup_summary: Dictionary = stage.call(&"runtime_summary")
 	for admission_enabled: Variant in Array(
@@ -119,6 +143,9 @@ func _ready() -> void:
 	var water_display := stage.get_node_or_null("WaterTextureDisplay") as Sprite2D
 	var salmon_school := stage.get_node_or_null("GPUSalmonSchool") as GPUSalmon2D
 	var leaf_field := stage.get_node_or_null("GPULeafField") as GPULeaf2D
+	var pollution_field := stage.get_node_or_null(
+		"GPUPollutionField"
+	) as GPUPollution2D
 	var background := stage.get_node_or_null("Background") as ColorRect
 	var title_layer := stage.get_node_or_null("StageTitleLayer") as Node2D
 	var title_label := stage.get_node_or_null("StageTitleLayer/StageTitle") as Label
@@ -149,6 +176,15 @@ func _ready() -> void:
 		errors.append("water texture is not composited back onto the stage")
 	elif water_viewport != null and water_display.texture.get_rid() != water_viewport.get_texture().get_rid():
 		errors.append("display does not use its own water-only viewport texture")
+	if pollution_field == null:
+		errors.append("separate GPU pollution field is missing")
+	elif water_viewport != null and water_viewport.is_ancestor_of(pollution_field):
+		errors.append("pollution field feeds back into water occupancy")
+	elif leaf_field != null and (
+		pollution_field.get("_head_particles") == leaf_field.get("_head_particles")
+		or pollution_field.get("_control_texture") == leaf_field.get("_control_texture")
+	):
+		errors.append("pollution and seasonal leaves share a particle pool")
 	if not bool(summary.get("water_texture_bound", false)):
 		errors.append("runtime summary reports no water texture")
 	if Vector2(summary.get("water_texture_size", Vector2.ZERO)) != Vector2(1920.0, 1080.0):
@@ -791,6 +827,58 @@ func _ready() -> void:
 		)
 	if Vector2(summary.get("stage_size", Vector2.ZERO)) != Vector2(1920.0, 1080.0):
 		errors.append("stage is not native 1920 x 1080")
+	var confluence_summary: Dictionary = summary.get("confluence_summary", {})
+	var confluence_sources: Dictionary = confluence_summary.get("sources", {})
+	var expected_confluence_sources := {
+		"mount_shasta": [Vector2(0.0, 120.0), Vector2.RIGHT, 480.0],
+		"mccloud_pit": [Vector2(0.0, 840.0), Vector2.RIGHT, 480.0],
+		"cottonwood_creek": [Vector2(1200.0, 1080.0), Vector2.UP, 1440.0],
+		"mill_creek": [Vector2(360.0, 1080.0), Vector2.UP, 720.0],
+		"feather_river": [Vector2(600.0, 0.0), Vector2.DOWN, 960.0],
+		"american_river": [Vector2(1440.0, 0.0), Vector2.DOWN, 1680.0],
+	}
+	if (
+		not bool(confluence_summary.get("enabled", false))
+		or not bool(confluence_summary.get("is_delta", false))
+		or int(confluence_summary.get("source_count", 0)) != 6
+		or int(confluence_summary.get("cohort_size", 0)) != 25
+	):
+		errors.append("Delta confluence identity or six-source contract is missing")
+	for source_id: String in expected_confluence_sources:
+		var source_state: Dictionary = confluence_sources.get(source_id, {})
+		var expected: Array = expected_confluence_sources[source_id]
+		if (
+			Vector2(source_state.get("anchor_pixels", Vector2.INF)) != expected[0]
+			or Vector2(source_state.get(
+				"inward_direction_pixels",
+				Vector2.INF,
+			)) != expected[1]
+			or not is_equal_approx(
+				float(source_state.get("merge_x_pixels", -1.0)),
+				float(expected[2]),
+			)
+		):
+			errors.append("Delta confluence inlet is incorrect for %s" % source_id)
+	for material_variant: Variant in stage.get("_process_material_layers"):
+		var material := material_variant as ShaderMaterial
+		if material == null or not bool(material.get_shader_parameter(
+			&"confluence_mode"
+		)):
+			errors.append("Delta confluence mode did not reach every water shader")
+			break
+	if not (
+		String(confluence_summary.get("curve_mode", ""))
+			== "CUBIC_BEZIER_TO_SHARED_TRUNK"
+		and String(confluence_summary.get("trunk_width_model", ""))
+			== "BOUNDED_QUADRATURE_SOURCE_WIDTHS"
+		and String(confluence_summary.get("source_width_model", ""))
+			== "DELAYED_UPSTREAM_EXIT_WIDTH_PIXELS"
+		and is_equal_approx(float(confluence_summary.get(
+			"trunk_maximum_full_flow_width_pixels",
+			0.0,
+		)), 1024.0)
+	):
+		errors.append("Delta confluence is not a smooth, cumulatively widening trunk")
 	if not bool(stage.call(&"accepts_control_target", "delta")):
 		errors.append("screen identity does not address stage")
 	if not bool(stage.call(&"accepts_control_target", "smoke_model")):
@@ -858,13 +946,23 @@ func _ready() -> void:
 		expected_default_aperture_fraction
 	):
 		errors.append("default release probability is not driven by gate aperture")
+	var salmon_before_public: Dictionary = summary.get("salmon_summary", {})
+	var salmon_release_serial_before := int(salmon_before_public.get(
+		"release_serial",
+		0,
+	))
+	var salmon_total_before := int(salmon_before_public.get("total_scheduled", 0))
 	if int(stage.call(&"release_salmon", 25)) != 25:
 		errors.append("public salmon release did not schedule exactly 25")
 	summary = stage.call(&"runtime_summary")
 	var released_salmon_summary: Dictionary = summary.get("salmon_summary", {})
-	if int(released_salmon_summary.get("release_serial", 0)) != 1:
+	if int(released_salmon_summary.get("release_serial", 0)) != (
+		salmon_release_serial_before + 1
+	):
 		errors.append("public salmon release serial did not advance")
-	if int(released_salmon_summary.get("total_scheduled", 0)) != 25:
+	if int(released_salmon_summary.get("total_scheduled", 0)) != (
+		salmon_total_before + 25
+	):
 		errors.append("public salmon release total is not 25")
 	if int(stage.call(&"release_leaves", 15)) != 30:
 		errors.append("public leaf release did not schedule 15 from each bank")
@@ -1006,7 +1104,13 @@ func _ready() -> void:
 		}],
 		"actions": [
 			{"name": "pause"},
-			{"name": "release_salmon", "arguments": {"count": 7}},
+			{
+				"name": "release_salmon",
+				"arguments": {
+					"destination_screen": "mill_creek",
+					"survivor_count": 7,
+				},
+			},
 			{
 				"name": "release_leaves",
 				"arguments": {"count_per_side": 4},
@@ -1192,10 +1296,22 @@ func _ready() -> void:
 	if not bool(summary.get("paused", false)):
 		errors.append("controller action dictionary did not pause")
 	var controller_salmon_summary: Dictionary = summary.get("salmon_summary", {})
-	if int(controller_salmon_summary.get("release_serial", 0)) != 2:
+	if int(controller_salmon_summary.get("release_serial", 0)) != (
+		salmon_release_serial_before + 2
+	):
 		errors.append("controller salmon action did not advance release serial")
-	if int(controller_salmon_summary.get("total_scheduled", 0)) != 32:
-		errors.append("controller salmon count argument was not scheduled exactly")
+	if int(controller_salmon_summary.get("total_scheduled", 0)) != (
+		salmon_total_before + 50
+	):
+		errors.append("controller destination cohort was not scheduled as 25 salmon")
+	var controller_cohorts: Array = controller_salmon_summary.get("last_cohorts", [])
+	if (
+		controller_cohorts.size() != 1
+		or String(Dictionary(controller_cohorts[0]).get("destination_screen", ""))
+			!= "mill_creek"
+		or int(Dictionary(controller_cohorts[0]).get("survivor_count", -1)) != 7
+	):
+		errors.append("controller salmon destination or survivor count was not retained")
 	if not is_equal_approx(
 		float(controller_salmon_summary.get("water_steering_strength", 0.0)),
 		7.0
@@ -1458,10 +1574,12 @@ func _ready() -> void:
 	):
 		errors.append("idempotent native reservoir radius flushed ownership")
 	_check_kinship_ecology_schedule(stage, errors)
-	await _check_watershed_ai_control(stage, errors)
 	await _check_regime_runtime_stability(stage, errors)
+	await _check_watershed_ai_control(stage, errors)
 	_check_controller_ownership_regression(stage, errors)
 	await _check_stage_title_reset_independence(stage, errors)
+	await _check_watershed_ai_invalid_cache(stage, errors)
+	_remove_watershed_ai_smoke_cache()
 
 	if errors.is_empty():
 		print(
@@ -1470,13 +1588,62 @@ func _ready() -> void:
 				+ "immutable_segments=75000 palette_layers=7 fixed_z=true "
 				+ "identity=true gate=true pause=true "
 				+ "debug=true title=true temperature=true regimes=true controller=true "
-				+ "polygons=true salmon=true leaves=true"
+				+ "polygons=true salmon=true leaves=true pollution=true"
 		)
 		get_tree().quit(0)
 		return
 	for error in errors:
 		push_error("GPU_STAGE_SMOKE: %s" % error)
 	get_tree().quit(1)
+
+
+func _check_watershed_ai_invalid_cache(
+	stage: Node,
+	errors: PackedStringArray,
+) -> void:
+	var regimes := get_node_or_null("/root/ModelRegimes")
+	if regimes == null:
+		errors.append("invalid Watershed cache smoke requires ModelRegimes")
+		return
+	regimes.call(&"set_active_names", ["Kinship"])
+	await get_tree().process_frame
+	var file := FileAccess.open(WATERSHED_AI_SMOKE_CACHE_PATH, FileAccess.WRITE)
+	if file == null:
+		errors.append("invalid Watershed cache smoke could not write its fixture")
+		return
+	file.store_string("{\"invalid\":true}\n")
+	file.close()
+	stage.set(&"_watershed_ai_last_successful_state", {})
+	stage.set(&"_watershed_ai_last_successful_decision_id", "")
+	stage.set(&"_watershed_ai_last_successful_state_hash", "")
+	stage.call(&"_load_watershed_ai_last_successful_cache")
+	var invalid: Dictionary = stage.call(&"runtime_summary")
+	if not (
+		String(invalid.get(
+			"watershed_ai_last_successful_cache_status",
+			"",
+		)) == "INVALID"
+		and not bool(invalid.get(
+			"watershed_ai_last_successful_available",
+			true,
+		))
+	):
+		errors.append("corrupt last-successful cache did not fail closed")
+	regimes.call(&"set_active_names", ["Watershed"])
+	await get_tree().process_frame
+	var cold_fallback: Dictionary = stage.call(&"runtime_summary")
+	var budget_overlay := stage.get_node_or_null(
+		"BasinBudgetCanvas/BasinBudgetOverlay"
+	)
+	if not (
+		not bool(cold_fallback.get("watershed_ai_applied", true))
+		and String(cold_fallback.get("watershed_ai_applied_source", "")) == "NONE"
+		and budget_overlay != null
+		and String(budget_overlay.call(&"_formatted_extraction_percentage")) == "—"
+	):
+		errors.append("corrupt cache did not retain the safe cold Watershed baseline")
+	regimes.call(&"clear_regimes")
+	await get_tree().process_frame
 
 
 func _check_watershed_ai_control(
@@ -1610,6 +1777,50 @@ func _check_watershed_ai_control(
 	var applied: Dictionary = stage.call(&"runtime_summary")
 	var applied_state: Dictionary = applied.get("watershed_ai_applied_state", {})
 	var applied_hash := String(applied.get("watershed_ai_applied_state_hash", ""))
+	_expect_pollution_sources(
+		applied,
+		["data_center_north", "data_center_east"],
+		"AI Watershed",
+		errors,
+	)
+	var ai_reveal_states := Dictionary(applied.get("extractor_reveal_states", {}))
+	if not (
+		bool(applied.get("extractor_reveal_ai_watershed_bypass", false))
+		and not bool(Dictionary(ai_reveal_states.get("gold_rush", {})).get(
+			"active",
+			true,
+		))
+		and Array(Dictionary(ai_reveal_states.get("gold_rush", {})).get(
+			"sites",
+			["unexpected"],
+		)).is_empty()
+		and not bool(Dictionary(ai_reveal_states.get("tech", {})).get("active", true))
+		and Array(Dictionary(ai_reveal_states.get("tech", {})).get(
+			"sites",
+			["unexpected"],
+		)).is_empty()
+	):
+		errors.append("AI Watershed incorrectly inherited the historical site reveal")
+	var expected_ai_data_center_width := 1.90 * 120.0 * sqrt(0.15 / 0.20)
+	for source_variant: Variant in Array(applied.get(
+		"pollution_active_sources",
+		[],
+	)):
+		if source_variant is Dictionary:
+			var source: Dictionary = source_variant
+			var mouth_start := Vector2(source.get(
+				"mouth_start_pixels",
+				Vector2.ZERO,
+			))
+			var mouth_end := Vector2(source.get(
+				"mouth_end_pixels",
+				Vector2.ZERO,
+			))
+			if not is_equal_approx(
+				mouth_end.x - mouth_start.x,
+				expected_ai_data_center_width,
+			):
+				errors.append("AI Watershed pollution ignored scaled Data Center geometry")
 	if applied_hash != (
 		"abfc3b0a9327e7d9c4403dcd15e475a74c4223427eb9de96d0aeea03a2e4f5f9"
 	):
@@ -1640,6 +1851,28 @@ func _check_watershed_ai_control(
 		!= "40.0%"
 	):
 		errors.append("applied Watershed AI extraction is absent from the Delta budget")
+	if not FileAccess.file_exists(WATERSHED_AI_SMOKE_CACHE_PATH):
+		errors.append("accepted Watershed AI state did not create its persistent cache")
+	stage.set(&"_watershed_ai_last_successful_state", {})
+	stage.set(&"_watershed_ai_last_successful_decision_id", "")
+	stage.set(&"_watershed_ai_last_successful_state_hash", "")
+	stage.call(&"_load_watershed_ai_last_successful_cache")
+	var cache_reloaded: Dictionary = stage.call(&"runtime_summary")
+	if not (
+		String(cache_reloaded.get(
+			"watershed_ai_last_successful_cache_status",
+			"",
+		)) == "LOADED"
+		and String(cache_reloaded.get(
+			"watershed_ai_last_successful_decision_id",
+			"",
+		)) == "watershed-smoke-1"
+		and String(cache_reloaded.get(
+			"watershed_ai_last_successful_state_hash",
+			"",
+		)) == applied_hash
+	):
+		errors.append("a fresh stage could not reload its last successful AI state")
 	var applied_budgets: Dictionary = applied.get(
 		"regime_applied_feature_budgets",
 		{},
@@ -1712,6 +1945,10 @@ func _check_watershed_ai_control(
 		errors.append("Watershed AI acknowledgement omitted applied state or observation")
 
 	var apply_count := int(applied.get("watershed_ai_apply_count", -1))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(
+		WATERSHED_AI_SMOKE_CACHE_PATH
+	))
+	stage.set(&"_watershed_ai_last_successful_cache_status", "ERROR")
 	if not bool(bus.call(&"submit_packet", packet, "smoke-test", 0)):
 		errors.append("identical Watershed AI retry was rejected")
 	await get_tree().process_frame
@@ -1719,8 +1956,13 @@ func _check_watershed_ai_control(
 	if (
 		int(deduplicated.get("watershed_ai_apply_count", -2)) != apply_count
 		or int(deduplicated.get("watershed_ai_deduplicated_count", 0)) < 1
+		or not FileAccess.file_exists(WATERSHED_AI_SMOKE_CACHE_PATH)
+		or String(deduplicated.get(
+			"watershed_ai_last_successful_cache_status",
+			"",
+		)) != "SAVED"
 	):
-		errors.append("identical Watershed AI retry repeated GPU work")
+		errors.append("identical Watershed AI retry did not recover persistence")
 
 	var conflict_packet: Dictionary = packet.duplicate(true)
 	var conflict_changes: Dictionary = Dictionary(
@@ -1768,6 +2010,19 @@ func _check_watershed_ai_control(
 	if not (
 		not bool(restored.get("watershed_ai_applied", true))
 		and String(restored.get("watershed_ai_applied_state_hash", "")).is_empty()
+		and String(restored.get("watershed_ai_applied_source", "")) == "NONE"
+		and bool(restored.get(
+			"watershed_ai_last_successful_available",
+			false,
+		))
+		and String(restored.get(
+			"watershed_ai_last_successful_decision_id",
+			"",
+		)) == "watershed-smoke-2"
+		and String(restored.get(
+			"watershed_ai_last_successful_state_hash",
+			"",
+		)) == applied_hash
 		and bool(restored.get("watershed_data_drives_flow_rate", false))
 		and is_equal_approx(
 			float(restored.get("basin_input_rate", -2.0)),
@@ -1782,6 +2037,139 @@ func _check_watershed_ai_control(
 		and Array(restored_drain.get("contributor_ids", [])) == ["tech"]
 	):
 		errors.append("leaving exclusive Watershed did not restore profile/timeline state")
+
+	regimes.call(&"set_active_names", ["Watershed"])
+	await get_tree().process_frame
+	var replayed: Dictionary = stage.call(&"runtime_summary")
+	var replayed_counts: Dictionary = replayed.get(
+		"regime_feature_slot_counts_desired",
+		{},
+	)
+	if not (
+		bool(replayed.get("watershed_ai_applied", false))
+		and String(replayed.get("watershed_ai_applied_decision_id", ""))
+			== "watershed-smoke-2"
+		and String(replayed.get("watershed_ai_applied_state_hash", ""))
+			== applied_hash
+		and String(replayed.get("watershed_ai_applied_source", ""))
+			== "LAST_SUCCESSFUL_FALLBACK"
+		and int(replayed.get("watershed_ai_fallback_replay_count", 0)) >= 1
+		and is_equal_approx(float(replayed.get("basin_input_rate", -1.0)), 0.60)
+		and is_equal_approx(
+			float(replayed.get("total_extraction_fraction", -1.0)),
+			0.40,
+		)
+		and int(replayed_counts.get("drain", -1)) == 2
+		and budget_overlay != null
+		and String(budget_overlay.call(&"_formatted_extraction_percentage"))
+			== "40.0%"
+	):
+		errors.append("Watershed did not immediately replay its last successful state")
+	var replayed_active_head_count := float(replayed.get(
+		"active_heads_approx",
+		-1.0,
+	))
+	for active_count_uniform: Variant in Array(replayed.get(
+		"active_particle_count_uniforms",
+		[],
+	)):
+		if not is_equal_approx(
+			float(active_count_uniform),
+			replayed_active_head_count,
+		):
+			errors.append("replayed Watershed flow count missed a water shader")
+			break
+	for coverage_uniform: Variant in Array(replayed.get(
+		"water_coverage_fraction_uniforms",
+		[],
+	)):
+		if not is_equal_approx(float(coverage_uniform), 0.42):
+			errors.append("replayed Watershed coverage missed a water shader")
+			break
+	for base_speed_uniform: Variant in Array(replayed.get(
+		"base_speed_uniforms",
+		[],
+	)):
+		if not is_equal_approx(float(base_speed_uniform), 252.0):
+			errors.append("replayed Watershed speed missed a water shader")
+			break
+	if not bool(bus.call(&"submit_packet", same_state_packet, "smoke-test", 0)):
+		errors.append("current decision did not confirm the replayed Watershed state")
+	await get_tree().process_frame
+	var replay_confirmed: Dictionary = stage.call(&"runtime_summary")
+	if not (
+		String(replay_confirmed.get("watershed_ai_applied_decision_id", ""))
+			== "watershed-smoke-2"
+		and String(replay_confirmed.get("watershed_ai_applied_source", ""))
+			== "CURRENT_DECISION"
+		and int(replay_confirmed.get("watershed_ai_apply_count", -1)) == apply_count
+	):
+		errors.append("exact current decision did not confirm without repeated GPU work")
+	for coverage_uniform: Variant in Array(replay_confirmed.get(
+		"water_coverage_fraction_uniforms",
+		[],
+	)):
+		if not is_equal_approx(float(coverage_uniform), 0.42):
+			errors.append("confirmed Watershed replay lost its water coverage")
+			break
+
+	var replacement_state := state.duplicate(true)
+	replacement_state["decision_id"] = "watershed-smoke-3"
+	replacement_state["atmospheric_input_rate"] = 0.40
+	replacement_state["reservoir_release_rate"] = 0.0
+	replacement_state["available_supply_rate"] = 0.40
+	replacement_state["extraction_fraction"] = 0.50
+	replacement_state["remaining_rate"] = 0.20
+	replacement_state["salmon_fraction"] = 0.20
+	replacement_state["floodplain_fraction"] = 0.30
+	replacement_state["agriculture_fraction"] = 0.05
+	replacement_state["data_center_fraction"] = 0.15
+	replacement_state["city_fraction"] = 0.30
+	replacement_state["reservoir_storage_fraction"] = 0.20
+	var replacement_packet := _watershed_ai_smoke_packet(replacement_state)
+	if not bool(bus.call(
+		&"submit_packet",
+		replacement_packet,
+		"smoke-test",
+		0,
+	)):
+		errors.append("a current Watershed decision did not replace the replayed fallback")
+	await get_tree().process_frame
+	var replaced: Dictionary = stage.call(&"runtime_summary")
+	var replaced_counts: Dictionary = replaced.get(
+		"regime_feature_slot_counts_desired",
+		{},
+	)
+	if not (
+		String(replaced.get("watershed_ai_applied_decision_id", ""))
+			== "watershed-smoke-3"
+		and String(replaced.get("watershed_ai_applied_source", ""))
+			== "CURRENT_DECISION"
+		and String(replaced.get("watershed_ai_applied_state_hash", ""))
+			!= applied_hash
+		and String(replaced.get(
+			"watershed_ai_last_successful_decision_id",
+			"",
+		)) == "watershed-smoke-3"
+		and int(replaced.get("watershed_ai_apply_count", -1)) == apply_count + 1
+		and is_equal_approx(float(replaced.get("basin_input_rate", -1.0)), 0.40)
+		and is_equal_approx(
+			float(replaced.get("total_extraction_fraction", -1.0)),
+			0.50,
+		)
+		and is_equal_approx(float(replaced.get("basin_remaining_rate", -1.0)), 0.20)
+		and not bool(replaced.get("gate_open", true))
+		and int(replaced_counts.get("drain", -1)) == 1
+		and _managed_active_feature_layout(replayed, "drain") != (
+			_managed_active_feature_layout(replaced, "drain")
+		)
+		and String(replaced.get(
+			"watershed_ai_last_successful_cache_status",
+			"",
+		)) == "SAVED"
+		and FileAccess.file_exists(WATERSHED_AI_SMOKE_CACHE_PATH)
+	):
+		errors.append("today's Watershed decision did not fully replace the fallback")
 	regimes.call(&"clear_regimes")
 
 
@@ -2101,6 +2489,12 @@ func _check_regime_panel(
 	var active_summary: Dictionary = stage.call(&"runtime_summary")
 	if Array(active_summary.get("active_regime_names", [])) != ["Agriculture", "Tech"]:
 		errors.append("absolute active-regime set did not reach shared state")
+	_expect_pollution_sources(
+		active_summary,
+		["data_center_east"],
+		"Agriculture + Tech",
+		errors,
+	)
 	if not is_equal_approx(
 		float(active_summary.get("shoreline_randomness", -1.0)),
 		0.0,
@@ -2205,6 +2599,7 @@ func _check_regime_panel(
 	var kinship_summary: Dictionary = stage.call(&"runtime_summary")
 	if Array(kinship_summary.get("active_regime_indices", [])) != [0]:
 		errors.append("Kinship packet did not update the stage regime state")
+	_expect_pollution_sources(kinship_summary, [], "Kinship", errors)
 	var kinship_label := stage.get_node_or_null(
 		"StageTitleLayer/ActiveRegimes/Regime1"
 	) as Label
@@ -2239,8 +2634,8 @@ func _check_regime_panel(
 	)
 	var kinship_schedule: Dictionary = active_schedules.get("kinship", {})
 	if not (
-		String(kinship_schedule.get("salmon_start_mm_dd", "")) == "11/01"
-		and String(kinship_schedule.get("salmon_end_mm_dd", "")) == "01/31"
+		String(kinship_schedule.get("salmon_start_mm_dd", "")) == "04/15"
+		and String(kinship_schedule.get("salmon_end_mm_dd", "")) == "08/15"
 		and String(kinship_schedule.get("salmon_interval_days", "")) == "1"
 		and String(kinship_schedule.get("leaf_start_mm_dd", "")) == "10/01"
 		and String(kinship_schedule.get("leaf_end_mm_dd", "")) == "10/31"
@@ -2310,8 +2705,45 @@ func _check_delta_regime_profile_contracts(
 	stage: Node,
 	errors: PackedStringArray
 ) -> void:
+	var geometry_overlay := stage.get_node_or_null("ReservoirAndStatusOverlay")
+	if geometry_overlay == null:
+		errors.append("extractor geometry overlay is unavailable for hatch clipping")
+	else:
+		var clipped: PackedVector2Array = geometry_overlay.call(
+			&"_clipped_segment_to_rect",
+			Vector2(-5.0, 10.0),
+			Vector2(15.0, -10.0),
+			Rect2(0.0, 0.0, 10.0, 10.0),
+		)
+		var missed: PackedVector2Array = geometry_overlay.call(
+			&"_clipped_segment_to_rect",
+			Vector2(-5.0, -5.0),
+			Vector2(-1.0, -1.0),
+			Rect2(0.0, 0.0, 10.0, 10.0),
+		)
+		if not (
+			clipped == PackedVector2Array([Vector2(0.0, 5.0), Vector2(5.0, 0.0)])
+			and missed.is_empty()
+		):
+			errors.append("extractor hatch lattice is not clipped to site bounds")
+		var data_center_geometry_color: Color = geometry_overlay.call(
+			&"_geometry_color",
+			"data_center",
+			"absorb",
+		)
+		var mine_geometry_color: Color = geometry_overlay.call(
+			&"_geometry_color",
+			"mine",
+			"absorb",
+		)
+		if not (
+			data_center_geometry_color.is_equal_approx(Color("ff0000"))
+			and mine_geometry_color.is_equal_approx(Color("d4af37"))
+		):
+			errors.append("Data Center/Mine hatch colors are not red/gold")
 	stage.call(&"set_active_regime_names", ["Agriculture"])
 	var agriculture: Dictionary = stage.call(&"runtime_summary")
+	_expect_pollution_sources(agriculture, [], "Agriculture Delta", errors)
 	_expect_regime_feature_values(
 		agriculture,
 		"Agriculture Delta",
@@ -2332,6 +2764,51 @@ func _check_delta_regime_profile_contracts(
 
 	stage.call(&"set_active_regime_names", ["Gold Rush"])
 	var gold_rush: Dictionary = stage.call(&"runtime_summary")
+	_expect_pollution_sources(
+		gold_rush,
+		[],
+		"Gold Rush Delta",
+		errors,
+	)
+	_expect_extractor_reveal_state(
+		gold_rush,
+		"gold_rush",
+		false,
+		[],
+		["gold_mine"],
+		"Gold Rush initial",
+		errors,
+	)
+	var gold_pollution_accumulator := float(gold_rush.get(
+		"pollution_emission_accumulator",
+		-1.0,
+	))
+	stage.call(&"_advance_extractor_reveal", 29.999)
+	var gold_before_reveal: Dictionary = stage.call(&"runtime_summary")
+	_expect_extractor_reveal_state(
+		gold_before_reveal,
+		"gold_rush",
+		false,
+		[],
+		["gold_mine"],
+		"Gold Rush before 30-second reveal",
+		errors,
+	)
+	if not is_equal_approx(
+		float(gold_before_reveal.get("pollution_emission_accumulator", -2.0)),
+		gold_pollution_accumulator,
+	):
+		errors.append("Gold Rush reveal timer reset the pollution cadence early")
+	stage.call(&"_advance_extractor_reveal", 0.001)
+	_expect_extractor_reveal_state(
+		stage.call(&"runtime_summary"),
+		"gold_rush",
+		true,
+		["gold_mine"],
+		[],
+		"Gold Rush expanded cohort",
+		errors,
+	)
 	var gold_rush_geometry := _regime_geometry_snapshot(gold_rush)
 	if String(gold_rush.get("regime_geometry_mode", "")) != (
 		"GENERATION_SALTED_BOUNDED_SLOT_BANKS"
@@ -2358,6 +2835,7 @@ func _check_delta_regime_profile_contracts(
 
 	stage.call(&"set_active_regime_names", ["Hydropower"])
 	var hydropower: Dictionary = stage.call(&"runtime_summary")
+	_expect_pollution_sources(hydropower, [], "Hydropower Delta", errors)
 	var hydropower_geometry := _regime_geometry_snapshot(hydropower)
 	if hydropower_geometry == gold_rush_geometry:
 		errors.append("Hydropower reused the Gold Rush feature placement")
@@ -2444,6 +2922,7 @@ func _check_delta_regime_profile_contracts(
 
 	stage.call(&"set_active_regime_names", ["Water Projects"])
 	var water_projects: Dictionary = stage.call(&"runtime_summary")
+	_expect_pollution_sources(water_projects, [], "Water Projects Delta", errors)
 	_expect_regime_slot_counts(
 		water_projects,
 		{"drain": 3, "obstacle": 1},
@@ -2479,6 +2958,148 @@ func _check_delta_regime_profile_contracts(
 
 	stage.call(&"set_active_regime_names", ["Tech"])
 	var tech: Dictionary = stage.call(&"runtime_summary")
+	_expect_pollution_sources(
+		tech,
+		["data_center_east"],
+		"Tech Delta",
+		errors,
+	)
+	_expect_extractor_reveal_state(
+		tech,
+		"tech",
+		false,
+		["data_center_east"],
+		["data_center_north"],
+		"Tech initial",
+		errors,
+	)
+	var tech_elapsed_before_pause := float(
+		Dictionary(Dictionary(tech.get("extractor_reveal_states", {})).get(
+			"tech",
+			{},
+		)).get("elapsed_seconds", -1.0)
+	)
+	stage.call(&"set_paused", true)
+	stage.call(&"_advance_extractor_reveal", 60.0)
+	var tech_paused: Dictionary = stage.call(&"runtime_summary")
+	var tech_paused_state: Dictionary = Dictionary(
+		Dictionary(tech_paused.get("extractor_reveal_states", {})).get("tech", {})
+	)
+	if not is_equal_approx(
+		float(tech_paused_state.get("elapsed_seconds", -2.0)),
+		tech_elapsed_before_pause,
+	):
+		errors.append("paused Tech site reveal timer continued")
+	stage.call(&"set_paused", false)
+	stage.call(&"_advance_extractor_reveal", 29.999)
+	var tech_before_reveal: Dictionary = stage.call(&"runtime_summary")
+	_expect_extractor_reveal_state(
+		tech_before_reveal,
+		"tech",
+		false,
+		["data_center_east"],
+		["data_center_north"],
+		"Tech before 30-second reveal",
+		errors,
+	)
+	stage.call(&"set_active_regime_names", ["Kinship", "Tech"])
+	_expect_extractor_reveal_state(
+		stage.call(&"runtime_summary"),
+		"tech",
+		false,
+		["data_center_east"],
+		["data_center_north"],
+		"Tech preserved across unrelated regime change",
+		errors,
+	)
+	stage.call(&"set_active_regime_names", ["Tech"])
+	var tech_accumulator_before_reveal := float(
+		Dictionary(stage.call(&"runtime_summary")).get(
+			"pollution_emission_accumulator",
+			-1.0,
+		)
+	)
+	stage.call(&"_advance_extractor_reveal", 0.001)
+	var tech_expanded: Dictionary = stage.call(&"runtime_summary")
+	_expect_pollution_sources(
+		tech_expanded,
+		["data_center_north", "data_center_east"],
+		"Tech expanded Delta",
+		errors,
+	)
+	_expect_extractor_reveal_state(
+		tech_expanded,
+		"tech",
+		true,
+		["data_center_north", "data_center_east"],
+		[],
+		"Tech expanded sites",
+		errors,
+	)
+	if not is_equal_approx(
+		float(tech_expanded.get("pollution_emission_accumulator", -2.0)),
+		tech_accumulator_before_reveal,
+	):
+		errors.append("Tech reveal reset the established pollution cadence")
+	stage.call(&"set_active_regime_names", ["Hydropower"])
+	stage.call(&"set_active_regime_names", ["Tech"])
+	_expect_extractor_reveal_state(
+		stage.call(&"runtime_summary"),
+		"tech",
+		false,
+		["data_center_east"],
+		["data_center_north"],
+		"Tech reactivation reset",
+		errors,
+	)
+	stage.call(&"_advance_extractor_reveal", 30.0)
+	# Refresh the fixture after the intentional edge tests so the existing
+	# Tech -> Agriculture generation assertions compare adjacent transitions.
+	tech = stage.call(&"runtime_summary")
+	var pollution_before_burst: Dictionary = tech.get("pollution_summary", {})
+	var pollution_total_before := int(pollution_before_burst.get(
+		"total_scheduled",
+		0,
+	))
+	if int(stage.call(&"_release_pollution_burst")) != 2:
+		errors.append("Tech pollution did not release one disk per Data Center")
+	var pollution_after_burst: Dictionary = Dictionary(
+		stage.call(&"runtime_summary").get("pollution_summary", {})
+	)
+	if not (
+		int(pollution_after_burst.get("total_scheduled", 0))
+			== pollution_total_before + 2
+		and Dictionary(pollution_after_burst.get(
+			"last_source_release_counts",
+			{},
+		)) == {
+			"data_center_north": 1,
+			"data_center_east": 1,
+		}
+	):
+		errors.append("Tech pollution cadence is not one disk per active source")
+	var pollution_total_before_stall := int(
+		pollution_after_burst.get("total_scheduled", 0)
+	)
+	stage.set(&"_pollution_emission_accumulator", 5.25)
+	stage.call(&"_advance_pollution_emission", 0.01)
+	var after_stall: Dictionary = stage.call(&"runtime_summary")
+	var after_stall_pollution := Dictionary(after_stall.get(
+		"pollution_summary",
+		{},
+	))
+	var after_stall_total := int(after_stall_pollution.get("total_scheduled", 0))
+	stage.call(&"_advance_pollution_emission", 0.01)
+	var after_next_frame: Dictionary = stage.call(&"runtime_summary")
+	if not (
+		after_stall_total == pollution_total_before_stall + 8
+		and float(after_stall.get("pollution_emission_accumulator", -1.0)) < 1.0
+		and int(Dictionary(after_next_frame.get(
+			"pollution_summary",
+			{},
+		)).get("total_scheduled", 0)) == after_stall_total
+	):
+		errors.append("pollution stall guard replayed more than four bursts")
 	var tech_geometry := _regime_geometry_snapshot(tech)
 	var tech_generation := int(tech.get("regime_layout_generation", -1))
 	var tech_update_count := int(tech.get("regime_geometry_update_count", -1))
@@ -3297,22 +3918,40 @@ func _check_kinship_ecology_schedule(
 	)) != int(october_first_leaves.get("total_scheduled", 0)) + 30:
 		errors.append("Kinship leaves did not release again on October 3")
 
-	stage.call(&"set_model_date_mm_dd", "11/01-00:00")
-	var november_first: Dictionary = stage.call(&"runtime_summary")
-	var november_salmon: Dictionary = november_first.get("salmon_summary", {})
-	if int(november_salmon.get("total_scheduled", 0)) != (
-		int(salmon_before.get("total_scheduled", 0)) + 25
+	stage.call(&"set_model_date_mm_dd", "04/14-00:00")
+	var april_fourteenth: Dictionary = stage.call(&"runtime_summary")
+	if not is_zero_approx(float(april_fourteenth.get(
+		"regime_salmon_activity",
+		-1.0
+	))):
+		errors.append("Kinship salmon activity began before April 15")
+	if int(Dictionary(april_fourteenth.get("salmon_summary", {})).get(
+		"total_scheduled",
+		0
+	)) != int(salmon_before.get("total_scheduled", 0)):
+		errors.append("Kinship released salmon before April 15")
+
+	stage.call(&"set_model_date_mm_dd", "04/15-00:00")
+	var april_fifteenth: Dictionary = stage.call(&"runtime_summary")
+	var april_salmon: Dictionary = april_fifteenth.get("salmon_summary", {})
+	if int(april_salmon.get("total_scheduled", 0)) != (
+		int(salmon_before.get("total_scheduled", 0)) + 150
 	):
-		errors.append("Kinship did not perform one salmon release on November 1")
-	if not is_equal_approx(float(november_first.get("regime_salmon_activity", 0.0)), 1.0):
+		errors.append("Kinship did not release six 25-salmon Delta cohorts on April 15")
+	if (
+		int(april_salmon.get("last_cohort_count", 0)) != 6
+		or int(april_salmon.get("last_cohort_scheduled_count", 0)) != 150
+	):
+		errors.append("Kinship Delta release was not six joint 25-salmon cohorts")
+	if not is_equal_approx(float(april_fifteenth.get("regime_salmon_activity", 0.0)), 1.0):
 		errors.append("Kinship salmon activity did not follow the profile weight")
 
-	stage.call(&"set_model_date_mm_dd", "11/01-12:00")
+	stage.call(&"set_model_date_mm_dd", "04/15-12:00")
 	var same_day: Dictionary = stage.call(&"runtime_summary")
 	if int(Dictionary(same_day.get("salmon_summary", {})).get(
 		"total_scheduled",
 		0
-	)) != int(november_salmon.get("total_scheduled", 0)):
+	)) != int(april_salmon.get("total_scheduled", 0)):
 		errors.append("Kinship salmon released more than once on the same model day")
 	stage.call(&"set_active_regime_names", [])
 	stage.call(&"set_active_regime_names", ["Kinship"])
@@ -3320,28 +3959,50 @@ func _check_kinship_ecology_schedule(
 	if int(Dictionary(same_day_reactivated.get("salmon_summary", {})).get(
 		"total_scheduled",
 		0
-	)) != int(november_salmon.get("total_scheduled", 0)):
+	)) != int(april_salmon.get("total_scheduled", 0)):
 		errors.append("same-day Kinship off/on toggle duplicated a salmon release")
 
-	stage.call(&"set_model_date_mm_dd", "11/02-00:00")
+	stage.call(&"set_model_date_mm_dd", "04/16-00:00")
 	var next_day: Dictionary = stage.call(&"runtime_summary")
 	if not (
-		int(next_day.get("model_day_index", -1)) == 305
+		int(next_day.get("model_day_index", -1)) == 105
 		and int(next_day.get("model_minute_of_day", -1)) == 0
-		and String(next_day.get("stage_date_text", "")) == "11/02-00:00"
+		and String(next_day.get("stage_date_text", "")) == "2026/04/16"
+		and String(next_day.get("stage_date_format", "")) == "YYYY/MM/DD"
+		and bool(next_day.get("stage_date_tabular_numerals", false))
 	):
-		errors.append("ModelTimeline did not reconstruct November 2 midnight exactly")
+		errors.append("ModelTimeline did not reconstruct April 16 midnight exactly")
+	var expected_water_year_dates := {
+		181: "2025/07/01",
+		364: "2025/12/31",
+		0: "2026/01/01",
+		180: "2026/06/30",
+	}
+	for day_index: int in expected_water_year_dates:
+		if String(stage.call(&"_format_model_display_date", day_index)) != String(
+			expected_water_year_dates[day_index]
+		):
+			errors.append("visible date did not preserve the 2025/2026 water-year boundary")
+			break
+	stage.call(&"set_model_date_mm_dd", "04/16-12:34")
+	var same_visible_day: Dictionary = stage.call(&"runtime_summary")
+	if not (
+		String(same_visible_day.get("stage_date_text", "")) == "2026/04/16"
+		and String(stage.call(&"get_model_date_time")) == "04/16-12:34"
+	):
+		errors.append("visible date exposed time or the internal minute was discarded")
+	stage.call(&"set_model_date_mm_dd", "04/16-00:00")
 	if int(Dictionary(next_day.get("salmon_summary", {})).get(
 		"total_scheduled",
 		0
-	)) != int(november_salmon.get("total_scheduled", 0)) + 25:
-		errors.append("Kinship daily salmon release did not repeat on November 2")
+	)) != int(april_salmon.get("total_scheduled", 0)) + 150:
+		errors.append("Kinship daily salmon release did not repeat on April 16")
 
-	stage.call(&"set_model_date_mm_dd", "02/01-00:00")
+	stage.call(&"set_model_date_mm_dd", "08/16-00:00")
 	var outside_season: Dictionary = stage.call(&"runtime_summary")
 	if not is_zero_approx(float(outside_season.get("regime_salmon_activity", -1.0))):
-		errors.append("Kinship salmon activity did not stop after January 31")
-	stage.call(&"set_model_date_mm_dd", "11/01-00:00")
+		errors.append("Kinship salmon activity did not stop after August 15")
+	stage.call(&"set_model_date_mm_dd", "04/15-00:00")
 	var next_year: Dictionary = stage.call(&"runtime_summary")
 	if int(Dictionary(next_year.get("salmon_summary", {})).get(
 		"total_scheduled",
@@ -3349,7 +4010,7 @@ func _check_kinship_ecology_schedule(
 	)) != int(Dictionary(next_day.get("salmon_summary", {})).get(
 		"total_scheduled",
 		0
-	)) + 25:
+	)) + 150:
 		errors.append("Kinship salmon schedule did not re-arm for the next model year")
 	stage.call(&"set_active_regime_names", [])
 
@@ -3446,6 +4107,187 @@ func _check_regime_runtime_stability(
 		errors.append("rapid regime switching changed the fixed feature-bank capacities")
 	if get_tree().get_nodes_in_group(&"flow_models").size() != baseline_flow_model_count:
 		errors.append("rapid regime switching changed the live flow-model count")
+
+
+func _expect_pollution_sources(
+	summary: Dictionary,
+	expected_ids: Array,
+	context: String,
+	errors: PackedStringArray,
+) -> void:
+	var actual_ids := Array(summary.get("pollution_active_source_ids", []))
+	if actual_ids != expected_ids:
+		errors.append("%s pollution sources are incorrect: %s" % [
+			context,
+			actual_ids,
+		])
+	if int(summary.get("pollution_active_source_count", -1)) != expected_ids.size():
+		errors.append("%s pollution source count is incorrect" % context)
+	if not (
+		int(summary.get("pollution_particles_per_source", 0)) == 1
+		and not bool(summary.get("pollution_never_fades", true))
+		and String(summary.get("pollution_source_position_contract", ""))
+			== "EXACT_EXTRACTOR_MOUTH"
+		and String(summary.get("pollution_initial_state", "")) == "FREE_SEEKING"
+		and String(summary.get("pollution_center_miss_behavior", ""))
+			== "THROTTLED_RECHECK_THEN_FADE"
+		and is_equal_approx(
+			float(summary.get("pollution_center_recheck_interval_seconds", 0.0)),
+			0.50,
+		)
+		and is_equal_approx(
+			float(summary.get("pollution_center_hold_seconds", 0.0)),
+			8.0,
+		)
+		and is_equal_approx(
+			float(summary.get("pollution_center_fade_seconds", 0.0)),
+			2.0,
+		)
+		and String(summary.get("pollution_retirement", ""))
+			== "LATCHED_RIGHT_EDGE_OR_CENTER_TIMEOUT_OR_FULL_RESET"
+		and Color(summary.get(
+			"pollution_mine_color",
+			Color.TRANSPARENT,
+		)).is_equal_approx(Color("7f858a"))
+		and Color(summary.get(
+			"pollution_data_center_color",
+			Color.TRANSPARENT,
+		)).is_equal_approx(Color("ff0000"))
+		and String(summary.get("pollution_color_routing", ""))
+			== "MINE_GREY_DATA_CENTER_BRIGHT_RED_HEAT"
+	):
+		errors.append("%s pollution lifetime/cadence/color contract changed" % context)
+	for source_variant: Variant in Array(summary.get(
+		"pollution_active_sources",
+		[],
+	)):
+		if not source_variant is Dictionary:
+			errors.append("%s pollution source descriptor is malformed" % context)
+			continue
+		var source: Dictionary = source_variant
+		var source_id := String(source.get("source_id", ""))
+		var source_kind := String(source.get("kind", ""))
+		var bank_side := String(source.get("bank_side", ""))
+		var mouth_start := Vector2(source.get("mouth_start_pixels", Vector2.ZERO))
+		var mouth_end := Vector2(source.get("mouth_end_pixels", Vector2.ZERO))
+		var water_direction := Vector2(source.get(
+			"water_direction_pixels",
+			Vector2.ZERO,
+		))
+		var expected_bank := "BOTTOM" if source_id == "data_center_east" else "TOP"
+		var expected_kind := "mine" if source_id == "gold_mine" else "data_center"
+		var expected_direction := Vector2(0.0, -1.0) if expected_bank == "BOTTOM" else Vector2(0.0, 1.0)
+		if (
+			source_kind != expected_kind
+			or bank_side != expected_bank
+			or not water_direction.is_equal_approx(expected_direction)
+			or mouth_end.x <= mouth_start.x
+			or not is_equal_approx(mouth_start.y, mouth_end.y)
+		):
+			errors.append("%s %s has the wrong kind or river-facing mouth" % [
+				context,
+				source_id,
+			])
+
+
+func _expect_extractor_reveal_state(
+	summary: Dictionary,
+	state_key: String,
+	expected_expanded: bool,
+	expected_visible_ids: Array,
+	expected_hidden_ids: Array,
+	context: String,
+	errors: PackedStringArray,
+) -> void:
+	if not (
+		String(summary.get("extractor_reveal_mode", ""))
+			== "DISCRETE_FULL_SIZE_SITE_COHORT"
+		and is_equal_approx(
+			float(summary.get("extractor_reveal_initial_fraction", -1.0)),
+			0.50,
+		)
+		and is_equal_approx(
+			float(summary.get("extractor_reveal_delay_seconds", -1.0)),
+			30.0,
+		)
+		and int(summary.get(
+			"extractor_reveal_initial_site_cap_per_type_per_screen",
+			0,
+		)) == 1
+		and bool(summary.get("extractor_reveal_ai_watershed_bypass", false))
+	):
+		errors.append("%s extractor-reveal configuration is incorrect" % context)
+		return
+	var reveal_states := Dictionary(summary.get("extractor_reveal_states", {}))
+	var reveal_state := Dictionary(reveal_states.get(state_key, {}))
+	var sites := Array(reveal_state.get("sites", []))
+	if (
+		not bool(reveal_state.get("active", false))
+		or bool(reveal_state.get("expanded", not expected_expanded))
+			!= expected_expanded
+		or Array(reveal_state.get("visible_site_ids", [])) != expected_visible_ids
+		or Array(reveal_state.get("hidden_site_ids", [])) != expected_hidden_ids
+		or int(reveal_state.get("visible_site_count", -1)) != expected_visible_ids.size()
+		or int(reveal_state.get("hidden_site_count", -1)) != expected_hidden_ids.size()
+		or sites.size() != expected_visible_ids.size() + expected_hidden_ids.size()
+		or String(reveal_state.get("phase", "")) != (
+			"EXPANDED_100_PERCENT" if expected_expanded else "INITIAL_50_PERCENT"
+		)
+	):
+		errors.append("%s extractor-reveal state is incorrect: %s" % [
+			context,
+			reveal_state,
+		])
+		return
+	var pollution_sources_by_id := {}
+	for source_variant: Variant in Array(summary.get(
+		"pollution_active_sources",
+		[],
+	)):
+		if source_variant is Dictionary:
+			pollution_sources_by_id[String(source_variant.get("source_id", ""))] = (
+				source_variant
+			)
+	for site_variant: Variant in sites:
+		if not site_variant is Dictionary:
+			errors.append("%s has a malformed site descriptor" % context)
+			continue
+		var site: Dictionary = site_variant
+		var rect: Rect2 = site.get("rect_world", Rect2())
+		var bounds: Rect2 = site.get("bounds_pixels", Rect2())
+		if not (
+			rect.size.x > 0.0
+			and rect.size.y > 0.0
+			and is_equal_approx(bounds.size.x, rect.size.x * 120.0)
+			and is_equal_approx(bounds.size.y, rect.size.y * 120.0)
+		):
+			errors.append("%s site geometry is not the full authored rectangle" % context)
+		var element_id := String(site.get("element_id", ""))
+		var source := Dictionary(pollution_sources_by_id.get(element_id, {}))
+		var should_be_visible := bool(site.get("visible", false))
+		if should_be_visible != expected_visible_ids.has(element_id):
+			errors.append("%s visibility flag is wrong for %s" % [context, element_id])
+			continue
+		if not should_be_visible:
+			if not source.is_empty():
+				errors.append("%s hidden site %s still emits pollution" % [context, element_id])
+			continue
+		if source.is_empty():
+			errors.append("%s visible site %s has no pollution source" % [context, element_id])
+			continue
+		var mouth_start := Vector2(source.get(
+			"mouth_start_pixels",
+			Vector2.ZERO,
+		))
+		var mouth_end := Vector2(source.get(
+			"mouth_end_pixels",
+			Vector2.ZERO,
+		))
+		if not is_equal_approx(mouth_end.x - mouth_start.x, bounds.size.x):
+			errors.append("%s pollution mouth does not match full site %s" % [
+				context,
+				element_id,
+			])
 
 
 func _recursive_node_count(root: Node) -> int:
@@ -3616,3 +4458,10 @@ func _check_stage_title_reset_independence(
 		errors.append("simulation reset changed the stage title")
 	if water_viewport.get_texture().get_rid() != water_texture_rid:
 		errors.append("pause/reset replaced the water texture while preserving title")
+	var pollution_summary: Dictionary = reset_summary.get("pollution_summary", {})
+	if not (
+		int(pollution_summary.get("release_serial", -1)) == 0
+		and int(pollution_summary.get("total_scheduled", -1)) == 0
+		and int(pollution_summary.get("resident_command_slots", -1)) == 0
+	):
+		errors.append("full reset did not clear the bounded pollution pool")

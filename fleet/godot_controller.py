@@ -22,13 +22,14 @@ from typing import Optional
 
 
 COMPUTERS = {
-    # Change only the stages tuples to alter the screen assignment.
-    # Stage numbers correspond to scene_1.tscn through scene_7.tscn.
+    # Stage numbers correspond to scene_1.tscn through scene_7.tscn. The
+    # optional screen index selects the macOS display for a single-stage host.
     "11": {
         "ip": "196.168.50.11",
-        "user": "francescospagnolo",
-        "project": "/Users/francescospagnolo/Documents/watercouncil/code",
+        "user": "watershed",
+        "project": "/Users/watershed/Documents/watercouncil/code",
         "stages": (7,),
+        # BenQ is the macOS main display; Samsung is the extended river screen.
         "screen": 1,
         "local": False,
         "dedicated": True,
@@ -142,25 +143,42 @@ TELEMETRY_DIR = REPOSITORY_ROOT / "telemetry"
 CHAIR_SENSOR_MODULE_PATH = TELEMETRY_DIR / "controller.py"
 CHAIR_POLL_SECONDS = 0.05
 GOVERNATOR_TELEMETRY_RUNTIME_ROOT = (
-    "/Users/francescospagnolo/.water_council/runtime/code"
+    "/Users/watershed/.water_council/runtime/code"
 )
-GOVERNATOR_TELEMETRY_LAUNCH_AGENT = "gui/501/com.watercouncil.telemetry"
-GOVERNATOR_TELEMETRY_LAUNCH_AGENT_DOMAIN = "gui/501"
+GOVERNATOR_TELEMETRY_LAUNCH_AGENT = "gui/504/com.watercouncil.telemetry"
+GOVERNATOR_TELEMETRY_LAUNCH_AGENT_DOMAIN = "gui/504"
 GOVERNATOR_TELEMETRY_LAUNCH_AGENT_PLIST = (
-    "/Users/francescospagnolo/Library/LaunchAgents/"
+    "/Users/watershed/Library/LaunchAgents/"
     "com.watercouncil.telemetry.plist"
 )
 TELEMETRY_RESTART_TIMEOUT_SECONDS = 12.0
-PRESERVED_RUNTIME_PATHS = (
+CONFLUENCE_WATER_BRIDGE_RELATIVE_PATH = "fleet/confluence_water_bridge.py"
+CONFLUENCE_WATER_BRIDGE_LOG_NAME = "confluence-water-bridge.log"
+CONFLUENCE_WATER_BRIDGE_LIFECYCLE_TIMEOUT_SECONDS = 8.0
+PRESERVED_RUNTIME_DIRECTORIES = (
     "telemetry",
     "watershed_ai",
+)
+PRESERVED_RUNTIME_FILES = (
+    # The operator launches this diagnostic from the installed project root.
+    # Its rolling log is local runtime state and must survive atomic promotion
+    # just like the telemetry tree that produces the packets.
+    "chair_state_monitor.py",
+    "chair_state_monitor.log",
+    # Keep bridge diagnostics across atomic project promotion and restarts.
+    CONFLUENCE_WATER_BRIDGE_LOG_NAME,
+)
+PRESERVED_RUNTIME_PATHS = (
+    *PRESERVED_RUNTIME_DIRECTORIES,
+    *PRESERVED_RUNTIME_FILES,
 )
 PROJECT_DEPLOY_EXCLUDES = (
     # fleet/ is synchronized and verified independently. The runtime paths are
     # copied from the installed tree into each atomic stage before this mirror
     # runs, then excluded so project cleanup cannot remove or modify them.
     "fleet/",
-    *(f"/{path}/" for path in PRESERVED_RUNTIME_PATHS),
+    *(f"/{path}/" for path in PRESERVED_RUNTIME_DIRECTORIES),
+    *(f"/{path}" for path in PRESERVED_RUNTIME_FILES),
     ".godot/",
     ".DS_Store",
     "godot-remote.log",
@@ -495,6 +513,116 @@ def stop_governator_telemetry() -> tuple[bool, str]:
     )
 
 
+def governator_confluence_water_bridge_process_pattern() -> str:
+    script_path = posixpath.join(
+        COMPUTERS["11"]["project"],
+        CONFLUENCE_WATER_BRIDGE_RELATIVE_PATH,
+    )
+    return re.escape(script_path) + r" --quiet$"
+
+
+def governator_confluence_water_bridge_stop_fragment() -> str:
+    pattern = governator_confluence_water_bridge_process_pattern()
+    stop_polls = " ".join(str(index) for index in range(50))
+    return (
+        f"pkill -TERM -f {shlex.quote(pattern)} 2>/dev/null || true; "
+        f"for _water_bridge_poll in {stop_polls}; do "
+        f"if ! pgrep -f {shlex.quote(pattern)} >/dev/null; then break; fi; "
+        "sleep 0.1; done; "
+        f"pkill -KILL -f {shlex.quote(pattern)} 2>/dev/null || true; "
+    )
+
+
+def governator_confluence_water_bridge_restart_command() -> str:
+    computer = COMPUTERS["11"]
+    script_path = posixpath.join(
+        computer["project"],
+        CONFLUENCE_WATER_BRIDGE_RELATIVE_PATH,
+    )
+    log_path = posixpath.join(
+        computer["project"],
+        CONFLUENCE_WATER_BRIDGE_LOG_NAME,
+    )
+    pattern = governator_confluence_water_bridge_process_pattern()
+    start_polls = " ".join(str(index) for index in range(50))
+    return (
+        f"test -f {shlex.quote(script_path)} || "
+        f"{{ echo 'confluence water bridge missing'; exit 30; }}; "
+        "_water_bridge_python=$(command -v python3) || "
+        "{ echo 'python3 missing for confluence water bridge'; exit 31; }; "
+        + governator_confluence_water_bridge_stop_fragment()
+        + f"nohup \"$_water_bridge_python\" {shlex.quote(script_path)} --quiet "
+        f">> {shlex.quote(log_path)} 2>&1 < /dev/null & "
+        f"for _water_bridge_poll in {start_polls}; do "
+        f"_water_bridge_count=$(pgrep -f {shlex.quote(pattern)} | wc -l | tr -d '[:space:]'); "
+        "if test \"$_water_bridge_count\" = 1; then "
+        "echo 'confluence water bridge restarted: process=1'; exit 0; fi; "
+        "sleep 0.1; done; "
+        "echo \"confluence water bridge restart verification failed: "
+        "process=$_water_bridge_count\"; exit 32"
+    )
+
+
+def governator_confluence_water_bridge_stop_command() -> str:
+    pattern = governator_confluence_water_bridge_process_pattern()
+    return (
+        governator_confluence_water_bridge_stop_fragment()
+        + f"_water_bridge_count=$(pgrep -f {shlex.quote(pattern)} | wc -l | tr -d '[:space:]'); "
+        "if test \"$_water_bridge_count\" = 0; then "
+        "echo 'confluence water bridge stopped: process=0'; exit 0; fi; "
+        "echo \"confluence water bridge stop verification failed: "
+        "process=$_water_bridge_count\"; exit 33"
+    )
+
+
+def _run_governator_bridge_command(
+    command: str,
+    timeout: float = CONFLUENCE_WATER_BRIDGE_LIFECYCLE_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess:
+    computer = COMPUTERS["11"]
+    if computer["local"]:
+        return run_local(["/bin/zsh", "-c", command], timeout=timeout)
+    return ssh(computer, command, timeout=SSH_TIMEOUT_SECONDS + timeout)
+
+
+def restart_governator_confluence_water_bridge() -> tuple[bool, str]:
+    result = _run_governator_bridge_command(
+        governator_confluence_water_bridge_restart_command()
+    )
+    return (
+        result.returncode == 0,
+        result.stdout.strip() if result.returncode == 0 else error_message(result),
+    )
+
+
+def stop_governator_confluence_water_bridge() -> tuple[bool, str]:
+    result = _run_governator_bridge_command(
+        governator_confluence_water_bridge_stop_command()
+    )
+    return (
+        result.returncode == 0,
+        result.stdout.strip() if result.returncode == 0 else error_message(result),
+    )
+
+
+def governator_confluence_water_bridge_status() -> tuple[bool, str]:
+    pattern = governator_confluence_water_bridge_process_pattern()
+    result = _run_governator_bridge_command(
+        f"pgrep -fal {shlex.quote(pattern)}",
+        timeout=SSH_TIMEOUT_SECONDS,
+    )
+    if result.returncode == 1:
+        return True, "stopped"
+    if result.returncode != 0:
+        return False, error_message(result)
+    processes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(processes) == 1:
+        return True, f"running: {processes[0]}"
+    return False, "unexpected confluence water bridge process count: " + str(
+        len(processes)
+    )
+
+
 def required_project_files(computer: dict) -> list[str]:
     return [
         "project.godot",
@@ -504,6 +632,8 @@ def required_project_files(computer: dict) -> list[str]:
         "dual_stage_host.tscn",
         "regime_feature_profiles.txt",
         "flow/flow_control_bus.gd",
+        "flow/confluence_topology.gd",
+        "flow/particle_confluence_bus.gd",
         "flow/basin_budget.gd",
         "flow/flow_rectangle_obstacle.gd",
         "flow/gpu_stage/basin_budget_overlay.gd",
@@ -528,6 +658,13 @@ def required_project_files(computer: dict) -> list[str]:
     ]
 
 
+def required_installed_files(computer: dict) -> list[str]:
+    files = required_project_files(computer)
+    if 7 in computer.get("stages", ()):
+        files.append(CONFLUENCE_WATER_BRIDGE_RELATIVE_PATH)
+    return files
+
+
 def cache_validation_command(project_dir: str) -> str:
     class_cache = posixpath.join(project_dir, GLOBAL_CLASS_CACHE_RELATIVE_PATH)
     font_cache = posixpath.join(project_dir, FONT_CACHE_RELATIVE_PATH)
@@ -549,7 +686,7 @@ def cache_validation_command(project_dir: str) -> str:
 
 def check_computer(computer: dict) -> tuple[bool, str]:
     project_dir = computer["project"]
-    required_files = required_project_files(computer)
+    required_files = required_installed_files(computer)
     if computer["local"]:
         missing = []
         if not os.access(GODOT_BIN, os.X_OK):
@@ -683,6 +820,18 @@ def perform(target: str, action: str) -> tuple[str, bool, str]:
 
     if action == "status":
         ok, message = all_godot_status(computer)
+        if target == "11":
+            bridge_ok, bridge_message = governator_confluence_water_bridge_status()
+            godot_running = message.startswith("running:")
+            bridge_running = bridge_message.startswith("running:")
+            lifecycle_matches = godot_running == bridge_running
+            if not lifecycle_matches:
+                bridge_message += " (does not match Godot lifecycle)"
+            return (
+                ip_address,
+                ok and bridge_ok and lifecycle_matches,
+                f"Godot {message}; confluence water bridge {bridge_message}",
+            )
         return ip_address, ok, message
 
     if action == "stop":
@@ -1457,9 +1606,8 @@ def run_chair_control() -> None:
 
             # Deduplicate by the effective regime state, not the raw chair
             # vector. While Watershed is exclusive, hidden chair-bit chatter
-            # still normalizes to Watershed and must not resend the regime
-            # packet: Godot intentionally clears the AI overlay on a fresh
-            # activation, which would otherwise restore the fallback map.
+            # still normalizes to Watershed and does not warrant another
+            # regime acknowledgement plus daily cache-selection cycle.
             applied_regimes = regime_state
             waiting_announced = False
             active = ", ".join(regime_ids)
@@ -1582,7 +1730,13 @@ def validate_deploy_source(targets: list[str]) -> Path:
     if missing:
         raise ValueError("authoritative project is incomplete: " + ", ".join(missing))
     fleet_source = FLEET_SOURCE_DIR.resolve()
-    fleet_requirements = ("godot_controller.py", "README.md", "test_godot_controller.py")
+    fleet_requirements = (
+        "godot_controller.py",
+        "confluence_water_bridge.py",
+        "README.md",
+        "test_godot_controller.py",
+        "test_confluence_water_bridge.py",
+    )
     missing_fleet = sorted(
         path for path in fleet_requirements if not (fleet_source / path).is_file()
     )
@@ -1913,6 +2067,18 @@ def _deployment_failure_results(
     return [(COMPUTERS[target]["ip"], False, message) for target in targets]
 
 
+def _stop_runtime_for_deploy(target: str) -> tuple[bool, str]:
+    """Leave every runtime backed by the soon-to-be-promoted tree stopped."""
+    godot_result = stop_godot_processes(COMPUTERS[target])
+    godot_ok = godot_result.returncode == 0
+    messages = ["Godot stopped" if godot_ok else error_message(godot_result)]
+    bridge_ok = True
+    if target == "11":
+        bridge_ok, bridge_message = stop_governator_confluence_water_bridge()
+        messages.append("confluence water bridge " + bridge_message)
+    return godot_ok and bridge_ok, "; ".join(messages)
+
+
 def deploy_targets(
     targets: list[str],
     dry_run: bool = False,
@@ -1983,12 +2149,7 @@ def deploy_targets(
 
     stopped = _parallel(
         targets,
-        lambda target: (
-            lambda result: (
-                result.returncode == 0,
-                "stopped" if result.returncode == 0 else error_message(result),
-            )
-        )(stop_godot_processes(COMPUTERS[target])),
+        _stop_runtime_for_deploy,
     )
     if any(not ok for ok, _message in stopped.values()):
         _parallel(targets, lambda target: _cleanup_stage(target, paths[target][0]))
@@ -2222,6 +2383,12 @@ def main() -> None:
     if args.action == "stop":
         successful_ips = {ip_address for ip_address, ok, _message in results if ok}
         if COMPUTERS["11"]["ip"] in successful_ips and "11" in targets:
+            bridge_ok, bridge_message = stop_governator_confluence_water_bridge()
+            print(
+                f"{'OK' if bridge_ok else 'ERROR':5} "
+                f"{COMPUTERS['11']['ip']} confluence water bridge: {bridge_message}"
+            )
+            failed = failed or not bridge_ok
             telemetry_ok, telemetry_message = stop_governator_telemetry()
             print(
                 f"{'OK' if telemetry_ok else 'ERROR':5} "
@@ -2276,6 +2443,12 @@ def main() -> None:
                 )
                 failed = True
         if "11" in successful_targets and startup_sync_succeeded:
+            bridge_ok, bridge_message = restart_governator_confluence_water_bridge()
+            print(
+                f"{'OK' if bridge_ok else 'ERROR':5} "
+                f"{COMPUTERS['11']['ip']} confluence water bridge: {bridge_message}"
+            )
+            failed = failed or not bridge_ok
             telemetry_ok, telemetry_message = restart_governator_telemetry()
             print(
                 f"{'OK' if telemetry_ok else 'ERROR':5} "

@@ -138,7 +138,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("-i", command)
         identity_index = command.index("-i") + 1
         self.assertTrue(command[identity_index].endswith("water_council_fleet_ed25519"))
-        self.assertIn("francescospagnolo@196.168.50.11", command)
+        self.assertIn("watershed@196.168.50.11", command)
 
     def test_studio_stop_for_11_is_remote_and_never_local_pkill(self):
         self.configure_studio()
@@ -165,7 +165,7 @@ class ControllerTests(unittest.TestCase):
     def test_backup_cleanup_accepts_only_exact_generated_path(self):
         self.configure_studio()
         valid = (
-            "/Users/francescospagnolo/Documents/watercouncil/"
+            "/Users/watershed/Documents/watercouncil/"
             ".code.backup-0123456789ab"
         )
         with mock.patch.object(controller, "ssh", return_value=completed()) as remote:
@@ -176,7 +176,7 @@ class ControllerTests(unittest.TestCase):
         with mock.patch.object(controller, "ssh") as remote:
             ok, message = controller._cleanup_backup(
                 "11",
-                "/Users/francescospagnolo/Documents/watercouncil/.code.backup-anything",
+                "/Users/watershed/Documents/watercouncil/.code.backup-anything",
             )
         self.assertFalse(ok)
         self.assertIn("refusing unsafe", message)
@@ -185,7 +185,7 @@ class ControllerTests(unittest.TestCase):
     def test_stage_cleanup_accepts_only_exact_generated_path(self):
         self.configure_studio()
         valid = (
-            "/Users/francescospagnolo/Documents/watercouncil/"
+            "/Users/watershed/Documents/watercouncil/"
             ".code.deploy-0123456789ab"
         )
         with mock.patch.object(controller, "ssh", return_value=completed()) as remote:
@@ -196,7 +196,7 @@ class ControllerTests(unittest.TestCase):
         with mock.patch.object(controller, "ssh") as remote:
             ok, message = controller._cleanup_stage(
                 "11",
-                "/Users/francescospagnolo/Documents/watercouncil/.code.deploy-anything",
+                "/Users/watershed/Documents/watercouncil/.code.deploy-anything",
             )
         self.assertFalse(ok)
         self.assertIn("refusing unsafe", message)
@@ -304,11 +304,11 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual("1", command[screen_argument + 1])
         self.assertEqual(["--", "--stages=7"], command[-2:])
 
-    def test_governator_status_requires_extended_screen_one(self):
+    def test_governator_status_requires_extended_samsung_screen_one(self):
         self.configure_studio()
         expected = (
             "100 /Applications/Godot.app/Contents/MacOS/Godot "
-            "--path /Users/francescospagnolo/Documents/watercouncil/code "
+            "--path /Users/watershed/Documents/watercouncil/code "
             "--screen 1 -- --stages=7\n"
         )
         with mock.patch.object(
@@ -370,11 +370,17 @@ class ControllerTests(unittest.TestCase):
                             "restart_governator_telemetry",
                             return_value=(True, "publisher=1 bridge=1"),
                         ) as restart_telemetry:
-                            with mock.patch("builtins.print"):
-                                with self.assertRaises(SystemExit) as raised:
-                                    controller.main()
+                            with mock.patch.object(
+                                controller,
+                                "restart_governator_confluence_water_bridge",
+                                return_value=(True, "process=1"),
+                            ) as restart_water_bridge:
+                                with mock.patch("builtins.print"):
+                                    with self.assertRaises(SystemExit) as raised:
+                                        controller.main()
         self.assertEqual(0, raised.exception.code)
         restart_telemetry.assert_called_once_with()
+        restart_water_bridge.assert_called_once_with()
 
     def test_governator_telemetry_stop_unloads_agent_and_verifies_zero(self):
         self.configure_studio()
@@ -417,11 +423,48 @@ class ControllerTests(unittest.TestCase):
                         "stop_governator_telemetry",
                         return_value=(True, "publisher=0 bridge=0"),
                     ) as stop_telemetry:
-                        with mock.patch("builtins.print"):
-                            with self.assertRaises(SystemExit) as raised:
-                                controller.main()
+                        with mock.patch.object(
+                            controller,
+                            "stop_governator_confluence_water_bridge",
+                            return_value=(True, "process=0"),
+                        ) as stop_water_bridge:
+                            with mock.patch("builtins.print"):
+                                with self.assertRaises(SystemExit) as raised:
+                                    controller.main()
         self.assertEqual(0, raised.exception.code)
         stop_telemetry.assert_called_once_with()
+        stop_water_bridge.assert_called_once_with()
+
+    def test_governator_confluence_water_bridge_lifecycle_is_exact(self):
+        self.configure_studio()
+        with mock.patch.object(
+            controller,
+            "ssh",
+            return_value=completed(
+                stdout="confluence water bridge restarted: process=1\n"
+            ),
+        ) as remote:
+            ok, message = controller.restart_governator_confluence_water_bridge()
+        self.assertTrue(ok)
+        self.assertEqual("confluence water bridge restarted: process=1", message)
+        command = remote.call_args.args[1]
+        self.assertIn("confluence_water_bridge.py", command)
+        self.assertIn("--quiet", command)
+        self.assertIn("nohup", command)
+        self.assertIn("process=1", command)
+
+        with mock.patch.object(
+            controller,
+            "ssh",
+            return_value=completed(
+                stdout="confluence water bridge stopped: process=0\n"
+            ),
+        ) as remote:
+            ok, message = controller.stop_governator_confluence_water_bridge()
+        self.assertTrue(ok)
+        self.assertEqual("confluence water bridge stopped: process=0", message)
+        self.assertIn("pkill -TERM", remote.call_args.args[1])
+        self.assertIn("process=0", remote.call_args.args[1])
 
     def test_status_requires_exact_project_and_stage_arguments(self):
         self.configure_studio()
@@ -595,8 +638,11 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("-rlcin", project_command)
         self.assertIn("--delete", project_command)
         self.assertIn("fleet/", project_command)
-        for path in controller.PRESERVED_RUNTIME_PATHS:
+        for path in controller.PRESERVED_RUNTIME_DIRECTORIES:
             self.assertIn(f"/{path}/", project_command)
+        for path in controller.PRESERVED_RUNTIME_FILES:
+            self.assertIn(f"/{path}", project_command)
+            self.assertNotIn(f"/{path}/", project_command)
         self.assertTrue(project_command[-2].endswith("/"))
         self.assertTrue(project_command[-1].endswith("/code/"))
         fleet_command = controller._rsync_command(
@@ -624,7 +670,13 @@ class ControllerTests(unittest.TestCase):
                 path = project / relative_path
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("test\n", encoding="utf-8")
-            for filename in ("godot_controller.py", "README.md", "test_godot_controller.py"):
+            for filename in (
+                "godot_controller.py",
+                "confluence_water_bridge.py",
+                "README.md",
+                "test_godot_controller.py",
+                "test_confluence_water_bridge.py",
+            ):
                 (fleet / filename).write_text("test\n", encoding="utf-8")
             controller.PROJECT_SOURCE_DIR = project
             controller.FLEET_SOURCE_DIR = fleet
@@ -642,6 +694,8 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(
             {
                 "flow/basin_budget.gd",
+                "flow/confluence_topology.gd",
+                "flow/particle_confluence_bus.gd",
                 "flow/flow_rectangle_obstacle.gd",
                 "flow/gpu_stage/basin_budget_overlay.gd",
                 "flow/data/water_pipeline/shasta_720.txt",
@@ -1003,6 +1057,26 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(results[0][1])
         self.assertIn("duplicate", results[0][2])
 
+    def test_deploy_stop_includes_bridge_only_for_delta_host(self):
+        self.configure_studio()
+        with mock.patch.object(
+            controller,
+            "stop_godot_processes",
+            return_value=completed(),
+        ) as stop_godot:
+            with mock.patch.object(
+                controller,
+                "stop_governator_confluence_water_bridge",
+                return_value=(True, "stopped: process=0"),
+            ) as stop_bridge:
+                ok, message = controller._stop_runtime_for_deploy("11")
+                upstream_ok, _upstream_message = controller._stop_runtime_for_deploy("21")
+        self.assertTrue(ok)
+        self.assertTrue(upstream_ok)
+        self.assertIn("confluence water bridge", message)
+        self.assertEqual(2, stop_godot.call_count)
+        stop_bridge.assert_called_once_with()
+
     def test_staging_failure_never_stops_or_promotes(self):
         self.configure_studio()
         with mock.patch.object(
@@ -1034,7 +1108,7 @@ class ControllerTests(unittest.TestCase):
         ) as remote:
             ok, message = controller._import_stage_cache(
                 "11",
-                "/Users/francescospagnolo/Documents/watercouncil/.code.deploy-0123456789ab",
+                "/Users/watershed/Documents/watercouncil/.code.deploy-0123456789ab",
             )
         self.assertTrue(ok)
         self.assertIn("global classes ready", message)
@@ -1184,7 +1258,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_successful_deploy_retains_backup_and_leaves_stopped(self):
         self.configure_studio()
-        backup = "/Users/francescospagnolo/Documents/watercouncil/.code.backup-0123456789ab"
+        backup = "/Users/watershed/Documents/watercouncil/.code.backup-0123456789ab"
         with mock.patch.object(
             controller,
             "validate_deploy_source",
@@ -1196,8 +1270,8 @@ class ControllerTests(unittest.TestCase):
                     with mock.patch.object(controller, "_prepare_stage", return_value=(True, "ok")):
                         with mock.patch.object(
                             controller,
-                            "stop_godot_processes",
-                            return_value=completed(),
+                            "_stop_runtime_for_deploy",
+                            return_value=(True, "stopped"),
                         ):
                             with mock.patch.object(
                                 controller,
@@ -1222,7 +1296,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_post_promotion_mismatch_rolls_back(self):
         self.configure_studio()
-        backup = "/Users/francescospagnolo/Documents/watercouncil/.code.backup-0123456789ab"
+        backup = "/Users/watershed/Documents/watercouncil/.code.backup-0123456789ab"
         with mock.patch.object(
             controller,
             "validate_deploy_source",
@@ -1234,8 +1308,8 @@ class ControllerTests(unittest.TestCase):
                     with mock.patch.object(controller, "_prepare_stage", return_value=(True, "ok")):
                         with mock.patch.object(
                             controller,
-                            "stop_godot_processes",
-                            return_value=completed(),
+                            "_stop_runtime_for_deploy",
+                            return_value=(True, "stopped"),
                         ):
                             with mock.patch.object(
                                 controller,

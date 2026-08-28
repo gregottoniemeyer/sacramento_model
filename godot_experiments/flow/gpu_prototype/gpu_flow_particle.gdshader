@@ -12,6 +12,30 @@ uniform float active_particle_count = 300.0;
 // The source band begins at the vertical center and expands symmetrically as
 // basin input rises. This affects only initial/recycled head placement.
 uniform float water_coverage_fraction = 0.5;
+// Delta-only confluence mode reuses the same fixed head population. Global
+// particle IDs are partitioned across six river inlets, each with its own live
+// active count. A source record packs (anchor.x, anchor.y, inward.x, inward.y).
+uniform bool confluence_mode = false;
+uniform vec4 confluence_active_counts_0 = vec4(0.0);
+uniform vec4 confluence_active_counts_1 = vec4(0.0);
+uniform vec4 confluence_source_speeds_0 = vec4(300.0);
+uniform vec4 confluence_source_speeds_1 = vec4(300.0);
+uniform vec4 confluence_source_widths_0 = vec4(42.0);
+uniform vec4 confluence_source_widths_1 = vec4(42.0);
+uniform vec4 confluence_source_0 = vec4(0.0, 120.0, 1.0, 0.0);
+uniform vec4 confluence_source_1 = vec4(0.0, 840.0, 1.0, 0.0);
+uniform vec4 confluence_source_2 = vec4(1200.0, 1080.0, 0.0, -1.0);
+uniform vec4 confluence_source_3 = vec4(360.0, 1080.0, 0.0, -1.0);
+uniform vec4 confluence_source_4 = vec4(600.0, 0.0, 0.0, 1.0);
+uniform vec4 confluence_source_5 = vec4(1440.0, 0.0, 0.0, 1.0);
+uniform vec4 confluence_merge_x_0 = vec4(480.0, 480.0, 1440.0, 720.0);
+uniform vec4 confluence_merge_x_1 = vec4(960.0, 1680.0, 0.0, 0.0);
+uniform float confluence_entry_turn_pixels = 240.0;
+uniform float confluence_inlet_spread_pixels = 42.0;
+uniform float confluence_trunk_center_y_pixels = 540.0;
+uniform float confluence_trunk_base_width_pixels = 42.0;
+uniform float confluence_trunk_width_transition_pixels = 120.0;
+uniform float confluence_curve_follow_strength = 6.0;
 // A production stage can split the global head population across several
 // independent draw layers. Defaults preserve the prototype's one-pool INDEX.
 uniform float particle_index_stride = 1.0;
@@ -105,6 +129,7 @@ const float STATE_GATE_STAGING = 6.0;
 const float STATE_GATE_FLUSHING = 7.0;
 const float STATE_ABSORBED = 8.0;
 const float STATE_FIELD_DRAINING = 9.0;
+const float STATE_CONFLUENCE_DORMANT = 10.0;
 const float RECYCLE_EPSILON = 0.0001;
 const float RECYCLE_SAFETY_SECONDS = 0.067;
 const int MAX_INTERACTION_POLYGONS = 8;
@@ -274,8 +299,238 @@ vec4 line_color(float selector) {
 	return vec4(0.118, 0.565, 1.0, particle_alpha);
 }
 
+float confluence_source_index(float particle_index) {
+	return floor(mod(max(particle_index, 0.0), 6.0));
+}
+
+float confluence_source_active_count(float source_index) {
+	if (source_index < 0.5) {
+		return confluence_active_counts_0.x;
+	}
+	if (source_index < 1.5) {
+		return confluence_active_counts_0.y;
+	}
+	if (source_index < 2.5) {
+		return confluence_active_counts_0.z;
+	}
+	if (source_index < 3.5) {
+		return confluence_active_counts_0.w;
+	}
+	if (source_index < 4.5) {
+		return confluence_active_counts_1.x;
+	}
+	return confluence_active_counts_1.y;
+}
+
+float confluence_source_speed(float source_index) {
+	if (source_index < 0.5) {
+		return confluence_source_speeds_0.x;
+	}
+	if (source_index < 1.5) {
+		return confluence_source_speeds_0.y;
+	}
+	if (source_index < 2.5) {
+		return confluence_source_speeds_0.z;
+	}
+	if (source_index < 3.5) {
+		return confluence_source_speeds_0.w;
+	}
+	if (source_index < 4.5) {
+		return confluence_source_speeds_1.x;
+	}
+	return confluence_source_speeds_1.y;
+}
+
+float confluence_source_width(float source_index) {
+	if (source_index < 0.5) {
+		return confluence_source_widths_0.x;
+	}
+	if (source_index < 1.5) {
+		return confluence_source_widths_0.y;
+	}
+	if (source_index < 2.5) {
+		return confluence_source_widths_0.z;
+	}
+	if (source_index < 3.5) {
+		return confluence_source_widths_0.w;
+	}
+	if (source_index < 4.5) {
+		return confluence_source_widths_1.x;
+	}
+	return confluence_source_widths_1.y;
+}
+
+float particle_base_speed(float particle_index) {
+	return confluence_mode
+		? max(
+			confluence_source_speed(confluence_source_index(particle_index)),
+			1.0
+		)
+		: base_speed;
+}
+
+vec4 confluence_source_record(float source_index) {
+	if (source_index < 0.5) {
+		return confluence_source_0;
+	}
+	if (source_index < 1.5) {
+		return confluence_source_1;
+	}
+	if (source_index < 2.5) {
+		return confluence_source_2;
+	}
+	if (source_index < 3.5) {
+		return confluence_source_3;
+	}
+	if (source_index < 4.5) {
+		return confluence_source_4;
+	}
+	return confluence_source_5;
+}
+
+float confluence_merge_x(float source_index) {
+	if (source_index < 0.5) {
+		return confluence_merge_x_0.x;
+	}
+	if (source_index < 1.5) {
+		return confluence_merge_x_0.y;
+	}
+	if (source_index < 2.5) {
+		return confluence_merge_x_0.z;
+	}
+	if (source_index < 3.5) {
+		return confluence_merge_x_0.w;
+	}
+	if (source_index < 4.5) {
+		return confluence_merge_x_1.x;
+	}
+	return confluence_merge_x_1.y;
+}
+
+float confluence_source_capacity(float source_index) {
+	float slot_count = max(floor(particle_slot_count + 0.5), 1.0);
+	if (source_index >= slot_count) {
+		return 0.0;
+	}
+	return floor((slot_count - 1.0 - source_index) / 6.0) + 1.0;
+}
+
+float confluence_source_flow_fraction(float source_index) {
+	float source_capacity = confluence_source_capacity(source_index);
+	if (source_capacity <= 0.0) {
+		return 0.0;
+	}
+	return clamp(
+		confluence_source_active_count(source_index) / source_capacity,
+		0.0,
+		1.0
+	);
+}
+
+float confluence_trunk_half_width(float x_position) {
+	float base_width = max(confluence_trunk_base_width_pixels, 1.0);
+	float transition = max(confluence_trunk_width_transition_pixels, 30.0);
+	float merged_width_squared = 0.0;
+	for (int source_index = 0; source_index < 6; source_index++) {
+		float merge_x = confluence_merge_x(float(source_index));
+		float join_progress = clamp((x_position - merge_x) / transition, 0.0, 1.0);
+		float joined = (
+			join_progress * join_progress * join_progress
+			* (10.0 + join_progress * (-15.0 + 6.0 * join_progress))
+		);
+		float source_width = max(
+			confluence_source_width(float(source_index)),
+			0.0
+		);
+		merged_width_squared += source_width * source_width * joined;
+	}
+	float maximum_width = max(
+		abs(shoreline_inlet_y_range.y - shoreline_inlet_y_range.x),
+		1.0
+	);
+	float full_width = min(
+		max(base_width, sqrt(max(merged_width_squared, 0.0))),
+		maximum_width
+	);
+	return full_width * 0.5;
+}
+
+vec2 confluence_bezier_point(
+	vec2 point_0,
+	vec2 point_1,
+	vec2 point_2,
+	vec2 point_3,
+	float progress
+) {
+	float one_minus = 1.0 - progress;
+	return (
+		point_0 * one_minus * one_minus * one_minus
+		+ point_1 * 3.0 * one_minus * one_minus * progress
+		+ point_2 * 3.0 * one_minus * progress * progress
+		+ point_3 * progress * progress * progress
+	);
+}
+
+vec2 confluence_bezier_tangent(
+	vec2 point_0,
+	vec2 point_1,
+	vec2 point_2,
+	vec2 point_3,
+	float progress
+) {
+	float one_minus = 1.0 - progress;
+	return (
+		(point_1 - point_0) * 3.0 * one_minus * one_minus
+		+ (point_2 - point_1) * 6.0 * one_minus * progress
+		+ (point_3 - point_2) * 3.0 * progress * progress
+	);
+}
+
+vec2 confluence_bezier_second_derivative(
+	vec2 point_0,
+	vec2 point_1,
+	vec2 point_2,
+	vec2 point_3,
+	float progress
+) {
+	return (
+		(point_2 - 2.0 * point_1 + point_0) * 6.0 * (1.0 - progress)
+		+ (point_3 - 2.0 * point_2 + point_1) * 6.0 * progress
+	);
+}
+
 bool flow_slot_enabled(float particle_index) {
 	float slot_count = max(floor(particle_slot_count + 0.5), 1.0);
+	if (confluence_mode) {
+		float source_index = confluence_source_index(particle_index);
+		if (particle_index >= slot_count || source_index >= slot_count) {
+			return false;
+		}
+		float source_slot_count = (
+			floor((slot_count - 1.0 - source_index) / 6.0) + 1.0
+		);
+		float source_active_count = clamp(
+			floor(confluence_source_active_count(source_index) + 0.5),
+			0.0,
+			source_slot_count
+		);
+		if (source_active_count <= 0.0) {
+			return false;
+		}
+		float local_source_index = floor(particle_index / 6.0);
+		return (
+			floor(
+				(local_source_index + 1.0)
+				* source_active_count
+				/ source_slot_count
+			)
+			> floor(
+				local_source_index
+				* source_active_count
+				/ source_slot_count
+			)
+		);
+	}
 	float active_count = clamp(
 		floor(active_particle_count + 0.5),
 		0.0,
@@ -326,9 +581,18 @@ void start() {
 	// initialized in process(), which is also the direct logical recycle path.
 	bool slot_enabled = flow_slot_enabled(particle_index);
 	if (!slot_enabled) {
-		CUSTOM = vec4(0.0);
 		VELOCITY = vec3(0.0);
-		ACTIVE = false;
+		if (confluence_mode) {
+			// Delta is built and preprocessed before its first network water-state
+			// packet. Keep rejected slots alive but invisible so process() can observe
+			// a later positive source count without waiting for a native restart.
+			CUSTOM = vec4(1.0, 0.0, 0.0, STATE_CONFLUENCE_DORMANT);
+			COLOR = vec4(0.0);
+			TRANSFORM[3].xy = vec2(-10000.0);
+		} else {
+			CUSTOM = vec4(0.0);
+			ACTIVE = false;
+		}
 	}
 }
 
@@ -336,6 +600,16 @@ void process() {
 	float particle_index = (
 		float(INDEX) * particle_index_stride + particle_index_offset
 	);
+	bool confluence_slot_dormant = (
+		confluence_mode
+		&& abs(CUSTOM.w - STATE_CONFLUENCE_DORMANT) < 0.25
+	);
+	if (confluence_slot_dormant && flow_slot_enabled(particle_index)) {
+		// Clearing CUSTOM enters the ordinary cold-start initializer below on this
+		// same GPU tick. It resets both trail anchors, so no offscreen bridge is emitted.
+		CUSTOM = vec4(0.0);
+		confluence_slot_dormant = false;
+	}
 	// keep_data lets a head survive the emitter's normal lifetime boundary.
 	// Cold starts and completed logical recycles share this one initialization
 	// path, so a head returns immediately after its old trail has faded instead
@@ -355,11 +629,31 @@ void process() {
 		// It survives normal 2D transform updates and is refreshed on admission.
 		TRANSFORM[1].z = reservoir_geometry_revision;
 		vec2 initial_direction = vec2(1.0, 0.0);
-		vec2 inlet_y_range = centered_inlet_y_range();
-		TRANSFORM[3].xy = vec2(
-			-18.0,
-			mix(inlet_y_range.x, inlet_y_range.y, lane_seed)
-		);
+		if (confluence_mode) {
+			float source_index = confluence_source_index(particle_index);
+			vec4 source_record = confluence_source_record(source_index);
+			vec2 source_anchor = source_record.xy;
+			initial_direction = normalize(
+				source_record.zw + vec2(0.000001, 0.0)
+			);
+			vec2 source_normal = vec2(
+				-initial_direction.y,
+				initial_direction.x
+			);
+			TRANSFORM[3].xy = (
+				source_anchor
+				- initial_direction * 18.0
+				+ source_normal
+					* (lane_seed - 0.5)
+					* max(confluence_source_width(source_index), 0.0)
+			);
+		} else {
+			vec2 inlet_y_range = centered_inlet_y_range();
+			TRANSFORM[3].xy = vec2(
+				-18.0,
+				mix(inlet_y_range.x, inlet_y_range.y, lane_seed)
+			);
+		}
 		// TRANSFORM[2].xy is unused by 2D drawing. Keep the previous completed
 		// head position there so a segment also covers Godot's pre-process
 		// velocity integration on the next fixed tick.
@@ -367,7 +661,10 @@ void process() {
 		// Reserved for the native-Y direction of a bank field after capture.
 		TRANSFORM[2].z = 0.0;
 		TRANSFORM[2].w = lifecycle_generation;
-		float speed = base_speed * mix(
+		// The otherwise-unused first basis Z component stores cubic-route progress.
+		// It never enters the 2D draw transform and resets with each logical head.
+		TRANSFORM[0].z = 0.0;
+		float speed = particle_base_speed(particle_index) * mix(
 			1.0 - speed_variation,
 			1.0 + speed_variation,
 			hash11(particle_index * 2.371)
@@ -382,7 +679,7 @@ void process() {
 			STATE_FLOWING
 		);
 	}
-	CUSTOM.y += DELTA;
+	CUSTOM.y = confluence_slot_dormant ? 0.0 : CUSTOM.y + DELTA;
 	float style_seed = hash11(particle_index * 1.913 + stage_phase * 31.0);
 	// Orbit placement must be independent of the inlet-lane seed in CUSTOM.z.
 	// Reservoir admission necessarily selects a narrow Y band; reusing that
@@ -396,12 +693,17 @@ void process() {
 		style_seed
 	);
 	// keep_data preserves COLOR too, so refresh it for immediate runtime alpha.
-	COLOR = line_color(style_seed);
+	COLOR = confluence_slot_dormant ? vec4(0.0) : line_color(style_seed);
 
 	// A negative state is an elapsed recycle timer. Keep this head slot beyond
 	// the edge until its already-emitted segments have faded, then reuse it for a
 	// clean inlet emission without overlapping two logical lines in one slot.
-	bool process_regular_flow = true;
+	bool process_regular_flow = !confluence_slot_dormant;
+	if (confluence_slot_dormant) {
+		VELOCITY = vec3(0.0);
+		TRANSFORM[3].xy = vec2(-10000.0);
+		TRANSFORM[2].xy = TRANSFORM[3].xy;
+	}
 	if (CUSTOM.w < 0.0) {
 		process_regular_flow = false;
 		CUSTOM.w -= DELTA;
@@ -416,11 +718,18 @@ void process() {
 			TRANSFORM[2].w = next_lifecycle_generation;
 			VELOCITY = vec3(0.0);
 			if (!flow_slot_enabled(particle_index)) {
-				ACTIVE = false;
+				if (confluence_mode) {
+					CUSTOM = vec4(1.0, 0.0, 0.0, STATE_CONFLUENCE_DORMANT);
+					COLOR = vec4(0.0);
+					TRANSFORM[3].xy = vec2(-10000.0);
+					TRANSFORM[2].xy = TRANSFORM[3].xy;
+				} else {
+					ACTIVE = false;
+				}
 			}
 		} else {
 			vec2 exit_point = TRANSFORM[3].xy;
-			float exit_speed = base_speed * mix(
+			float exit_speed = particle_base_speed(particle_index) * mix(
 				1.0 - speed_variation,
 				1.0 + speed_variation,
 				hash11(particle_index * 2.371)
@@ -466,14 +775,21 @@ void process() {
 			TRANSFORM[2].w = next_lifecycle_generation;
 			VELOCITY = vec3(0.0);
 			if (!flow_slot_enabled(particle_index)) {
-				ACTIVE = false;
+				if (confluence_mode) {
+					CUSTOM = vec4(1.0, 0.0, 0.0, STATE_CONFLUENCE_DORMANT);
+					COLOR = vec4(0.0);
+					TRANSFORM[3].xy = vec2(-10000.0);
+					TRANSFORM[2].xy = TRANSFORM[3].xy;
+				} else {
+					ACTIVE = false;
+				}
 			}
 		}
 	}
 
 	if (process_regular_flow) {
 	vec2 point = TRANSFORM[3].xy;
-	float speed = base_speed * mix(
+	float speed = particle_base_speed(particle_index) * mix(
 		1.0 - speed_variation,
 		1.0 + speed_variation,
 		hash11(particle_index * 2.371)
@@ -482,6 +798,155 @@ void process() {
 		speed,
 		flow_noise(point, CUSTOM.z) * noise_strength
 	);
+	if (confluence_mode) {
+		float source_index = confluence_source_index(particle_index);
+		vec4 source_record = confluence_source_record(source_index);
+		vec2 source_direction = normalize(
+			source_record.zw + vec2(0.000001, 0.0)
+		);
+		float source_noise = flow_noise(point, CUSTOM.z) * noise_strength;
+		vec2 route_start = source_record.xy;
+		vec2 route_end = vec2(
+			confluence_merge_x(source_index),
+			clamp(confluence_trunk_center_y_pixels, 0.0, stage_size.y)
+		);
+		float turn_handle = max(confluence_entry_turn_pixels, 60.0);
+		bool horizontal_source = abs(source_direction.x) > 0.5;
+		// Preserve a bounded-radius turn at both endpoints when a left-edge
+		// source has a larger-than-legacy vertical span to the fixed merge.
+		float horizontal_handle = min(
+			turn_handle,
+			max(abs(route_end.y - route_start.y) * 0.5, 180.0)
+		);
+		float inlet_handle = (
+			horizontal_source
+			? horizontal_handle
+			: min(
+				turn_handle,
+				max(abs(route_end.y - route_start.y) * 0.45, 60.0)
+			)
+		);
+		float outlet_handle = (
+			horizontal_source
+			? horizontal_handle
+			: min(turn_handle, 180.0)
+		);
+		vec2 control_1 = route_start + source_direction * inlet_handle;
+		vec2 control_2 = route_end - vec2(outlet_handle, 0.0);
+		float route_progress = clamp(TRANSFORM[0].z, 0.0, 1.0);
+		for (int refinement = 0; refinement < 3; refinement++) {
+			vec2 route_point = confluence_bezier_point(
+				route_start,
+				control_1,
+				control_2,
+				route_end,
+				route_progress
+			);
+			vec2 route_derivative = confluence_bezier_tangent(
+				route_start,
+				control_1,
+				control_2,
+				route_end,
+				route_progress
+			);
+			vec2 route_second_derivative = confluence_bezier_second_derivative(
+				route_start,
+				control_1,
+				control_2,
+				route_end,
+				route_progress
+			);
+			vec2 curve_error = route_point - point;
+			float denominator = (
+				dot(route_derivative, route_derivative)
+				+ dot(curve_error, route_second_derivative)
+			);
+			if (abs(denominator) > 0.0001) {
+				route_progress = clamp(
+					route_progress
+						- dot(curve_error, route_derivative) / denominator,
+					0.0,
+					1.0
+				);
+			}
+		}
+		TRANSFORM[0].z = route_progress;
+		float route_capture_half_height = max(
+			confluence_trunk_half_width(route_end.x) * 1.5,
+			48.0
+		);
+		bool route_complete = (
+			route_progress >= 0.995
+			&& point.x >= route_end.x - 24.0
+			&& abs(point.y - route_end.y) <= route_capture_half_height
+		);
+		if (!route_complete) {
+			vec2 route_point = confluence_bezier_point(
+				route_start,
+				control_1,
+				control_2,
+				route_end,
+				route_progress
+			);
+			vec2 route_derivative = confluence_bezier_tangent(
+				route_start,
+				control_1,
+				control_2,
+				route_end,
+				route_progress
+			);
+			vec2 route_tangent = normalize(
+				route_derivative + vec2(0.000001, 0.0)
+			);
+			vec2 route_normal = vec2(-route_tangent.y, route_tangent.x);
+			float lane_position = CUSTOM.z * 2.0 - 1.0;
+			float inlet_half_width = (
+				max(confluence_source_width(source_index), 0.0) * 0.5
+			);
+			float route_half_width = mix(
+				inlet_half_width,
+				confluence_trunk_half_width(route_end.x),
+				smoothstep(0.0, 1.0, route_progress)
+			);
+			vec2 desired_route_point = (
+				route_point + route_normal * lane_position * route_half_width
+			);
+			float lateral_correction = clamp(
+				dot(desired_route_point - point, route_normal)
+					* max(confluence_curve_follow_strength, 0.1),
+				-speed * 0.55,
+				speed * 0.55
+			);
+			vec2 route_guidance = (
+				route_tangent * speed
+				+ route_normal * (lateral_correction + source_noise * 0.20)
+			);
+			target_velocity = (
+				normalize(route_guidance + vec2(0.000001, 0.0)) * speed
+			);
+		} else {
+			TRANSFORM[0].z = 1.0;
+			float lane_position = CUSTOM.z * 2.0 - 1.0;
+			float trunk_half_width = confluence_trunk_half_width(point.x);
+			float target_y = (
+				clamp(confluence_trunk_center_y_pixels, 0.0, stage_size.y)
+				+ lane_position * trunk_half_width
+			);
+			float centerline_correction = clamp(
+				(target_y - point.y)
+					* max(confluence_curve_follow_strength, 0.1),
+				-speed * 0.70,
+				speed * 0.70
+			);
+			vec2 trunk_guidance = vec2(
+				speed,
+				centerline_correction + source_noise * 0.20
+			);
+			target_velocity = (
+				normalize(trunk_guidance + vec2(0.000001, 0.0)) * speed
+			);
+		}
+	}
 	bool head_flowing = CUSTOM.w < 0.5;
 	bool head_entering = CUSTOM.w > 0.5 && CUSTOM.w < 1.5;
 	bool head_retained = CUSTOM.w > 1.5 && CUSTOM.w < 2.5;

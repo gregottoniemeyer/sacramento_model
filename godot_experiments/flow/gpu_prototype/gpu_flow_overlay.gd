@@ -15,7 +15,6 @@ const LABEL_HATCH_CLEARANCE_PIXELS := 6.0
 const BLUE := Color("4ab0e1")
 const FIELD_GREEN := Color("6fbf73")
 const GOLD := Color("d4af37")
-const WHITE := Color(1.0, 1.0, 1.0, 0.95)
 
 var stage_index: int = 0
 var gate_open: bool = true
@@ -26,6 +25,7 @@ var reservoir_visible: bool = true
 var drain_visible: bool = true
 var obstacle_visible: bool = true
 var show_status_label: bool = true
+var data_center_color: Color = Color("ff0000")
 var interaction_polygons: Array[Dictionary] = []
 var shoreline_obstacles: Array[Dictionary] = []
 
@@ -64,6 +64,14 @@ func set_feature_visibility(
 	reservoir_visible = show_reservoir
 	drain_visible = show_drains
 	obstacle_visible = show_obstacles
+	queue_redraw()
+
+
+func set_data_center_color(value: Color) -> void:
+	var next_color := Color(value.r, value.g, value.b, 1.0)
+	if data_center_color.is_equal_approx(next_color):
+		return
+	data_center_color = next_color
 	queue_redraw()
 
 
@@ -205,14 +213,39 @@ func _draw_hatched_rect(
 	while x <= rectangle.end.x + step:
 		var start := Vector2(x, rectangle.end.y)
 		var finish := Vector2(x + rectangle.size.y, rectangle.position.y)
-		_draw_capped_line_around_label(
+		# Clip the fixed global hatch lattice to the live rectangle. As an
+		# extractor widens, existing diagonals extend at its edge instead of
+		# drawing outside the region or swimming with the animated bounds.
+		var clipped_segment := _clipped_segment_to_rect(
 			start,
 			finish,
+			rectangle,
+		)
+		if clipped_segment.size() != 2:
+			x += step
+			continue
+		_draw_capped_line_around_label(
+			clipped_segment[0],
+			clipped_segment[1],
 			hatch_color,
 			HATCH_LINE_WIDTH_PIXELS,
 			label_text_rect,
 		)
 		x += step
+
+
+func _clipped_segment_to_rect(
+	start: Vector2,
+	finish: Vector2,
+	rectangle: Rect2,
+) -> PackedVector2Array:
+	var interval := _segment_rect_interval(start, finish, rectangle)
+	if interval.x < 0.0:
+		return PackedVector2Array()
+	return PackedVector2Array([
+		start.lerp(finish, interval.x),
+		start.lerp(finish, interval.y),
+	])
 
 
 func _draw_capped_line_around_label(
@@ -288,7 +321,7 @@ func _polygon_bounds(vertices: PackedVector2Array) -> Rect2:
 func _geometry_color(visual_kind: String, mode: String) -> Color:
 	match visual_kind:
 		"data_center":
-			return WHITE
+			return data_center_color
 		"field":
 			return FIELD_GREEN
 		"water_project":
