@@ -1,0 +1,9 @@
+{
+  "additionalFiles": "",
+  "compiler.optimization_flags": "-Os",
+  "customBuildProperties": "build.warn_data_percentage=75",
+  "fqbn": "esp32:esp32:esp32",
+  "hardwareFolders": "/Users/gregniemeyer/Library/Arduino15/packages",
+  "otherLibrariesFolders": "/Users/gregniemeyer/Documents/Arduino/libraries",
+  "sketchLocation": "/Users/gregniemeyer/Documents/art/Water Council/code/telemetry/chair-occupancy-sensor/firmware/receiver_scheduled"
+}

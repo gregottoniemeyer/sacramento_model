@@ -5,6 +5,8 @@ set -uo pipefail
 
 TELEMETRY_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 LIVE_BUFFER="${WATER_COUNCIL_CHAIR_LOG:-$TELEMETRY_DIR/motion_log.txt}"
+BRIDGE="$TELEMETRY_DIR/serial_schedule_bridge.py"
+BRIDGE_LOG="$TELEMETRY_DIR/schedule_bridge.log"
 BAUD=921600
 STALE_S=15
 
@@ -12,10 +14,14 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] capture: $*"; }
 
 if [[ -f "$LIVE_BUFFER" ]]; then
   age=$(( $(date +%s) - $(stat -f %m "$LIVE_BUFFER") ))
-  if (( age < STALE_S )); then
+  if (( age < STALE_S )) && pgrep -f "$BRIDGE" >/dev/null; then
     exit 0
   fi
-  log "live buffer is ${age}s stale, restarting"
+  if (( age < STALE_S )); then
+    log "upgrading live serial capture to the .11 clock bridge"
+  else
+    log "live buffer is ${age}s stale, restarting"
+  fi
 else
   log "no live buffer yet, starting"
 fi
@@ -27,6 +33,7 @@ if [[ -z "$PORT" ]]; then
   exit 1
 fi
 
+pkill -f "$BRIDGE" 2>/dev/null || true
 pkill -f "cat <&3" 2>/dev/null || true
 for pid in $(pgrep -x cat 2>/dev/null); do
   if lsof -p "$pid" 2>/dev/null | grep -q "motion_log.txt"; then
@@ -37,8 +44,14 @@ done
 # This file is an inter-process live buffer, not a historical sensor log.
 # Discard everything from the previous capture before opening the receiver.
 : > "$LIVE_BUFFER"
-nohup bash -c "exec 3<>'$PORT'; stty -f /dev/fd/3 $BAUD raw; exec cat <&3 >> '$LIVE_BUFFER'" \
-  >/dev/null 2>&1 &
+nohup /usr/bin/python3 -u "$BRIDGE" \
+  --port "$PORT" \
+  --log "$LIVE_BUFFER" \
+  --baud "$BAUD" \
+  --timezone America/Los_Angeles \
+  --open-hour 9 \
+  --close-hour 21 \
+  >> "$BRIDGE_LOG" 2>&1 &
 disown
 
 sleep 3

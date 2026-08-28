@@ -89,6 +89,42 @@ class ChairModelTests(unittest.TestCase):
         source.lock = controller.threading.Lock()
         return source
 
+    def test_gallery_clock_line_is_parsed_for_chair_state(self):
+        self.assertEqual(
+            {
+                "fmt": "gallery_clock",
+                "state": "OPEN",
+                "seconds_until_open": 0,
+            },
+            controller.parse("Gallery clock: OPEN\n"),
+        )
+        self.assertEqual(
+            {
+                "fmt": "gallery_clock",
+                "state": "CLOSED",
+                "seconds_until_open": 43200,
+            },
+            controller.parse("Gallery clock: CLOSED until open:43200s\n"),
+        )
+
+    def test_gallery_clock_fails_unknown_when_updates_stop(self):
+        source = self.sensor_source_without_reader()
+        source.gallery_clock = "OPEN"
+        source.gallery_clock_updated = 10.0
+        source.poll(10.0 + controller.GALLERY_CLOCK_STALE_S + 0.01)
+        self.assertEqual("UNKNOWN", source.gallery_clock)
+        self.assertIsNone(source.gallery_clock_seconds_until_open)
+
+    def test_power_save_heartbeat_gap_does_not_mark_chair_dormant(self):
+        source = self.sensor_source_without_reader()
+        source._ingest_summary_packet(1, 0, 0, 10.0)
+
+        source.poll(20.0)
+        self.assertNotIn(1, source.stale)
+
+        source.poll(10.0 + controller.STALE_S + 0.01)
+        self.assertIn(1, source.stale)
+
     def test_spare_sensor_eight_replaces_logical_chair_three(self):
         self.assertEqual(3, controller.logical_chair(8))
         self.assertIsNone(controller.logical_chair(3))

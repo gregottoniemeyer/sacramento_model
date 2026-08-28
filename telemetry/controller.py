@@ -29,10 +29,13 @@ INSTALL_DIR = Path(__file__).resolve().parent
 LOG = Path(os.environ.get("WATER_COUNCIL_CHAIR_LOG", INSTALL_DIR / "motion_log.txt"))
 UDP_PORT = 5006
 HZ = 60
-STALE_S = 3.0
+# Power-saving senders emit a validation heartbeat every 10 seconds. Leave
+# enough margin for radio and scheduling jitter before labeling one dormant.
+STALE_S = 15.0
 NUM_CHAIRS = 7
 WATERSHED_CHAIR = 7
 MAX_LIVE_BACKLOG_BYTES = 32 * 1024
+GALLERY_CLOCK_STALE_S = 15.0
 
 # Receiver slot 8 is currently installed as the physical replacement for
 # logical chair 3. Keep this mapping explicit so a stray packet from the
@@ -78,6 +81,9 @@ V3_RE = re.compile(_COMMON + _STATS +
 V2_RE = re.compile(_COMMON + _STATS + _TAIL)
 V1_RE = re.compile(_COMMON + r"\s+Rssi:(-?\d+)")
 BAD_RE = re.compile(r"Chair:(\d+)\s+BAD PACKET len:(\d+)")
+GALLERY_CLOCK_RE = re.compile(
+    r"Gallery clock:\s+(OPEN|CLOSED)(?:\s+until open:(\d+)s)?"
+)
 
 
 def logical_chair(sensor_slot):
@@ -87,6 +93,14 @@ def logical_chair(sensor_slot):
 
 def parse(line):
     """One serial line to a dict, or None."""
+    m = GALLERY_CLOCK_RE.search(line)
+    if m:
+        return {
+            "fmt": "gallery_clock",
+            "state": m.group(1),
+            "seconds_until_open": int(m.group(2) or 0),
+        }
+
     m = BAD_RE.search(line)
     if m:
         return dict(chair=int(m.group(1)), fmt="bad", length=int(m.group(2)))
@@ -247,6 +261,9 @@ class Source:
         # Diagnostics for chair_state_monitor.py. The artwork ignores these.
         self.temp_c = [None] * NUM_CHAIRS
         self.vote = [0.0] * NUM_CHAIRS
+        self.gallery_clock = "UNKNOWN"
+        self.gallery_clock_seconds_until_open = None
+        self.gallery_clock_updated = None
 
     def _mark(self, idx, now_occupied):
         was = self.chairs[idx]
@@ -341,7 +358,17 @@ class SensorSource(Source):
     def _read(self):
         for line in follow(self.log):
             pkt = parse(line)
-            if pkt is None or pkt.get("fmt") != "sum":
+            if pkt is None:
+                continue
+            if pkt.get("fmt") == "gallery_clock":
+                with self.lock:
+                    self.gallery_clock = pkt["state"]
+                    self.gallery_clock_seconds_until_open = pkt[
+                        "seconds_until_open"
+                    ]
+                    self.gallery_clock_updated = time.time()
+                continue
+            if pkt.get("fmt") != "sum":
                 continue
             c = logical_chair(pkt["chair"])
             if c is None:
@@ -359,6 +386,12 @@ class SensorSource(Source):
     def poll(self, now=None):
         now = time.time() if now is None else float(now)
         with self.lock:
+            if (
+                self.gallery_clock_updated is None
+                or now - self.gallery_clock_updated > GALLERY_CLOCK_STALE_S
+            ):
+                self.gallery_clock = "UNKNOWN"
+                self.gallery_clock_seconds_until_open = None
             self.stale = []
             for c in range(1, NUM_CHAIRS + 1):
                 model = self.models[c]
@@ -453,6 +486,10 @@ def main():
                     "stale": list(src.stale),
                     "temp_c": list(src.temp_c),
                     "vote": list(src.vote),
+                    "gallery_clock": src.gallery_clock,
+                    "gallery_clock_seconds_until_open": (
+                        src.gallery_clock_seconds_until_open
+                    ),
                     "source": args.source,
                     "timestamp": now,
                     **params,

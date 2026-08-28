@@ -3,7 +3,7 @@
 This copy is installed on `196.168.50.11` at:
 
 ```text
-/Users/francescospagnolo/Documents/watercouncil/code/telemetry
+/Users/watershed/Documents/watercouncil/code/telemetry
 ```
 
 Because macOS blocks background LaunchAgents from executing scripts inside a
@@ -14,9 +14,12 @@ live `motion_log.txt` and processes.
 
 ## Runtime chain
 
-1. The USB ESP32 receiver writes raw serial lines to the bounded live buffer
-   `telemetry/motion_log.txt`. Existing or replaced file contents are never
-   replayed, and the keep-alive clears the buffer above 1 MiB.
+1. `telemetry/serial_schedule_bridge.py` owns the USB ESP32 receiver's one
+   full-duplex serial connection. It writes raw receiver lines to the bounded
+   `telemetry/motion_log.txt` live buffer and sends `.11`'s local 9 a.m.–9 p.m.
+   gallery state back to schedule-aware receiver firmware every five seconds.
+   Existing or replaced file contents are never replayed, and the keep-alive
+   clears the buffer above 1 MiB.
 2. `telemetry/controller.py` treats a major-motion peak as a 30-second interval
    for chairs 1-6 and a 60-second interval for AI Watershed chair 7; later
    major motion renews that chair's complete interval.
@@ -28,6 +31,9 @@ live `motion_log.txt` and processes.
 5. Occupied chairs become the absolute active Godot regime set on UDP 5005.
 6. The optional diagnostic publisher uses UDP 5006, so it cannot collide with
    Godot. Run `python3 chair_state_monitor.py` to view it.
+7. The diagnostic JSON exposes `gallery_clock` as `OPEN`, `CLOSED`, or
+   `UNKNOWN`, plus `gallery_clock_seconds_until_open`. It becomes `UNKNOWN`
+   after 15 seconds without a receiver clock acknowledgement.
 
 The fixed artwork mapping is:
 
@@ -47,8 +53,9 @@ connected to the isolated fleet switch.
 
 `~/Library/LaunchAgents/com.watercouncil.telemetry.plist` runs
 `chair-occupancy-sensor/tools/keep_alive.sh` at login and every 30 seconds. It
-repairs the serial capture and starts both the diagnostic publisher and Godot
-chair bridge if either is absent.
+repairs the serial/clock bridge and starts both the diagnostic publisher and
+Godot chair bridge if either is absent. If the bridge or its clock messages are
+lost, the receiver's schedule expires and sensors fail awake.
 
 The repository copy of the job is
 `deployment/com.watercouncil.telemetry.plist`.
@@ -59,6 +66,7 @@ Useful logs:
 telemetry/keep_alive.log
 telemetry/controller.log
 telemetry/godot_chairs.log
+telemetry/schedule_bridge.log
 ```
 
 ## USB drivers

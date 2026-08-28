@@ -25,7 +25,7 @@ history and reasoning are in [`development/ARCHIVE.md`](development/ARCHIVE.md).
 ## Seeing which chairs are occupied
 
 ```bash
-python3 chair_state_monitor.py
+python3 telemetry/chair_state_monitor.py
 ```
 
 Shows all seven chairs live: whether each one reads occupied, its temperature,
@@ -122,7 +122,7 @@ chair-occupancy-sensor/tools/start_capture.sh
 
 ## Nothing downstream is reacting
 
-Run `python3 chair_state_monitor.py`. If it shows the correct chair states then
+Run `python3 telemetry/chair_state_monitor.py`. If it shows the correct chair states then
 this system is working and the problem is in whatever consumes the UDP feed.
 
 ---
@@ -286,7 +286,7 @@ occupied.
 | `ring_alpha` | 0.0-1.0, same derivation. Consumer-defined meaning |
 | `regime` | index of the **most recently occupied** chair, or -1 if none |
 | `regime_name` | the label for that index from `REGIMES`, or `"None"` |
-| `stale` | chairs silent over 3s: flat battery or switched off |
+| `stale` | chairs silent over 15s: flat battery or switched off |
 | `source` | `"sensors"` or `"keyboard"`, so tests are never mistaken for real |
 | `temp_c` | per chair, degrees C. Diagnostic only |
 | `vote` | per chair, 0.0-1.0, the model's own confidence. Diagnostic only |

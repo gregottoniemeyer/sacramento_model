@@ -11,7 +11,11 @@ MAX_LIVE_BUFFER_BYTES=$((1024 * 1024))
 PYTHON="$APP_DIR/venv/bin/python"
 [[ -x "$PYTHON" ]] || PYTHON=/usr/bin/python3
 
-"$APP_DIR/tools/start_capture.sh" || true
+if ! "$APP_DIR/tools/start_capture.sh"; then
+  # Without a serial capture there is no chair state to publish or bridge.
+  # Exit cleanly; the LaunchAgent will retry after its configured interval.
+  exit 0
+fi
 
 # Keep at most a short rolling buffer. Readers detect the truncation and jump
 # to the new live end, so discarded sensor history can never trigger Godot.
@@ -40,3 +44,13 @@ if ! pgrep -f "$GODOT_CONTROLLER chairs$" >/dev/null; then
   nohup /usr/bin/python3 -u "$GODOT_CONTROLLER" chairs \
     > "$TELEMETRY_DIR/godot_chairs.log" 2>&1 < /dev/null &
 fi
+
+# Remain alive as the LaunchAgent's foreground process.  launchd may reap
+# background children when their parent job exits, even when they were started
+# with nohup.  Periodically checking capture also gives us a bounded recovery
+# time if the USB receiver is unplugged or stops producing packets.
+while sleep 10; do
+  if ! "$APP_DIR/tools/start_capture.sh"; then
+    exit 0
+  fi
+done
